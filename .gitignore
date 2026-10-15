@@ -1,0 +1,16 @@
+# Gradle
+.gradle/
+build/
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Atlas Local Databases and Artifacts
+*.db
+*.db-wal
+*.db-shm
+.atlas/
+artifacts/
+dist/

@@ -1,0 +1,5 @@
+headers = sqlite3.h
+headerFilter = sqlite3.h
+package = csqlite
+compilerOpts = -I/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include
+linkerOpts = -lsqlite3

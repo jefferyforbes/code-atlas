@@ -1,0 +1,59 @@
+name: CI & Release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Zulu)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v3
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Run Native Unit Tests
+        run: ./gradlew macosArm64Test --no-daemon
+
+      - name: Build Release Standalone Binary
+        run: ./gradlew linkReleaseExecutableMacosArm64 --no-daemon
+
+      - name: Verify Binary Execution & Latency
+        run: |
+          ./build/bin/macosArm64/releaseExecutable/atlas.kexe --help
+          time ./build/bin/macosArm64/releaseExecutable/atlas.kexe --help
+
+      - name: Package Release Binary
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          mkdir -p release-dist
+          cp build/bin/macosArm64/releaseExecutable/atlas.kexe release-dist/atlas
+          chmod +x release-dist/atlas
+          cd release-dist
+          shasum -a 256 atlas > atlas.sha256
+          tar -czvf atlas-macos-arm64.tar.gz atlas atlas.sha256
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-dist/atlas-macos-arm64.tar.gz
+            release-dist/atlas.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: true
