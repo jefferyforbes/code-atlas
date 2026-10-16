@@ -25,10 +25,14 @@ data class FigmaSpatialBounds(
 
     companion object {
         fun fromRect(x: Double, y: Double, width: Double, height: Double): FigmaSpatialBounds {
-            val minX = minOf(x, x + width)
-            val maxX = maxOf(x, x + width)
-            val minY = minOf(y, y + height)
-            val maxY = maxOf(y, y + height)
+            val safeX = if (x.isNaN() || x.isInfinite()) 0.0 else x
+            val safeY = if (y.isNaN() || y.isInfinite()) 0.0 else y
+            val safeW = if (width.isNaN() || width.isInfinite()) 0.0 else width
+            val safeH = if (height.isNaN() || height.isInfinite()) 0.0 else height
+            val minX = minOf(safeX, safeX + safeW)
+            val maxX = maxOf(safeX, safeX + safeW)
+            val minY = minOf(safeY, safeY + safeH)
+            val maxY = maxOf(safeY, safeY + safeH)
             return FigmaSpatialBounds(minX, maxX, minY, maxY)
         }
     }

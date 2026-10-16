@@ -565,4 +565,299 @@ class FigmaStoreTest {
         val callers = store.queryFigmaCallers(fileKey, "MissingComponent")
         assertTrue(callers.isEmpty())
     }
+
+    @Test
+    fun testRecursiveCallersWithDepth() = withTempStore { store ->
+        val fileKey = "callers_recursive_file"
+
+        val cmpButton = FigmaNode(
+            nodeId = "cmp:btn",
+            fileKey = fileKey,
+            pageName = "DS",
+            name = "Button",
+            nodeType = "COMPONENT"
+        )
+        val instHeaderBtn = FigmaNode(
+            nodeId = "inst:hdr_btn",
+            fileKey = fileKey,
+            pageName = "DS",
+            name = "HeaderButton",
+            nodeType = "INSTANCE",
+            parentId = "cmp:header"
+        )
+        val cmpHeader = FigmaNode(
+            nodeId = "cmp:header",
+            fileKey = fileKey,
+            pageName = "DS",
+            name = "HeaderComponent",
+            nodeType = "COMPONENT"
+        )
+        val instScreenHeader = FigmaNode(
+            nodeId = "inst:screen_hdr",
+            fileKey = fileKey,
+            pageName = "Flows",
+            name = "ScreenHeader",
+            nodeType = "INSTANCE",
+            parentId = "screen_1"
+        )
+        val frameScreen1 = FigmaNode(
+            nodeId = "screen_1",
+            fileKey = fileKey,
+            pageName = "Flows",
+            name = "HomeScreen",
+            nodeType = "FRAME"
+        )
+
+        store.insertFigmaNodes(fileKey, listOf(cmpButton, instHeaderBtn, cmpHeader, instScreenHeader, frameScreen1))
+
+        val edge1 = FigmaEdge("e_call_1", fileKey, "inst:hdr_btn", "cmp:btn", "INSTANTIATES")
+        val edge2 = FigmaEdge("e_call_2", fileKey, "inst:screen_hdr", "cmp:header", "INSTANTIATES")
+        store.insertFigmaEdges(fileKey, listOf(edge1, edge2))
+
+        // Depth 1: only direct caller HeaderButton
+        val depth1Callers = store.queryFigmaCallers(fileKey, "Button", depth = 1)
+        assertEquals(1, depth1Callers.size)
+        assertEquals("inst:hdr_btn", depth1Callers[0].nodeId)
+
+        // Depth 2: both HeaderButton (hop 1) and ScreenHeader (hop 2)
+        val depth2Callers = store.queryFigmaCallers(fileKey, "Button", depth = 2)
+        assertEquals(2, depth2Callers.size)
+        val depth2Ids = depth2Callers.map { it.nodeId }
+        assertEquals("inst:hdr_btn", depth2Ids[0])
+        assertEquals("inst:screen_hdr", depth2Ids[1])
+
+        // Query by nodeId
+        val depth2ById = store.queryFigmaCallers(fileKey, "cmp:btn", depth = 2)
+        assertEquals(2, depth2ById.size)
+
+        // Cycle test: Add edge making Button instantiate ScreenHeader
+        val cycleEdge = FigmaEdge("e_cycle", fileKey, "cmp:btn", "inst:screen_hdr", "INSTANTIATES")
+        store.insertFigmaEdges(fileKey, listOf(cycleEdge))
+
+        // Must terminate cleanly with cycle protection
+        val callersWithCycle = store.queryFigmaCallers(fileKey, "Button", depth = 5)
+        assertTrue(callersWithCycle.isNotEmpty())
+        val callerIdsSet = callersWithCycle.map { it.nodeId }.toSet()
+        assertEquals(callersWithCycle.size, callerIdsSet.size)
+    }
+
+    @Test
+    fun testCircularVariableAliasDetection() = withTempStore { store ->
+        val fileKey = "circular_tokens_file"
+
+        // Circular alias: A -> B -> A
+        val varA = FigmaVariable(
+            variableId = "var:circ_a",
+            fileKey = fileKey,
+            collectionName = "Tokens",
+            name = "token/a",
+            resolvedType = "COLOR",
+            isAlias = true,
+            aliasedVariableId = "var:circ_b"
+        )
+        val varB = FigmaVariable(
+            variableId = "var:circ_b",
+            fileKey = fileKey,
+            collectionName = "Tokens",
+            name = "token/b",
+            resolvedType = "COLOR",
+            isAlias = true,
+            aliasedVariableId = "var:circ_a"
+        )
+
+        store.insertFigmaVariables(fileKey, listOf(varA, varB))
+
+        // Must terminate cleanly without infinite loop and return each variable once
+        val impact = store.resolveVariableAliasImpact(fileKey, "var:circ_a", depth = 10)
+        assertEquals(2, impact.size)
+        val impactIds = impact.map { it.variableId }.toSet()
+        assertTrue(impactIds.contains("var:circ_a"))
+        assertTrue(impactIds.contains("var:circ_b"))
+
+        // Diamond alias graph: root -> left, root -> right, left -> bottom
+        val varRoot = FigmaVariable("v:root", fileKey, "Col", "root", "FLOAT")
+        val varLeft = FigmaVariable("v:left", fileKey, "Col", "left", "FLOAT", isAlias = true, aliasedVariableId = "v:root")
+        val varRight = FigmaVariable("v:right", fileKey, "Col", "right", "FLOAT", isAlias = true, aliasedVariableId = "v:root")
+        val varBottom = FigmaVariable("v:bottom", fileKey, "Col", "bottom", "FLOAT", isAlias = true, aliasedVariableId = "v:left")
+        store.insertFigmaVariables(fileKey, listOf(varRoot, varLeft, varRight, varBottom))
+
+        val diamondImpact = store.resolveVariableAliasImpact(fileKey, "v:root")
+        assertEquals(4, diamondImpact.size)
+        val uniqueIds = diamondImpact.map { it.variableId }.toSet()
+        assertEquals(4, uniqueIds.size)
+    }
+
+    @Test
+    fun testVariableAliasByNameAndBinding() = withTempStore { store ->
+        val fileKey = "name_alias_file"
+
+        // Primitive token referenced by NAME in alias
+        val varPrimitive = FigmaVariable(
+            variableId = "var:prim_1",
+            fileKey = fileKey,
+            collectionName = "Primitives",
+            name = "neutral/300",
+            resolvedType = "COLOR",
+            modesJson = "{\"Value\": \"#CCCCCC\"}"
+        )
+        val varSemantic = FigmaVariable(
+            variableId = "var:sem_1",
+            fileKey = fileKey,
+            collectionName = "Semantic",
+            name = "border/default",
+            resolvedType = "COLOR",
+            isAlias = true,
+            aliasedVariableId = "neutral/300"
+        )
+
+        store.insertFigmaVariables(fileKey, listOf(varPrimitive, varSemantic))
+
+        val impact = store.resolveVariableAliasImpact(fileKey, "neutral/300")
+        assertEquals(2, impact.size)
+        val names = impact.map { it.name }
+        assertTrue(names.contains("neutral/300"))
+        assertTrue(names.contains("border/default"))
+
+        // Node bound by name
+        val cardNode = FigmaNode(
+            nodeId = "card_1",
+            fileKey = fileKey,
+            pageName = "P1",
+            name = "Card",
+            nodeType = "FRAME"
+        )
+        store.insertFigmaNodes(fileKey, listOf(cardNode))
+
+        val edgeByName = FigmaEdge("e_bound_name", fileKey, "card_1", "border/default", "BINDS_VARIABLE")
+        store.insertFigmaEdges(fileKey, listOf(edgeByName))
+
+        val boundNodes = store.queryNodesBoundToVariable(fileKey, "var:sem_1")
+        assertEquals(1, boundNodes.size)
+        assertEquals("card_1", boundNodes[0].nodeId)
+    }
+
+    @Test
+    fun testCrossFileIsolation() = withTempStore { store ->
+        val fileA = "file_alpha"
+        val fileB = "file_beta"
+
+        store.insertFigmaDocument(FigmaDocument(fileA, "Alpha Doc"))
+        store.insertFigmaDocument(FigmaDocument(fileB, "Beta Doc"))
+
+        // Identical local nodeId in both files
+        val nodeA = FigmaNode(
+            nodeId = "0:1",
+            fileKey = fileA,
+            pageName = "Page Alpha",
+            name = "AlphaRoot",
+            nodeType = "CANVAS",
+            canvasX = 10.0,
+            canvasY = 10.0,
+            width = 100.0,
+            height = 100.0
+        )
+        val nodeB = FigmaNode(
+            nodeId = "0:1",
+            fileKey = fileB,
+            pageName = "Page Beta",
+            name = "BetaRoot",
+            nodeType = "CANVAS",
+            canvasX = 500.0,
+            canvasY = 500.0,
+            width = 200.0,
+            height = 200.0
+        )
+
+        store.insertFigmaNodes(fileA, listOf(nodeA))
+        store.insertFigmaNodes(fileB, listOf(nodeB))
+
+        // Verify neither overwrote the other
+        val queryA = store.queryFigmaNodeById(fileA, "0:1")
+        assertNotNull(queryA)
+        assertEquals("AlphaRoot", queryA.name)
+        assertEquals(10.0, queryA.canvasX)
+
+        val queryB = store.queryFigmaNodeById(fileB, "0:1")
+        assertNotNull(queryB)
+        assertEquals("BetaRoot", queryB.name)
+        assertEquals(500.0, queryB.canvasX)
+
+        // Identical variableId in both files
+        val varA = FigmaVariable("var:primary", fileA, "Primitives", "color/alpha", "COLOR")
+        val varB = FigmaVariable("var:primary", fileB, "Primitives", "color/beta", "COLOR")
+        store.insertFigmaVariables(fileA, listOf(varA))
+        store.insertFigmaVariables(fileB, listOf(varB))
+
+        assertEquals("color/alpha", store.queryFigmaVariableById(fileA, "var:primary")?.name)
+        assertEquals("color/beta", store.queryFigmaVariableById(fileB, "var:primary")?.name)
+
+        // Deleting fileA purges fileA but leaves fileB intact
+        store.deleteFigmaDocument(fileA)
+        assertNull(store.getFigmaDocument(fileA))
+        assertNull(store.queryFigmaNodeById(fileA, "0:1"))
+        assertNull(store.queryFigmaVariableById(fileA, "var:primary"))
+
+        assertNotNull(store.getFigmaDocument(fileB))
+        assertNotNull(store.queryFigmaNodeById(fileB, "0:1"))
+        assertNotNull(store.queryFigmaVariableById(fileB, "var:primary"))
+    }
+
+    @Test
+    fun testNaNAndInfinityCoordinateSanitization() = withTempStore { store ->
+        val fileKey = "nan_test_file"
+
+        val malformedNode = FigmaNode(
+            nodeId = "nan_node",
+            fileKey = fileKey,
+            pageName = "Canvas",
+            name = "MalformedGeometryNode",
+            nodeType = "FRAME",
+            canvasX = Double.NaN,
+            canvasY = Double.POSITIVE_INFINITY,
+            width = Double.NEGATIVE_INFINITY,
+            height = Double.NaN
+        )
+
+        store.insertFigmaNodes(fileKey, listOf(malformedNode))
+
+        val retrieved = store.queryFigmaNodeById(fileKey, "nan_node")
+        assertNotNull(retrieved)
+        assertEquals("nan_node", retrieved.nodeId)
+
+        val results = store.queryFigmaSpatialIntersection(fileKey, Double.NaN, 100.0, 0.0, Double.POSITIVE_INFINITY)
+        assertNotNull(results)
+    }
+
+    @Test
+    fun testLargeBatchInsertionPerformance() = withTempStore { store ->
+        val fileKey = "batch_file"
+        val batchSize = 2000
+        val nodes = (1..batchSize).map { i ->
+            FigmaNode(
+                nodeId = "batch_node_$i",
+                fileKey = fileKey,
+                pageName = "BatchPage",
+                name = "Item_$i",
+                nodeType = "FRAME",
+                canvasX = (i % 50) * 100.0,
+                canvasY = (i / 50) * 100.0,
+                width = 80.0,
+                height = 80.0
+            )
+        }
+
+        store.insertFigmaNodes(fileKey, nodes)
+
+        val quadrantHits = store.queryFigmaSpatialIntersection(
+            fileKey,
+            minX = 0.0,
+            maxX = 200.0,
+            minY = 0.0,
+            maxY = 200.0
+        )
+        assertTrue(quadrantHits.isNotEmpty())
+
+        val byType = store.queryFigmaNodesByType(fileKey, "FRAME")
+        assertEquals(batchSize, byType.size)
+    }
 }

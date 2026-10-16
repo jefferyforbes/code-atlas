@@ -109,7 +109,7 @@ class SqliteGraphStore(val dbPath: String) {
 
             CREATE TABLE IF NOT EXISTS figma_nodes (
                 rowid_pk INTEGER PRIMARY KEY AUTOINCREMENT,
-                node_id TEXT NOT NULL UNIQUE,
+                node_id TEXT NOT NULL,
                 file_key TEXT NOT NULL,
                 page_name TEXT NOT NULL,
                 section_id TEXT,
@@ -136,7 +136,8 @@ class SqliteGraphStore(val dbPath: String) {
                 unbound_fill INTEGER NOT NULL DEFAULT 0,
                 unbound_stroke INTEGER NOT NULL DEFAULT 0,
                 wcag_contrast REAL,
-                semiotic_layer TEXT NOT NULL DEFAULT 'syntactic'
+                semiotic_layer TEXT NOT NULL DEFAULT 'syntactic',
+                UNIQUE (file_key, node_id)
             );
             CREATE INDEX IF NOT EXISTS idx_fnodes_file ON figma_nodes(file_key);
             CREATE INDEX IF NOT EXISTS idx_fnodes_name ON figma_nodes(file_key, name);
@@ -150,7 +151,7 @@ class SqliteGraphStore(val dbPath: String) {
             );
 
             CREATE TABLE IF NOT EXISTS figma_variables (
-                variable_id TEXT PRIMARY KEY,
+                variable_id TEXT NOT NULL,
                 file_key TEXT NOT NULL,
                 collection_name TEXT NOT NULL,
                 name TEXT NOT NULL,
@@ -159,19 +160,21 @@ class SqliteGraphStore(val dbPath: String) {
                 aliased_variable_id TEXT,
                 modes_json TEXT NOT NULL DEFAULT '{}',
                 code_syntax_compose TEXT,
-                code_syntax_web TEXT
+                code_syntax_web TEXT,
+                PRIMARY KEY (file_key, variable_id)
             );
             CREATE INDEX IF NOT EXISTS idx_fvars_file ON figma_variables(file_key);
             CREATE INDEX IF NOT EXISTS idx_fvars_name ON figma_variables(file_key, name);
             CREATE INDEX IF NOT EXISTS idx_fvars_alias ON figma_variables(aliased_variable_id);
 
             CREATE TABLE IF NOT EXISTS figma_edges (
-                edge_id TEXT PRIMARY KEY,
+                edge_id TEXT NOT NULL,
                 file_key TEXT NOT NULL,
                 source_node_id TEXT NOT NULL,
                 target_node_id TEXT NOT NULL,
                 edge_type TEXT NOT NULL,
-                property_slot TEXT NOT NULL DEFAULT ''
+                property_slot TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (file_key, edge_id)
             );
             CREATE INDEX IF NOT EXISTS idx_fedges_file ON figma_edges(file_key);
             CREATE INDEX IF NOT EXISTS idx_fedges_src ON figma_edges(file_key, source_node_id);
@@ -1204,8 +1207,7 @@ class SqliteGraphStore(val dbPath: String) {
                     is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
                     semiotic_layer
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(node_id) DO UPDATE SET
-                    file_key = excluded.file_key,
+                ON CONFLICT(file_key, node_id) DO UPDATE SET
                     page_name = excluded.page_name,
                     section_id = excluded.section_id,
                     parent_id = excluded.parent_id,
@@ -1259,30 +1261,43 @@ class SqliteGraphStore(val dbPath: String) {
                     nodeStmt.bindString(9, node.sizingHorizontal)
                     nodeStmt.bindString(10, node.sizingVertical)
                     nodeStmt.bindString(11, node.textAutoResize)
-                    nodeStmt.bindDouble(12, node.paddingLeft)
-                    nodeStmt.bindDouble(13, node.paddingRight)
-                    nodeStmt.bindDouble(14, node.paddingTop)
-                    nodeStmt.bindDouble(15, node.paddingBottom)
-                    nodeStmt.bindDouble(16, node.itemSpacing)
-                    nodeStmt.bindDouble(17, node.localX)
-                    nodeStmt.bindDouble(18, node.localY)
-                    nodeStmt.bindDouble(19, node.canvasX)
-                    nodeStmt.bindDouble(20, node.canvasY)
-                    nodeStmt.bindDouble(21, node.width)
-                    nodeStmt.bindDouble(22, node.height)
+                    val pL = if (node.paddingLeft.isNaN() || node.paddingLeft.isInfinite()) 0.0 else node.paddingLeft
+                    val pR = if (node.paddingRight.isNaN() || node.paddingRight.isInfinite()) 0.0 else node.paddingRight
+                    val pT = if (node.paddingTop.isNaN() || node.paddingTop.isInfinite()) 0.0 else node.paddingTop
+                    val pB = if (node.paddingBottom.isNaN() || node.paddingBottom.isInfinite()) 0.0 else node.paddingBottom
+                    val sp = if (node.itemSpacing.isNaN() || node.itemSpacing.isInfinite()) 0.0 else node.itemSpacing
+                    val lX = if (node.localX.isNaN() || node.localX.isInfinite()) 0.0 else node.localX
+                    val lY = if (node.localY.isNaN() || node.localY.isInfinite()) 0.0 else node.localY
+                    val cX = if (node.canvasX.isNaN() || node.canvasX.isInfinite()) 0.0 else node.canvasX
+                    val cY = if (node.canvasY.isNaN() || node.canvasY.isInfinite()) 0.0 else node.canvasY
+                    val w = if (node.width.isNaN() || node.width.isInfinite()) 0.0 else node.width
+                    val h = if (node.height.isNaN() || node.height.isInfinite()) 0.0 else node.height
+                    val safeContrast = node.wcagContrast?.takeUnless { it.isNaN() || it.isInfinite() }
+
+                    nodeStmt.bindDouble(12, pL)
+                    nodeStmt.bindDouble(13, pR)
+                    nodeStmt.bindDouble(14, pT)
+                    nodeStmt.bindDouble(15, pB)
+                    nodeStmt.bindDouble(16, sp)
+                    nodeStmt.bindDouble(17, lX)
+                    nodeStmt.bindDouble(18, lY)
+                    nodeStmt.bindDouble(19, cX)
+                    nodeStmt.bindDouble(20, cY)
+                    nodeStmt.bindDouble(21, w)
+                    nodeStmt.bindDouble(22, h)
                     nodeStmt.bindInt(23, if (node.isInteractive) 1 else 0)
                     nodeStmt.bindInt(24, if (node.hasEmoji) 1 else 0)
                     nodeStmt.bindInt(25, if (node.unboundFill) 1 else 0)
                     nodeStmt.bindInt(26, if (node.unboundStroke) 1 else 0)
-                    if (node.wcagContrast != null) nodeStmt.bindDouble(27, node.wcagContrast) else nodeStmt.bindNull(27)
+                    if (safeContrast != null) nodeStmt.bindDouble(27, safeContrast) else nodeStmt.bindNull(27)
                     nodeStmt.bindString(28, node.semioticLayer)
 
                     if (nodeStmt.step()) {
                         val rowidPk = nodeStmt.columnLong(0)
-                        val minX = minOf(node.canvasX, node.canvasX + node.width)
-                        val maxX = maxOf(node.canvasX, node.canvasX + node.width)
-                        val minY = minOf(node.canvasY, node.canvasY + node.height)
-                        val maxY = maxOf(node.canvasY, node.canvasY + node.height)
+                        val minX = minOf(cX, cX + w)
+                        val maxX = maxOf(cX, cX + w)
+                        val minY = minOf(cY, cY + h)
+                        val maxY = maxOf(cY, cY + h)
 
                         spatialStmt.reset()
                         spatialStmt.clearBindings()
@@ -1388,10 +1403,14 @@ class SqliteGraphStore(val dbPath: String) {
         minY: Double,
         maxY: Double
     ): List<FigmaNode> {
-        val qMinX = minOf(minX, maxX)
-        val qMaxX = maxOf(minX, maxX)
-        val qMinY = minOf(minY, maxY)
-        val qMaxY = maxOf(minY, maxY)
+        val safeMinX = if (minX.isNaN() || minX.isInfinite()) 0.0 else minX
+        val safeMaxX = if (maxX.isNaN() || maxX.isInfinite()) 0.0 else maxX
+        val safeMinY = if (minY.isNaN() || minY.isInfinite()) 0.0 else minY
+        val safeMaxY = if (maxY.isNaN() || maxY.isInfinite()) 0.0 else maxY
+        val qMinX = minOf(safeMinX, safeMaxX)
+        val qMaxX = maxOf(safeMinX, safeMaxX)
+        val qMinY = minOf(safeMinY, safeMaxY)
+        val qMaxY = maxOf(safeMinY, safeMaxY)
 
         val stmt = db.prepare(
             """
@@ -1401,8 +1420,8 @@ class SqliteGraphStore(val dbPath: String) {
                    n.item_spacing, n.local_x, n.local_y, n.canvas_x, n.canvas_y, n.width, n.height,
                    n.is_interactive, n.has_emoji, n.unbound_fill, n.unbound_stroke, n.wcag_contrast,
                    n.semiotic_layer
-            FROM figma_nodes n
-            JOIN figma_spatial_index s ON n.rowid_pk = s.id
+            FROM figma_spatial_index s
+            CROSS JOIN figma_nodes n ON n.rowid_pk = s.id
             WHERE n.file_key = ?
               AND s.max_x >= ? AND s.min_x <= ?
               AND s.max_y >= ? AND s.min_y <= ?
@@ -1592,32 +1611,36 @@ class SqliteGraphStore(val dbPath: String) {
         variableIdOrName: String,
         depth: Int = 10
     ): List<FigmaVariable> {
+        val maxDepth = if (depth < 0) 0 else depth
         val stmt = db.prepare(
             """
             WITH RECURSIVE var_dag(variable_id, file_key, collection_name, name, resolved_type,
-                                   is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web, depth) AS (
+                                   is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web, depth, path) AS (
                 SELECT variable_id, file_key, collection_name, name, resolved_type,
-                       is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web, 0
+                       is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web, 0,
+                       ',' || variable_id || ','
                 FROM figma_variables
                 WHERE file_key = ? AND (variable_id = ? OR name = ?)
                 UNION ALL
                 SELECT v.variable_id, v.file_key, v.collection_name, v.name, v.resolved_type,
-                       v.is_alias, v.aliased_variable_id, v.modes_json, v.code_syntax_compose, v.code_syntax_web, d.depth + 1
+                       v.is_alias, v.aliased_variable_id, v.modes_json, v.code_syntax_compose, v.code_syntax_web, d.depth + 1,
+                       d.path || v.variable_id || ','
                 FROM figma_variables v
-                JOIN var_dag d ON v.aliased_variable_id = d.variable_id
-                WHERE v.file_key = ? AND d.depth < ?
+                JOIN var_dag d ON (v.aliased_variable_id = d.variable_id OR v.aliased_variable_id = d.name)
+                WHERE v.file_key = ? AND d.depth < ? AND instr(d.path, ',' || v.variable_id || ',') = 0
             )
             SELECT variable_id, file_key, collection_name, name, resolved_type,
                    is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web
             FROM var_dag
-            ORDER BY depth, name;
+            GROUP BY variable_id, file_key, collection_name, name, resolved_type, is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web
+            ORDER BY MIN(depth), name;
             """.trimIndent()
         )
         stmt.bindString(1, fileKey)
         stmt.bindString(2, variableIdOrName)
         stmt.bindString(3, variableIdOrName)
         stmt.bindString(4, fileKey)
-        stmt.bindInt(5, depth)
+        stmt.bindInt(5, maxDepth)
 
         val results = mutableListOf<FigmaVariable>()
         try {
@@ -1641,12 +1664,23 @@ class SqliteGraphStore(val dbPath: String) {
                    n.semiotic_layer
             FROM figma_nodes n
             JOIN figma_edges e ON n.node_id = e.source_node_id AND n.file_key = e.file_key
-            WHERE e.file_key = ? AND e.target_node_id = ? AND e.edge_type = 'BINDS_VARIABLE'
+            WHERE e.file_key = ?
+              AND (e.target_node_id = ? OR e.target_node_id IN (
+                  SELECT name FROM figma_variables WHERE file_key = ? AND variable_id = ?
+              ) OR e.target_node_id IN (
+                  SELECT variable_id FROM figma_variables WHERE file_key = ? AND name = ?
+              ))
+              AND e.edge_type = 'BINDS_VARIABLE'
+            GROUP BY n.rowid_pk
             ORDER BY n.name;
             """.trimIndent()
         )
         stmt.bindString(1, fileKey)
         stmt.bindString(2, variableId)
+        stmt.bindString(3, fileKey)
+        stmt.bindString(4, variableId)
+        stmt.bindString(5, fileKey)
+        stmt.bindString(6, variableId)
 
         val results = mutableListOf<FigmaNode>()
         try {
@@ -1691,28 +1725,49 @@ class SqliteGraphStore(val dbPath: String) {
         componentNameOrId: String,
         depth: Int = 2
     ): List<FigmaNode> {
+        val maxDepth = if (depth < 1) 1 else depth
         val stmt = db.prepare(
             """
+            WITH RECURSIVE caller_chain(source_id, target_id, hop, path) AS (
+                SELECT source_node_id, target_node_id, 1, ',' || source_node_id || ','
+                FROM figma_edges
+                WHERE file_key = ?
+                  AND edge_type = 'INSTANTIATES'
+                  AND (target_node_id = ? OR target_node_id IN (
+                      SELECT node_id FROM figma_nodes WHERE file_key = ? AND name = ?
+                  ))
+                UNION
+                SELECT e.source_node_id, e.target_node_id, c.hop + 1, c.path || e.source_node_id || ','
+                FROM figma_edges e
+                JOIN caller_chain c ON (
+                    e.target_node_id = c.source_id
+                    OR e.target_node_id IN (
+                        SELECT parent_id FROM figma_nodes WHERE file_key = ? AND node_id = c.source_id AND parent_id IS NOT NULL
+                    )
+                )
+                WHERE e.file_key = ? AND e.edge_type = 'INSTANTIATES' AND c.hop < ?
+                  AND instr(c.path, ',' || e.source_node_id || ',') = 0
+            )
             SELECT n.rowid_pk, n.node_id, n.file_key, n.page_name, n.section_id, n.parent_id,
                    n.name, n.node_type, n.layout_mode, n.sizing_horizontal, n.sizing_vertical,
                    n.text_auto_resize, n.padding_left, n.padding_right, n.padding_top, n.padding_bottom,
                    n.item_spacing, n.local_x, n.local_y, n.canvas_x, n.canvas_y, n.width, n.height,
                    n.is_interactive, n.has_emoji, n.unbound_fill, n.unbound_stroke, n.wcag_contrast,
                    n.semiotic_layer
-            FROM figma_nodes n
-            JOIN figma_edges e ON n.node_id = e.source_node_id AND n.file_key = e.file_key
-            WHERE e.file_key = ?
-              AND e.edge_type = 'INSTANTIATES'
-              AND (e.target_node_id = ? OR e.target_node_id IN (
-                  SELECT node_id FROM figma_nodes WHERE file_key = ? AND name = ?
-              ))
-            ORDER BY n.name;
+            FROM caller_chain c
+            JOIN figma_nodes n ON n.node_id = c.source_id AND n.file_key = ?
+            GROUP BY n.rowid_pk
+            ORDER BY MIN(c.hop), n.name;
             """.trimIndent()
         )
         stmt.bindString(1, fileKey)
         stmt.bindString(2, componentNameOrId)
         stmt.bindString(3, fileKey)
         stmt.bindString(4, componentNameOrId)
+        stmt.bindString(5, fileKey)
+        stmt.bindString(6, fileKey)
+        stmt.bindInt(7, maxDepth)
+        stmt.bindString(8, fileKey)
 
         val results = mutableListOf<FigmaNode>()
         try {
