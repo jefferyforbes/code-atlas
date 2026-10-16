@@ -98,6 +98,84 @@ class SqliteGraphStore(val dbPath: String) {
                 signature,
                 file_id
             );
+
+            CREATE TABLE IF NOT EXISTS figma_documents (
+                file_key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL DEFAULT '',
+                last_modified TEXT NOT NULL DEFAULT '',
+                thumbnail_url TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS figma_nodes (
+                rowid_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                node_id TEXT NOT NULL UNIQUE,
+                file_key TEXT NOT NULL,
+                page_name TEXT NOT NULL,
+                section_id TEXT,
+                parent_id TEXT,
+                name TEXT NOT NULL,
+                node_type TEXT NOT NULL,
+                layout_mode TEXT NOT NULL DEFAULT 'NONE',
+                sizing_horizontal TEXT NOT NULL DEFAULT 'FIXED',
+                sizing_vertical TEXT NOT NULL DEFAULT 'FIXED',
+                text_auto_resize TEXT NOT NULL DEFAULT 'NONE',
+                padding_left REAL NOT NULL DEFAULT 0.0,
+                padding_right REAL NOT NULL DEFAULT 0.0,
+                padding_top REAL NOT NULL DEFAULT 0.0,
+                padding_bottom REAL NOT NULL DEFAULT 0.0,
+                item_spacing REAL NOT NULL DEFAULT 0.0,
+                local_x REAL NOT NULL DEFAULT 0.0,
+                local_y REAL NOT NULL DEFAULT 0.0,
+                canvas_x REAL NOT NULL DEFAULT 0.0,
+                canvas_y REAL NOT NULL DEFAULT 0.0,
+                width REAL NOT NULL DEFAULT 0.0,
+                height REAL NOT NULL DEFAULT 0.0,
+                is_interactive INTEGER NOT NULL DEFAULT 0,
+                has_emoji INTEGER NOT NULL DEFAULT 0,
+                unbound_fill INTEGER NOT NULL DEFAULT 0,
+                unbound_stroke INTEGER NOT NULL DEFAULT 0,
+                wcag_contrast REAL,
+                semiotic_layer TEXT NOT NULL DEFAULT 'syntactic'
+            );
+            CREATE INDEX IF NOT EXISTS idx_fnodes_file ON figma_nodes(file_key);
+            CREATE INDEX IF NOT EXISTS idx_fnodes_name ON figma_nodes(file_key, name);
+            CREATE INDEX IF NOT EXISTS idx_fnodes_type ON figma_nodes(file_key, node_type);
+            CREATE INDEX IF NOT EXISTS idx_fnodes_parent ON figma_nodes(file_key, parent_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS figma_spatial_index USING rtree(
+                id,
+                min_x, max_x,
+                min_y, max_y
+            );
+
+            CREATE TABLE IF NOT EXISTS figma_variables (
+                variable_id TEXT PRIMARY KEY,
+                file_key TEXT NOT NULL,
+                collection_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                resolved_type TEXT NOT NULL,
+                is_alias INTEGER NOT NULL DEFAULT 0,
+                aliased_variable_id TEXT,
+                modes_json TEXT NOT NULL DEFAULT '{}',
+                code_syntax_compose TEXT,
+                code_syntax_web TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_fvars_file ON figma_variables(file_key);
+            CREATE INDEX IF NOT EXISTS idx_fvars_name ON figma_variables(file_key, name);
+            CREATE INDEX IF NOT EXISTS idx_fvars_alias ON figma_variables(aliased_variable_id);
+
+            CREATE TABLE IF NOT EXISTS figma_edges (
+                edge_id TEXT PRIMARY KEY,
+                file_key TEXT NOT NULL,
+                source_node_id TEXT NOT NULL,
+                target_node_id TEXT NOT NULL,
+                edge_type TEXT NOT NULL,
+                property_slot TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_fedges_file ON figma_edges(file_key);
+            CREATE INDEX IF NOT EXISTS idx_fedges_src ON figma_edges(file_key, source_node_id);
+            CREATE INDEX IF NOT EXISTS idx_fedges_tgt ON figma_edges(file_key, target_node_id);
             """.trimIndent()
         )
     }
@@ -1025,6 +1103,685 @@ class SqliteGraphStore(val dbPath: String) {
             nodes = nodesCount,
             edges = edgesCount,
             provenanceBreakdown = provMap
+        )
+    }
+
+    // ==========================================
+    // Figma Knowledge Graph & Spatial Index
+    // ==========================================
+
+    fun insertFigmaDocument(document: FigmaDocument) {
+        val stmt = db.prepare(
+            """
+            INSERT OR REPLACE INTO figma_documents (
+                file_key, name, version, last_modified, thumbnail_url
+            ) VALUES (?, ?, ?, ?, ?);
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, document.fileKey)
+            stmt.bindString(2, document.name)
+            stmt.bindString(3, document.version)
+            stmt.bindString(4, document.lastModified)
+            stmt.bindString(5, document.thumbnailUrl)
+            stmt.step()
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun getFigmaDocument(fileKey: String): FigmaDocument? {
+        val stmt = db.prepare(
+            """
+            SELECT file_key, name, version, last_modified, thumbnail_url
+            FROM figma_documents WHERE file_key = ?;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        try {
+            if (stmt.step()) {
+                return FigmaDocument(
+                    fileKey = stmt.columnString(0),
+                    name = stmt.columnString(1),
+                    version = stmt.columnString(2),
+                    lastModified = stmt.columnString(3),
+                    thumbnailUrl = stmt.columnString(4)
+                )
+            }
+            return null
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun deleteFigmaDocument(fileKey: String) {
+        db.exec("BEGIN TRANSACTION;")
+        try {
+            val delSpatial = db.prepare("DELETE FROM figma_spatial_index WHERE id IN (SELECT rowid_pk FROM figma_nodes WHERE file_key = ?);")
+            delSpatial.bindString(1, fileKey)
+            delSpatial.step()
+            delSpatial.close()
+
+            val delNodes = db.prepare("DELETE FROM figma_nodes WHERE file_key = ?;")
+            delNodes.bindString(1, fileKey)
+            delNodes.step()
+            delNodes.close()
+
+            val delEdges = db.prepare("DELETE FROM figma_edges WHERE file_key = ?;")
+            delEdges.bindString(1, fileKey)
+            delEdges.step()
+            delEdges.close()
+
+            val delVars = db.prepare("DELETE FROM figma_variables WHERE file_key = ?;")
+            delVars.bindString(1, fileKey)
+            delVars.step()
+            delVars.close()
+
+            val delDoc = db.prepare("DELETE FROM figma_documents WHERE file_key = ?;")
+            delDoc.bindString(1, fileKey)
+            delDoc.step()
+            delDoc.close()
+
+            db.exec("COMMIT;")
+        } catch (e: Throwable) {
+            db.exec("ROLLBACK;")
+            throw e
+        }
+    }
+
+    fun insertFigmaNodes(fileKey: String, nodes: List<FigmaNode>) {
+        if (nodes.isEmpty()) return
+
+        db.exec("BEGIN TRANSACTION;")
+        try {
+            val nodeStmt = db.prepare(
+                """
+                INSERT INTO figma_nodes (
+                    node_id, file_key, page_name, section_id, parent_id, name, node_type,
+                    layout_mode, sizing_horizontal, sizing_vertical, text_auto_resize,
+                    padding_left, padding_right, padding_top, padding_bottom, item_spacing,
+                    local_x, local_y, canvas_x, canvas_y, width, height,
+                    is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
+                    semiotic_layer
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET
+                    file_key = excluded.file_key,
+                    page_name = excluded.page_name,
+                    section_id = excluded.section_id,
+                    parent_id = excluded.parent_id,
+                    name = excluded.name,
+                    node_type = excluded.node_type,
+                    layout_mode = excluded.layout_mode,
+                    sizing_horizontal = excluded.sizing_horizontal,
+                    sizing_vertical = excluded.sizing_vertical,
+                    text_auto_resize = excluded.text_auto_resize,
+                    padding_left = excluded.padding_left,
+                    padding_right = excluded.padding_right,
+                    padding_top = excluded.padding_top,
+                    padding_bottom = excluded.padding_bottom,
+                    item_spacing = excluded.item_spacing,
+                    local_x = excluded.local_x,
+                    local_y = excluded.local_y,
+                    canvas_x = excluded.canvas_x,
+                    canvas_y = excluded.canvas_y,
+                    width = excluded.width,
+                    height = excluded.height,
+                    is_interactive = excluded.is_interactive,
+                    has_emoji = excluded.has_emoji,
+                    unbound_fill = excluded.unbound_fill,
+                    unbound_stroke = excluded.unbound_stroke,
+                    wcag_contrast = excluded.wcag_contrast,
+                    semiotic_layer = excluded.semiotic_layer
+                RETURNING rowid_pk;
+                """.trimIndent()
+            )
+
+            val spatialStmt = db.prepare(
+                """
+                INSERT OR REPLACE INTO figma_spatial_index (id, min_x, max_x, min_y, max_y)
+                VALUES (?, ?, ?, ?, ?);
+                """.trimIndent()
+            )
+
+            try {
+                for (node in nodes) {
+                    val effectiveFileKey = if (node.fileKey.isNotBlank()) node.fileKey else fileKey
+                    nodeStmt.reset()
+                    nodeStmt.clearBindings()
+                    nodeStmt.bindString(1, node.nodeId)
+                    nodeStmt.bindString(2, effectiveFileKey)
+                    nodeStmt.bindString(3, node.pageName)
+                    if (node.sectionId != null) nodeStmt.bindString(4, node.sectionId) else nodeStmt.bindNull(4)
+                    if (node.parentId != null) nodeStmt.bindString(5, node.parentId) else nodeStmt.bindNull(5)
+                    nodeStmt.bindString(6, node.name)
+                    nodeStmt.bindString(7, node.nodeType)
+                    nodeStmt.bindString(8, node.layoutMode)
+                    nodeStmt.bindString(9, node.sizingHorizontal)
+                    nodeStmt.bindString(10, node.sizingVertical)
+                    nodeStmt.bindString(11, node.textAutoResize)
+                    nodeStmt.bindDouble(12, node.paddingLeft)
+                    nodeStmt.bindDouble(13, node.paddingRight)
+                    nodeStmt.bindDouble(14, node.paddingTop)
+                    nodeStmt.bindDouble(15, node.paddingBottom)
+                    nodeStmt.bindDouble(16, node.itemSpacing)
+                    nodeStmt.bindDouble(17, node.localX)
+                    nodeStmt.bindDouble(18, node.localY)
+                    nodeStmt.bindDouble(19, node.canvasX)
+                    nodeStmt.bindDouble(20, node.canvasY)
+                    nodeStmt.bindDouble(21, node.width)
+                    nodeStmt.bindDouble(22, node.height)
+                    nodeStmt.bindInt(23, if (node.isInteractive) 1 else 0)
+                    nodeStmt.bindInt(24, if (node.hasEmoji) 1 else 0)
+                    nodeStmt.bindInt(25, if (node.unboundFill) 1 else 0)
+                    nodeStmt.bindInt(26, if (node.unboundStroke) 1 else 0)
+                    if (node.wcagContrast != null) nodeStmt.bindDouble(27, node.wcagContrast) else nodeStmt.bindNull(27)
+                    nodeStmt.bindString(28, node.semioticLayer)
+
+                    if (nodeStmt.step()) {
+                        val rowidPk = nodeStmt.columnLong(0)
+                        val minX = minOf(node.canvasX, node.canvasX + node.width)
+                        val maxX = maxOf(node.canvasX, node.canvasX + node.width)
+                        val minY = minOf(node.canvasY, node.canvasY + node.height)
+                        val maxY = maxOf(node.canvasY, node.canvasY + node.height)
+
+                        spatialStmt.reset()
+                        spatialStmt.clearBindings()
+                        spatialStmt.bindLong(1, rowidPk)
+                        spatialStmt.bindDouble(2, minX)
+                        spatialStmt.bindDouble(3, maxX)
+                        spatialStmt.bindDouble(4, minY)
+                        spatialStmt.bindDouble(5, maxY)
+                        spatialStmt.step()
+                    }
+                }
+            } finally {
+                nodeStmt.close()
+                spatialStmt.close()
+            }
+
+            db.exec("COMMIT;")
+        } catch (e: Throwable) {
+            db.exec("ROLLBACK;")
+            throw e
+        }
+    }
+
+    fun insertFigmaVariables(fileKey: String, variables: List<FigmaVariable>) {
+        if (variables.isEmpty()) return
+
+        db.exec("BEGIN TRANSACTION;")
+        try {
+            val stmt = db.prepare(
+                """
+                INSERT OR REPLACE INTO figma_variables (
+                    variable_id, file_key, collection_name, name, resolved_type,
+                    is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """.trimIndent()
+            )
+            try {
+                for (v in variables) {
+                    val effectiveFileKey = if (v.fileKey.isNotBlank()) v.fileKey else fileKey
+                    stmt.reset()
+                    stmt.clearBindings()
+                    stmt.bindString(1, v.variableId)
+                    stmt.bindString(2, effectiveFileKey)
+                    stmt.bindString(3, v.collectionName)
+                    stmt.bindString(4, v.name)
+                    stmt.bindString(5, v.resolvedType)
+                    stmt.bindInt(6, if (v.isAlias) 1 else 0)
+                    if (v.aliasedVariableId != null) stmt.bindString(7, v.aliasedVariableId) else stmt.bindNull(7)
+                    stmt.bindString(8, v.modesJson)
+                    if (v.codeSyntaxCompose != null) stmt.bindString(9, v.codeSyntaxCompose) else stmt.bindNull(9)
+                    if (v.codeSyntaxWeb != null) stmt.bindString(10, v.codeSyntaxWeb) else stmt.bindNull(10)
+                    stmt.step()
+                }
+            } finally {
+                stmt.close()
+            }
+            db.exec("COMMIT;")
+        } catch (e: Throwable) {
+            db.exec("ROLLBACK;")
+            throw e
+        }
+    }
+
+    fun insertFigmaEdges(fileKey: String, edges: List<FigmaEdge>) {
+        if (edges.isEmpty()) return
+
+        db.exec("BEGIN TRANSACTION;")
+        try {
+            val stmt = db.prepare(
+                """
+                INSERT OR REPLACE INTO figma_edges (
+                    edge_id, file_key, source_node_id, target_node_id, edge_type, property_slot
+                ) VALUES (?, ?, ?, ?, ?, ?);
+                """.trimIndent()
+            )
+            try {
+                for (edge in edges) {
+                    val effectiveFileKey = if (edge.fileKey.isNotBlank()) edge.fileKey else fileKey
+                    stmt.reset()
+                    stmt.clearBindings()
+                    stmt.bindString(1, edge.edgeId)
+                    stmt.bindString(2, effectiveFileKey)
+                    stmt.bindString(3, edge.sourceNodeId)
+                    stmt.bindString(4, edge.targetNodeId)
+                    stmt.bindString(5, edge.edgeType)
+                    stmt.bindString(6, edge.propertySlot)
+                    stmt.step()
+                }
+            } finally {
+                stmt.close()
+            }
+            db.exec("COMMIT;")
+        } catch (e: Throwable) {
+            db.exec("ROLLBACK;")
+            throw e
+        }
+    }
+
+    fun queryFigmaSpatialIntersection(
+        fileKey: String,
+        minX: Double,
+        maxX: Double,
+        minY: Double,
+        maxY: Double
+    ): List<FigmaNode> {
+        val qMinX = minOf(minX, maxX)
+        val qMaxX = maxOf(minX, maxX)
+        val qMinY = minOf(minY, maxY)
+        val qMaxY = maxOf(minY, maxY)
+
+        val stmt = db.prepare(
+            """
+            SELECT n.rowid_pk, n.node_id, n.file_key, n.page_name, n.section_id, n.parent_id,
+                   n.name, n.node_type, n.layout_mode, n.sizing_horizontal, n.sizing_vertical,
+                   n.text_auto_resize, n.padding_left, n.padding_right, n.padding_top, n.padding_bottom,
+                   n.item_spacing, n.local_x, n.local_y, n.canvas_x, n.canvas_y, n.width, n.height,
+                   n.is_interactive, n.has_emoji, n.unbound_fill, n.unbound_stroke, n.wcag_contrast,
+                   n.semiotic_layer
+            FROM figma_nodes n
+            JOIN figma_spatial_index s ON n.rowid_pk = s.id
+            WHERE n.file_key = ?
+              AND s.max_x >= ? AND s.min_x <= ?
+              AND s.max_y >= ? AND s.min_y <= ?
+            ORDER BY n.canvas_y, n.canvas_x;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindDouble(2, qMinX)
+        stmt.bindDouble(3, qMaxX)
+        stmt.bindDouble(4, qMinY)
+        stmt.bindDouble(5, qMaxY)
+
+        val results = mutableListOf<FigmaNode>()
+        try {
+            while (stmt.step()) {
+                results.add(rowToFigmaNode(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun queryFigmaNodeById(fileKey: String, nodeId: String): FigmaNode? {
+        val stmt = db.prepare(
+            """
+            SELECT rowid_pk, node_id, file_key, page_name, section_id, parent_id,
+                   name, node_type, layout_mode, sizing_horizontal, sizing_vertical,
+                   text_auto_resize, padding_left, padding_right, padding_top, padding_bottom,
+                   item_spacing, local_x, local_y, canvas_x, canvas_y, width, height,
+                   is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
+                   semiotic_layer
+            FROM figma_nodes
+            WHERE file_key = ? AND node_id = ?;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, nodeId)
+        try {
+            if (stmt.step()) {
+                return rowToFigmaNode(stmt)
+            }
+            return null
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun queryFigmaNodesByName(fileKey: String, name: String): List<FigmaNode> {
+        val stmt = db.prepare(
+            """
+            SELECT rowid_pk, node_id, file_key, page_name, section_id, parent_id,
+                   name, node_type, layout_mode, sizing_horizontal, sizing_vertical,
+                   text_auto_resize, padding_left, padding_right, padding_top, padding_bottom,
+                   item_spacing, local_x, local_y, canvas_x, canvas_y, width, height,
+                   is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
+                   semiotic_layer
+            FROM figma_nodes
+            WHERE file_key = ? AND name = ?;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, name)
+        val results = mutableListOf<FigmaNode>()
+        try {
+            while (stmt.step()) {
+                results.add(rowToFigmaNode(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun queryFigmaNodesByType(fileKey: String, nodeType: String): List<FigmaNode> {
+        val stmt = db.prepare(
+            """
+            SELECT rowid_pk, node_id, file_key, page_name, section_id, parent_id,
+                   name, node_type, layout_mode, sizing_horizontal, sizing_vertical,
+                   text_auto_resize, padding_left, padding_right, padding_top, padding_bottom,
+                   item_spacing, local_x, local_y, canvas_x, canvas_y, width, height,
+                   is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
+                   semiotic_layer
+            FROM figma_nodes
+            WHERE file_key = ? AND node_type = ?;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, nodeType)
+        val results = mutableListOf<FigmaNode>()
+        try {
+            while (stmt.step()) {
+                results.add(rowToFigmaNode(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun queryFigmaVariableById(fileKey: String, variableId: String): FigmaVariable? {
+        val stmt = db.prepare(
+            """
+            SELECT variable_id, file_key, collection_name, name, resolved_type,
+                   is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web
+            FROM figma_variables
+            WHERE file_key = ? AND variable_id = ?;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, variableId)
+        try {
+            if (stmt.step()) {
+                return rowToFigmaVariable(stmt)
+            }
+            return null
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun queryFigmaVariableByName(fileKey: String, name: String): FigmaVariable? {
+        val stmt = db.prepare(
+            """
+            SELECT variable_id, file_key, collection_name, name, resolved_type,
+                   is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web
+            FROM figma_variables
+            WHERE file_key = ? AND name = ?;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, name)
+        try {
+            if (stmt.step()) {
+                return rowToFigmaVariable(stmt)
+            }
+            return null
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun queryFigmaEdgesBySource(fileKey: String, sourceNodeId: String): List<FigmaEdge> {
+        val stmt = db.prepare(
+            """
+            SELECT edge_id, file_key, source_node_id, target_node_id, edge_type, property_slot
+            FROM figma_edges
+            WHERE file_key = ? AND source_node_id = ?;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, sourceNodeId)
+        val results = mutableListOf<FigmaEdge>()
+        try {
+            while (stmt.step()) {
+                results.add(rowToFigmaEdge(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun queryFigmaEdgesByTarget(fileKey: String, targetNodeId: String): List<FigmaEdge> {
+        val stmt = db.prepare(
+            """
+            SELECT edge_id, file_key, source_node_id, target_node_id, edge_type, property_slot
+            FROM figma_edges
+            WHERE file_key = ? AND target_node_id = ?;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, targetNodeId)
+        val results = mutableListOf<FigmaEdge>()
+        try {
+            while (stmt.step()) {
+                results.add(rowToFigmaEdge(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun resolveVariableAliasImpact(
+        fileKey: String,
+        variableIdOrName: String,
+        depth: Int = 10
+    ): List<FigmaVariable> {
+        val stmt = db.prepare(
+            """
+            WITH RECURSIVE var_dag(variable_id, file_key, collection_name, name, resolved_type,
+                                   is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web, depth) AS (
+                SELECT variable_id, file_key, collection_name, name, resolved_type,
+                       is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web, 0
+                FROM figma_variables
+                WHERE file_key = ? AND (variable_id = ? OR name = ?)
+                UNION ALL
+                SELECT v.variable_id, v.file_key, v.collection_name, v.name, v.resolved_type,
+                       v.is_alias, v.aliased_variable_id, v.modes_json, v.code_syntax_compose, v.code_syntax_web, d.depth + 1
+                FROM figma_variables v
+                JOIN var_dag d ON v.aliased_variable_id = d.variable_id
+                WHERE v.file_key = ? AND d.depth < ?
+            )
+            SELECT variable_id, file_key, collection_name, name, resolved_type,
+                   is_alias, aliased_variable_id, modes_json, code_syntax_compose, code_syntax_web
+            FROM var_dag
+            ORDER BY depth, name;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, variableIdOrName)
+        stmt.bindString(3, variableIdOrName)
+        stmt.bindString(4, fileKey)
+        stmt.bindInt(5, depth)
+
+        val results = mutableListOf<FigmaVariable>()
+        try {
+            while (stmt.step()) {
+                results.add(rowToFigmaVariable(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun queryNodesBoundToVariable(fileKey: String, variableId: String): List<FigmaNode> {
+        val stmt = db.prepare(
+            """
+            SELECT n.rowid_pk, n.node_id, n.file_key, n.page_name, n.section_id, n.parent_id,
+                   n.name, n.node_type, n.layout_mode, n.sizing_horizontal, n.sizing_vertical,
+                   n.text_auto_resize, n.padding_left, n.padding_right, n.padding_top, n.padding_bottom,
+                   n.item_spacing, n.local_x, n.local_y, n.canvas_x, n.canvas_y, n.width, n.height,
+                   n.is_interactive, n.has_emoji, n.unbound_fill, n.unbound_stroke, n.wcag_contrast,
+                   n.semiotic_layer
+            FROM figma_nodes n
+            JOIN figma_edges e ON n.node_id = e.source_node_id AND n.file_key = e.file_key
+            WHERE e.file_key = ? AND e.target_node_id = ? AND e.edge_type = 'BINDS_VARIABLE'
+            ORDER BY n.name;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, variableId)
+
+        val results = mutableListOf<FigmaNode>()
+        try {
+            while (stmt.step()) {
+                results.add(rowToFigmaNode(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun resolveVariableBlastRadius(
+        fileKey: String,
+        variableIdOrName: String,
+        depth: Int = 10
+    ): FigmaVariableImpact {
+        val impactedVars = resolveVariableAliasImpact(fileKey, variableIdOrName, depth)
+        val impactedVarIds = impactedVars.map { it.variableId }.toSet()
+        val boundNodes = mutableListOf<FigmaNode>()
+        val seenNodeIds = mutableSetOf<String>()
+
+        for (varId in impactedVarIds) {
+            val nodes = queryNodesBoundToVariable(fileKey, varId)
+            for (node in nodes) {
+                if (seenNodeIds.add(node.nodeId)) {
+                    boundNodes.add(node)
+                }
+            }
+        }
+
+        return FigmaVariableImpact(
+            seedVariableIdOrName = variableIdOrName,
+            depth = depth,
+            impactedVariables = impactedVars,
+            boundNodes = boundNodes
+        )
+    }
+
+    fun queryFigmaCallers(
+        fileKey: String,
+        componentNameOrId: String,
+        depth: Int = 2
+    ): List<FigmaNode> {
+        val stmt = db.prepare(
+            """
+            SELECT n.rowid_pk, n.node_id, n.file_key, n.page_name, n.section_id, n.parent_id,
+                   n.name, n.node_type, n.layout_mode, n.sizing_horizontal, n.sizing_vertical,
+                   n.text_auto_resize, n.padding_left, n.padding_right, n.padding_top, n.padding_bottom,
+                   n.item_spacing, n.local_x, n.local_y, n.canvas_x, n.canvas_y, n.width, n.height,
+                   n.is_interactive, n.has_emoji, n.unbound_fill, n.unbound_stroke, n.wcag_contrast,
+                   n.semiotic_layer
+            FROM figma_nodes n
+            JOIN figma_edges e ON n.node_id = e.source_node_id AND n.file_key = e.file_key
+            WHERE e.file_key = ?
+              AND e.edge_type = 'INSTANTIATES'
+              AND (e.target_node_id = ? OR e.target_node_id IN (
+                  SELECT node_id FROM figma_nodes WHERE file_key = ? AND name = ?
+              ))
+            ORDER BY n.name;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, componentNameOrId)
+        stmt.bindString(3, fileKey)
+        stmt.bindString(4, componentNameOrId)
+
+        val results = mutableListOf<FigmaNode>()
+        try {
+            while (stmt.step()) {
+                results.add(rowToFigmaNode(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    private fun rowToFigmaNode(stmt: NativeSqliteStatement): FigmaNode {
+        return FigmaNode(
+            rowidPk = stmt.columnLong(0),
+            nodeId = stmt.columnString(1),
+            fileKey = stmt.columnString(2),
+            pageName = stmt.columnString(3),
+            sectionId = if (stmt.columnIsNull(4)) null else stmt.columnString(4).ifEmpty { null },
+            parentId = if (stmt.columnIsNull(5)) null else stmt.columnString(5).ifEmpty { null },
+            name = stmt.columnString(6),
+            nodeType = stmt.columnString(7),
+            layoutMode = stmt.columnString(8),
+            sizingHorizontal = stmt.columnString(9),
+            sizingVertical = stmt.columnString(10),
+            textAutoResize = stmt.columnString(11),
+            paddingLeft = stmt.columnDouble(12),
+            paddingRight = stmt.columnDouble(13),
+            paddingTop = stmt.columnDouble(14),
+            paddingBottom = stmt.columnDouble(15),
+            itemSpacing = stmt.columnDouble(16),
+            localX = stmt.columnDouble(17),
+            localY = stmt.columnDouble(18),
+            canvasX = stmt.columnDouble(19),
+            canvasY = stmt.columnDouble(20),
+            width = stmt.columnDouble(21),
+            height = stmt.columnDouble(22),
+            isInteractive = stmt.columnInt(23) != 0,
+            hasEmoji = stmt.columnInt(24) != 0,
+            unboundFill = stmt.columnInt(25) != 0,
+            unboundStroke = stmt.columnInt(26) != 0,
+            wcagContrast = if (stmt.columnIsNull(27)) null else stmt.columnDouble(27),
+            semioticLayer = stmt.columnString(28)
+        )
+    }
+
+    private fun rowToFigmaVariable(stmt: NativeSqliteStatement): FigmaVariable {
+        return FigmaVariable(
+            variableId = stmt.columnString(0),
+            fileKey = stmt.columnString(1),
+            collectionName = stmt.columnString(2),
+            name = stmt.columnString(3),
+            resolvedType = stmt.columnString(4),
+            isAlias = stmt.columnInt(5) != 0,
+            aliasedVariableId = if (stmt.columnIsNull(6)) null else stmt.columnString(6).ifEmpty { null },
+            modesJson = stmt.columnString(7),
+            codeSyntaxCompose = if (stmt.columnIsNull(8)) null else stmt.columnString(8).ifEmpty { null },
+            codeSyntaxWeb = if (stmt.columnIsNull(9)) null else stmt.columnString(9).ifEmpty { null }
+        )
+    }
+
+    private fun rowToFigmaEdge(stmt: NativeSqliteStatement): FigmaEdge {
+        return FigmaEdge(
+            edgeId = stmt.columnString(0),
+            fileKey = stmt.columnString(1),
+            sourceNodeId = stmt.columnString(2),
+            targetNodeId = stmt.columnString(3),
+            edgeType = stmt.columnString(4),
+            propertySlot = stmt.columnString(5)
         )
     }
 }
