@@ -1,5 +1,6 @@
 package atlas
 
+import atlas.cli.CodeGraphCli
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
 import atlas.engine.ScopeSynthesizer
@@ -190,5 +191,20 @@ class AtlasNativeTest {
             store.close()
             PlatformFiles.delete(dbPath)
         }
+    }
+
+    @Test
+    fun testCliVersionFlag() {
+        val exitCodeVersion = CodeGraphCli.run(arrayOf("--version"))
+        assertEquals(0, exitCodeVersion)
+
+        val exitCodeV = CodeGraphCli.run(arrayOf("-v"))
+        assertEquals(0, exitCodeV)
+
+        val exitCodeCmd = CodeGraphCli.run(arrayOf("version"))
+        assertEquals(0, exitCodeCmd)
+
+        val exitCodeFigmaHelp = CodeGraphCli.run(arrayOf("figma", "--help"))
+        assertEquals(0, exitCodeFigmaHelp)
     }
 }

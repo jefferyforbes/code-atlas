@@ -502,7 +502,7 @@ class CodeGraphMcpServer(
                         }
                         putJsonObject("serverInfo") {
                             put("name", "atlas")
-                            put("version", "0.2.0")
+                            put("version", "0.3.0")
                         }
                     }
                 }

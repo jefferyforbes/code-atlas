@@ -13,13 +13,19 @@ import kotlinx.serialization.json.*
  */
 class CodeGraphCli {
     companion object {
+        const val VERSION = "0.3.0"
         const val SUMMARY_CEILING_BYTES = 400
 
         private val jsonPretty = Json { prettyPrint = true }
         private val jsonCompact = Json { prettyPrint = false }
 
         fun run(argv: Array<String>): Int {
-            if (argv.isEmpty() || argv.contains("--help") || argv.contains("-h")) {
+            if (argv.contains("--version") || argv.contains("-v") || (argv.size == 1 && argv[0] == "version")) {
+                println("atlas $VERSION")
+                return 0
+            }
+
+            if (argv.isEmpty() || argv.contains("--help") || argv.contains("-h") || (argv.size == 1 && argv[0] == "figma")) {
                 printHelp()
                 return 0
             }
@@ -469,6 +475,8 @@ class CodeGraphCli {
                   figma synthesize-scope   Synthesize 3D Concurrency Scope (spatial, components, tokens)
 
                 General Options:
+                  --version, -v            Print version information
+                  --help, -h               Print help information
                   --project <name>         Target project slug (default: organisation)
                   --workspace <dir>        Workspace root directory (default: .)
                   --db <path>              Custom SQLite database path

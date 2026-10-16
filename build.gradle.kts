@@ -3,6 +3,9 @@ plugins {
     kotlin("plugin.serialization") version "2.2.0"
 }
 
+group = "com.orion"
+version = "0.3.0"
+
 repositories {
     mavenCentral()
 }
@@ -41,14 +44,14 @@ kotlin {
 
 tasks.register<Copy>("installToDist") {
     dependsOn("linkReleaseExecutableMacosArm64")
-    from(layout.buildDirectory.dir("bin/macosArm64/releaseExecutable/atlas.kexe"))
+    from(layout.buildDirectory.file("bin/macosArm64/releaseExecutable/atlas.kexe"))
     into(layout.projectDirectory.dir("dist"))
     rename { "atlas" }
 }
 
 tasks.register<Copy>("installToLocalBin") {
     dependsOn("linkReleaseExecutableMacosArm64")
-    from(layout.buildDirectory.dir("bin/macosArm64/releaseExecutable/atlas.kexe"))
+    from(layout.buildDirectory.file("bin/macosArm64/releaseExecutable/atlas.kexe"))
     into(file(System.getProperty("user.home") + "/.local/bin"))
     rename { "atlas" }
     doLast {
