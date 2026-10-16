@@ -231,6 +231,7 @@ class CodeGraphCli {
             isJson: Boolean
         ): Int {
             val fileKey = fileKeyArg ?: server.store.getLatestFigmaFileKey() ?: "default"
+            val figmaAction = if (action == "search") "symbol" else action
 
             when (command) {
                 "index" -> {
@@ -271,7 +272,7 @@ class CodeGraphCli {
                     return 0
                 }
                 "query" -> {
-                    when (action) {
+                    when (figmaAction) {
                         "symbol" -> {
                             val node = server.store.queryFigmaNodeById(fileKey, target)
                             val nodes = if (node != null) listOf(node) else server.store.queryFigmaNodesByName(fileKey, target)
@@ -363,8 +364,19 @@ class CodeGraphCli {
                             }
                             return 0
                         }
+                        "shortest_path" -> {
+                            val path = server.store.findFigmaShortestPath(fileKey, target, secondaryTarget, depth = maxOf(depth, 10))
+                            if (isJson) {
+                                println(jsonPretty.encodeToString(path))
+                            } else {
+                                val names = path.map { it.name }
+                                val text = "[Figma Query: shortest_path] fileKey=$fileKey from=$target to=$secondaryTarget hops=${maxOf(0, path.size - 1)} path=[${names.joinToString(" -> ")}]"
+                                println(truncateSummary(text, false))
+                            }
+                            return 0
+                        }
                         else -> {
-                            println("Unknown figma query action: $action. Valid: symbol, callers, impact, spatial, god_nodes")
+                            println("Unknown figma query action: $figmaAction. Valid: symbol, callers, impact, spatial, god_nodes, shortest_path")
                             return 1
                         }
                     }
@@ -452,7 +464,7 @@ class CodeGraphCli {
 
                 Figma Commands:
                   figma index              Index Figma document snapshot and DTCG design tokens
-                  figma query              Query Figma nodes (symbol, callers, impact, spatial, god_nodes)
+                  figma query              Query Figma nodes (symbol, callers, impact, spatial, god_nodes, shortest_path)
                   figma audit              Run 12 deterministic SQL design audits (exit code 0/1)
                   figma synthesize-scope   Synthesize 3D Concurrency Scope (spatial, components, tokens)
 
@@ -467,7 +479,7 @@ class CodeGraphCli {
                 Query Options:
                   --target <sym>           Symbol name, node name, or ID
                   --secondary-target <sym> Target for shortest_path
-                  --action <action>        Query action (symbol, callers, callees, impact, spatial, god_nodes)
+                  --action <action>        Query action (symbol, callers, callees, impact, spatial, god_nodes, shortest_path)
                   --depth <int>            Traversal depth (default: 2)
                   --paths <p1> [p2...]     Subpaths to index or seed targets for scoping
                   --include-source         Include live disk source lines in query

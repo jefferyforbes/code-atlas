@@ -1890,7 +1890,7 @@ class SqliteGraphStore(val dbPath: String) {
                    n.semiotic_layer, COUNT(e.edge_id) as ref_count
             FROM figma_edges e
             JOIN figma_nodes n ON n.node_id = e.target_node_id AND n.file_key = e.file_key
-            WHERE e.file_key = ?
+            WHERE e.file_key = ? AND e.edge_type != 'CONTAINS'
             GROUP BY n.rowid_pk
             ORDER BY ref_count DESC
             LIMIT ?;
@@ -1909,6 +1909,63 @@ class SqliteGraphStore(val dbPath: String) {
             stmt.close()
         }
         return results
+    }
+
+    fun findFigmaShortestPath(
+        fileKey: String,
+        sourceTarget: String,
+        destTarget: String,
+        depth: Int = 10
+    ): List<FigmaNode> {
+        val srcNode = queryFigmaNodeById(fileKey, sourceTarget)
+            ?: queryFigmaNodesByName(fileKey, sourceTarget).firstOrNull()
+        val dstNode = queryFigmaNodeById(fileKey, destTarget)
+            ?: queryFigmaNodesByName(fileKey, destTarget).firstOrNull()
+        if (srcNode == null || dstNode == null) return emptyList()
+        if (srcNode.nodeId == dstNode.nodeId) return listOf(srcNode)
+
+        val queue = mutableListOf<Pair<String, List<String>>>()
+        val visited = mutableSetOf<String>()
+        queue.add(Pair(srcNode.nodeId, listOf(srcNode.nodeId)))
+        visited.add(srcNode.nodeId)
+
+        val edgeStmt = db.prepare(
+            """
+            SELECT target_node_id FROM figma_edges
+            WHERE file_key = ? AND source_node_id = ?
+            UNION
+            SELECT e.target_node_id FROM figma_edges e
+            JOIN figma_nodes n ON e.source_node_id = n.node_id AND e.file_key = n.file_key
+            WHERE e.file_key = ? AND n.parent_id = ?;
+            """.trimIndent()
+        )
+        try {
+            var head = 0
+            while (head < queue.size) {
+                val (curr, path) = queue[head++]
+                if (path.size > depth) break
+
+                edgeStmt.reset()
+                edgeStmt.bindString(1, fileKey)
+                edgeStmt.bindString(2, curr)
+                edgeStmt.bindString(3, fileKey)
+                edgeStmt.bindString(4, curr)
+
+                while (edgeStmt.step()) {
+                    val nextId = edgeStmt.columnString(0)
+                    if (nextId == dstNode.nodeId) {
+                        val fullPathIds = path + nextId
+                        return fullPathIds.mapNotNull { queryFigmaNodeById(fileKey, it) }
+                    }
+                    if (visited.add(nextId)) {
+                        queue.add(Pair(nextId, path + nextId))
+                    }
+                }
+            }
+            return emptyList()
+        } finally {
+            edgeStmt.close()
+        }
     }
 
     private fun rowToFigmaEdge(stmt: NativeSqliteStatement): FigmaEdge {

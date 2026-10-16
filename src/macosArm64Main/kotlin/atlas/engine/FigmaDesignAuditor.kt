@@ -56,6 +56,24 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
             countStmt.close()
         }
 
+        if (totalNodes == 0) {
+            return FigmaAuditResult(
+                fileKey = fileKey,
+                passed = false,
+                maturityScore = 0.0,
+                polishDelta = listOf("Index document snapshot with 'atlas figma index' before auditing"),
+                violations = listOf(
+                    FigmaViolation(
+                        rule = "GATE_1_MATURITY_SCORE",
+                        nodeId = fileKey,
+                        nodeName = fileKey,
+                        message = "Figma document '$fileKey' has 0 indexed nodes in database. File does not exist or has not been indexed."
+                    )
+                ),
+                totalNodes = 0
+            )
+        }
+
         val polishDelta = if (score >= 90.0 || finalViolations.isEmpty()) {
             DEFAULT_POLISH_DELTA
         } else {
@@ -236,6 +254,13 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
                   OR p.width < 48.0
                   OR p.height < 48.0
                   OR p.layout_mode = 'NONE'
+                  OR (
+                      p.node_type != 'TOUCH_TARGET_FRAME'
+                      AND LOWER(p.name) NOT LIKE '%touch%'
+                      AND LOWER(p.name) NOT LIKE '%hitbox%'
+                      AND (p.width > 80.0 OR p.height > 80.0)
+                      AND (SELECT COUNT(*) FROM figma_nodes WHERE parent_id = p.node_id AND file_key = c.file_key) > 1
+                  )
               );
             """.trimIndent()
         )
@@ -311,7 +336,7 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
               AND p.layout_mode IN ('HORIZONTAL', 'VERTICAL')
               AND (p.padding_left > 0.0 OR p.padding_right > 0.0)
               AND c.sizing_horizontal = 'FIXED'
-              AND c.width >= p.width
+              AND c.width >= (p.width - 0.001)
               AND p.width > 0.0;
             """.trimIndent()
         )
@@ -491,6 +516,7 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
             FROM figma_nodes n
             JOIN figma_spatial_index s ON n.rowid_pk = s.id
             WHERE n.file_key = ?
+              AND n.node_type NOT IN ('DOCUMENT', 'PAGE')
               AND (n.node_type IN ('CANVAS_SECTION', 'SECTION') OR n.parent_id IS NULL)
               AND (
                   (abs(s.min_y) > 200.0 AND (s.min_y < 4500.0 OR s.min_y > 15000.0))
@@ -618,8 +644,9 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
         fileKey: String,
         seedNodeNames: List<String>
     ): Figma3DScope {
+        val expandedSeeds = seedNodeNames.flatMap { it.split(',') }.map { it.trim() }.filter { it.isNotEmpty() }
         val seedNodes = mutableListOf<FigmaNode>()
-        for (seed in seedNodeNames) {
+        for (seed in expandedSeeds) {
             val byName = store.queryFigmaNodesByName(fileKey, seed)
             if (byName.isNotEmpty()) {
                 seedNodes.addAll(byName)
@@ -685,31 +712,36 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
             }
 
             for (targetId in instantiatedTargets) {
-                var instantiatedInside = false
                 val inEdges = store.queryFigmaEdgesByTarget(fileKey, targetId)
-                for (edge in inEdges) {
-                    if (edge.edgeType == "INSTANTIATES" && edge.sourceNodeId in scopedNodeIds) {
-                        instantiatedInside = true
-                        break
-                    }
-                }
-                if (!instantiatedInside) continue
-
+                var instantiatedInside = false
                 var externalCount = 0
+
                 for (edge in inEdges) {
-                    if (edge.edgeType == "INSTANTIATES" && edge.sourceNodeId !in scopedNodeIds) {
-                        externalCount++
+                    if (edge.edgeType == "INSTANTIATES") {
+                        if (edge.sourceNodeId in scopedNodeIds) {
+                            instantiatedInside = true
+                        } else {
+                            externalCount++
+                        }
                     }
                 }
+
+                val isMasterInScope = targetId in scopedNodeIds
+                if (!instantiatedInside && !isMasterInScope) continue
 
                 val masterNode = store.queryFigmaNodeById(fileKey, targetId)
                 val masterName = masterNode?.name ?: targetId
 
                 if (externalCount > 0) {
                     sharedMasterComponents.add(masterName)
-                    potentialCollisions.add(
-                        "Master Component '$masterName' ($targetId) is instantiated both inside and outside scope ($externalCount external instance(s))"
-                    )
+                    val msg = if (isMasterInScope && !instantiatedInside) {
+                        "Master Component '$masterName' ($targetId) defined in scope has $externalCount external instance(s) outside scope"
+                    } else if (isMasterInScope && instantiatedInside) {
+                        "Master Component '$masterName' ($targetId) defined in scope is instantiated both inside and outside scope ($externalCount external instance(s))"
+                    } else {
+                        "Master Component '$masterName' ($targetId) is instantiated inside scope and shared with $externalCount external instance(s)"
+                    }
+                    potentialCollisions.add(msg)
                 }
             }
         }
@@ -728,16 +760,17 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
                             ?: store.queryFigmaVariableByName(fileKey, varTarget)
                         if (currentVar != null) {
                             tokenLayers.add(currentVar.name)
+                            val visitedAliases = mutableSetOf<String>()
                             var upstreamId = currentVar.aliasedVariableId
                             var hops = 0
-                            while (!upstreamId.isNullOrEmpty() && hops < 10) {
+                            while (!upstreamId.isNullOrEmpty() && hops < 50 && visitedAliases.add(upstreamId)) {
                                 hops++
                                 val parentVar = store.queryFigmaVariableById(fileKey, upstreamId)
                                     ?: store.queryFigmaVariableByName(fileKey, upstreamId)
                                 if (parentVar != null) {
                                     tokenLayers.add(parentVar.name)
                                     tokenLayers.add(parentVar.variableId)
-                                    upstreamId = if (parentVar.aliasedVariableId != upstreamId) parentVar.aliasedVariableId else null
+                                    upstreamId = parentVar.aliasedVariableId
                                 } else {
                                     tokenLayers.add(upstreamId)
                                     break
@@ -757,7 +790,7 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
         return Figma3DScope(
             project = project,
             fileKey = fileKey,
-            seedNodes = seedNodeNames,
+            seedNodes = expandedSeeds,
             spatialBounds = spatialBounds,
             scopedNodesCount = scopedNodes.size,
             sharedMasterComponents = sharedMasterComponents.distinct().sorted(),

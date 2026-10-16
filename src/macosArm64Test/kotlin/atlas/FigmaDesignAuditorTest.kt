@@ -878,11 +878,17 @@ class FigmaDesignAuditorTest {
             )
             assertEquals(0, auditExit)
 
-            // Run query CLI subcommand: symbol
+            // Run query CLI subcommand: symbol (explicit action)
             val queryExit = CodeGraphCli.run(
                 arrayOf("figma", "query", "--project", "test_proj", "--file", fileKey, "--action", "symbol", "--target", "CleanButton", "--db", dbPath)
             )
             assertEquals(0, queryExit)
+
+            // Run query CLI subcommand: default action (omitted --action defaults to symbol)
+            val queryDefaultExit = CodeGraphCli.run(
+                arrayOf("figma", "query", "--project", "test_proj", "--file", fileKey, "--target", "CleanButton", "--db", dbPath)
+            )
+            assertEquals(0, queryDefaultExit)
 
             // Run synthesize-scope CLI subcommand
             val scopeExit = CodeGraphCli.run(
@@ -892,5 +898,262 @@ class FigmaDesignAuditorTest {
         } finally {
             PlatformFiles.delete(dbPath)
         }
+    }
+
+    @Test
+    fun testEmptyFileAuditFails() = withTempStore { store ->
+        val fileKey = "non_existent_key_999"
+        val auditor = FigmaDesignAuditor(store)
+        val result = auditor.audit(fileKey)
+
+        assertFalse(result.passed)
+        assertEquals(0.0, result.maturityScore)
+        assertEquals(1, result.violations.size)
+        assertEquals("GATE_1_MATURITY_SCORE", result.violations[0].rule)
+        assertTrue(result.violations[0].message.contains("0 indexed nodes"))
+    }
+
+    @Test
+    fun testShortestPathAndGodNodesFiltering() = withTempStore { store ->
+        val fileKey = "flow_test_file"
+        insertBasicDocument(store, fileKey)
+
+        val screenLogin = FigmaNode(
+            nodeId = "screen_login",
+            fileKey = fileKey,
+            pageName = "Auth",
+            name = "AuthLogin",
+            nodeType = "FRAME",
+            canvasX = 0.0,
+            canvasY = 0.0,
+            width = 390.0,
+            height = 844.0
+        )
+        val loginBtn = FigmaNode(
+            nodeId = "login_btn",
+            fileKey = fileKey,
+            pageName = "Auth",
+            parentId = "screen_login",
+            name = "SubmitButton",
+            nodeType = "COMPONENT",
+            layoutMode = "HORIZONTAL",
+            width = 300.0,
+            height = 48.0,
+            isInteractive = true
+        )
+        val screenHome = FigmaNode(
+            nodeId = "screen_home",
+            fileKey = fileKey,
+            pageName = "Main",
+            name = "RecordingActive",
+            nodeType = "FRAME",
+            canvasX = 500.0,
+            canvasY = 0.0,
+            width = 390.0,
+            height = 844.0
+        )
+        val sharedBadge = FigmaNode(
+            nodeId = "comp_badge",
+            fileKey = fileKey,
+            pageName = "Design System",
+            name = "StatusBadge",
+            nodeType = "COMPONENT",
+            layoutMode = "HORIZONTAL",
+            width = 60.0,
+            height = 24.0
+        )
+
+        store.insertFigmaNodes(fileKey, listOf(screenLogin, loginBtn, screenHome, sharedBadge))
+
+        val edges = listOf(
+            FigmaEdge("e_contains_1", fileKey, "screen_login", "login_btn", "CONTAINS"),
+            FigmaEdge("e_action_1", fileKey, "login_btn", "screen_home", "TRIGGERS_ACTION", "NAVIGATE"),
+            FigmaEdge("e_inst_1", fileKey, "screen_login", "comp_badge", "INSTANTIATES"),
+            FigmaEdge("e_inst_2", fileKey, "screen_home", "comp_badge", "INSTANTIATES")
+        )
+        store.insertFigmaEdges(fileKey, edges)
+
+        // Shortest path between screens
+        val path = store.findFigmaShortestPath(fileKey, "AuthLogin", "RecordingActive")
+        assertEquals(2, path.size)
+        assertEquals("AuthLogin", path[0].name)
+        assertEquals("RecordingActive", path[1].name)
+
+        // God nodes: StatusBadge has 2 instantiations; CONTAINS edges must not outrank it
+        val godNodes = store.queryFigmaGodNodes(fileKey, limit = 5)
+        assertTrue(godNodes.isNotEmpty())
+        assertEquals("StatusBadge", godNodes[0].first.name)
+        assertEquals(2, godNodes[0].second)
+    }
+
+    @Test
+    fun testMinTouchTargetInScreenWithMultipleChildren() = withTempStore { store ->
+        val fileKey = "touch_screen_test"
+        insertBasicDocument(store, fileKey)
+
+        val screen = FigmaNode(
+            nodeId = "screen_main",
+            fileKey = fileKey,
+            pageName = "Page 1",
+            name = "HomeScreen",
+            nodeType = "FRAME",
+            layoutMode = "VERTICAL",
+            width = 390.0,
+            height = 844.0
+        )
+        val unshieldedSmallIcon = FigmaNode(
+            nodeId = "raw_icon",
+            fileKey = fileKey,
+            pageName = "Page 1",
+            parentId = "screen_main",
+            name = "UnwrappedIcon",
+            nodeType = "FRAME",
+            width = 24.0,
+            height = 24.0,
+            isInteractive = true
+        )
+        val siblingText = FigmaNode(
+            nodeId = "label_title",
+            fileKey = fileKey,
+            pageName = "Page 1",
+            parentId = "screen_main",
+            name = "HeaderLabel",
+            nodeType = "TEXT",
+            width = 200.0,
+            height = 24.0
+        )
+
+        store.insertFigmaNodes(fileKey, listOf(screen, unshieldedSmallIcon, siblingText))
+
+        val auditor = FigmaDesignAuditor(store)
+        val violations = auditor.checkMinTouchTargets(fileKey)
+
+        assertEquals(1, violations.size)
+        assertEquals("MIN_TOUCH_TARGET", violations[0].rule)
+        assertEquals("raw_icon", violations[0].nodeId)
+    }
+
+    @Test
+    fun testSynthesizeFigmaScopeMasterDefinitionInScope() = withTempStore { store ->
+        val fileKey = "scope_def_test"
+        insertBasicDocument(store, fileKey)
+
+        val secDesignSystem = FigmaNode(
+            nodeId = "sec_ds",
+            fileKey = fileKey,
+            pageName = "Design System",
+            name = "Section 00 · Foundations",
+            nodeType = "CANVAS_SECTION",
+            canvasX = 0.0,
+            canvasY = 5000.0,
+            width = 3000.0,
+            height = 3000.0
+        )
+        val masterCard = FigmaNode(
+            nodeId = "master_card",
+            fileKey = fileKey,
+            pageName = "Design System",
+            parentId = "sec_ds",
+            name = "MasterCard",
+            nodeType = "COMPONENT",
+            layoutMode = "VERTICAL",
+            canvasX = 100.0,
+            canvasY = 5100.0,
+            width = 320.0,
+            height = 200.0
+        )
+        val outsideScreen = FigmaNode(
+            nodeId = "screen_tasks",
+            fileKey = fileKey,
+            pageName = "Tasks",
+            name = "TaskScreen",
+            nodeType = "FRAME",
+            canvasX = 14000.0,
+            canvasY = 0.0,
+            width = 390.0,
+            height = 844.0
+        )
+        val cardInstance = FigmaNode(
+            nodeId = "card_inst_1",
+            fileKey = fileKey,
+            pageName = "Tasks",
+            parentId = "screen_tasks",
+            name = "CardInstance",
+            nodeType = "INSTANCE",
+            canvasX = 14020.0,
+            canvasY = 100.0,
+            width = 320.0,
+            height = 200.0
+        )
+
+        store.insertFigmaNodes(fileKey, listOf(secDesignSystem, masterCard, outsideScreen, cardInstance))
+        store.insertFigmaEdges(fileKey, listOf(
+            FigmaEdge("e_inst", fileKey, "card_inst_1", "master_card", "INSTANTIATES")
+        ))
+
+        val auditor = FigmaDesignAuditor(store)
+        val scope = auditor.synthesizeFigmaScope(
+            project = "relay",
+            fileKey = fileKey,
+            seedNodeNames = listOf("Section 00 · Foundations")
+        )
+
+        // Master Component defined in scope must be detected as shared collision with outsideScreen
+        assertTrue(scope.sharedMasterComponents.contains("MasterCard"))
+        assertEquals(1, scope.potentialCollisions.size)
+        assertTrue(scope.potentialCollisions[0].contains("defined in scope"))
+    }
+
+    @Test
+    fun testSynthesizeFigmaScopeCyclicAliasDAG() = withTempStore { store ->
+        val fileKey = "cyclic_alias_test"
+        insertBasicDocument(store, fileKey)
+
+        val frame = FigmaNode(
+            nodeId = "node_a",
+            fileKey = fileKey,
+            pageName = "Page 1",
+            name = "FrameA",
+            nodeType = "FRAME",
+            canvasX = 0.0,
+            canvasY = 0.0,
+            width = 200.0,
+            height = 200.0
+        )
+        val varA = FigmaVariable(
+            variableId = "var_a",
+            fileKey = fileKey,
+            collectionName = "Tokens",
+            name = "token/alpha",
+            resolvedType = "COLOR",
+            isAlias = true,
+            aliasedVariableId = "var_b"
+        )
+        val varB = FigmaVariable(
+            variableId = "var_b",
+            fileKey = fileKey,
+            collectionName = "Tokens",
+            name = "token/beta",
+            resolvedType = "COLOR",
+            isAlias = true,
+            aliasedVariableId = "var_a" // Cyclic back to var_a
+        )
+
+        store.insertFigmaNodes(fileKey, listOf(frame))
+        store.insertFigmaVariables(fileKey, listOf(varA, varB))
+        store.insertFigmaEdges(fileKey, listOf(
+            FigmaEdge("e_bind", fileKey, "node_a", "var_a", "BINDS_VARIABLE")
+        ))
+
+        val auditor = FigmaDesignAuditor(store)
+        // Must complete without hanging or infinite loop
+        val scope = auditor.synthesizeFigmaScope(
+            project = "relay",
+            fileKey = fileKey,
+            seedNodeNames = listOf("FrameA")
+        )
+
+        assertTrue(scope.tokenLayers.contains("token/alpha"))
+        assertTrue(scope.tokenLayers.contains("token/beta"))
     }
 }
