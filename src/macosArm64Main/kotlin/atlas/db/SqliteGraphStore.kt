@@ -17,7 +17,23 @@ class SqliteGraphStore(val dbPath: String) {
         initSchema()
     }
 
+    private fun migrateLegacySchema() {
+        try {
+            val stmt = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='figma_nodes';")
+            var sqlDef = ""
+            if (stmt.step()) {
+                sqlDef = stmt.columnString(0)
+            }
+            stmt.close()
+            if (sqlDef.contains("node_id TEXT NOT NULL UNIQUE")) {
+                db.exec("DROP TABLE IF EXISTS figma_spatial_index;")
+                db.exec("DROP TABLE IF EXISTS figma_nodes;")
+            }
+        } catch (_: Throwable) {}
+    }
+
     private fun initSchema() {
+        migrateLegacySchema()
         db.exec(
             """
             PRAGMA journal_mode = WAL;
@@ -139,6 +155,7 @@ class SqliteGraphStore(val dbPath: String) {
                 semiotic_layer TEXT NOT NULL DEFAULT 'syntactic',
                 UNIQUE (file_key, node_id)
             );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_fnodes_file_node ON figma_nodes(file_key, node_id);
             CREATE INDEX IF NOT EXISTS idx_fnodes_file ON figma_nodes(file_key);
             CREATE INDEX IF NOT EXISTS idx_fnodes_name ON figma_nodes(file_key, name);
             CREATE INDEX IF NOT EXISTS idx_fnodes_type ON figma_nodes(file_key, node_type);
@@ -1834,6 +1851,66 @@ class SqliteGraphStore(val dbPath: String) {
         )
     }
 
+    fun prepare(sql: String): NativeSqliteStatement = db.prepare(sql)
+
+    fun exec(sql: String) {
+        db.exec(sql)
+    }
+
+    fun getLatestFigmaFileKey(): String? {
+        val stmt = db.prepare("SELECT file_key FROM figma_documents ORDER BY last_modified DESC LIMIT 1;")
+        try {
+            if (stmt.step()) {
+                val key = stmt.columnString(0)
+                if (key.isNotEmpty()) return key
+            }
+        } finally {
+            stmt.close()
+        }
+        val stmt2 = db.prepare("SELECT file_key FROM figma_nodes LIMIT 1;")
+        try {
+            if (stmt2.step()) {
+                val key = stmt2.columnString(0)
+                if (key.isNotEmpty()) return key
+            }
+        } finally {
+            stmt2.close()
+        }
+        return null
+    }
+
+    fun queryFigmaGodNodes(fileKey: String, limit: Int = 10): List<Pair<FigmaNode, Int>> {
+        val stmt = db.prepare(
+            """
+            SELECT n.rowid_pk, n.node_id, n.file_key, n.page_name, n.section_id, n.parent_id,
+                   n.name, n.node_type, n.layout_mode, n.sizing_horizontal, n.sizing_vertical,
+                   n.text_auto_resize, n.padding_left, n.padding_right, n.padding_top, n.padding_bottom,
+                   n.item_spacing, n.local_x, n.local_y, n.canvas_x, n.canvas_y, n.width, n.height,
+                   n.is_interactive, n.has_emoji, n.unbound_fill, n.unbound_stroke, n.wcag_contrast,
+                   n.semiotic_layer, COUNT(e.edge_id) as ref_count
+            FROM figma_edges e
+            JOIN figma_nodes n ON n.node_id = e.target_node_id AND n.file_key = e.file_key
+            WHERE e.file_key = ?
+            GROUP BY n.rowid_pk
+            ORDER BY ref_count DESC
+            LIMIT ?;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindInt(2, limit)
+        val results = mutableListOf<Pair<FigmaNode, Int>>()
+        try {
+            while (stmt.step()) {
+                val node = rowToFigmaNode(stmt)
+                val count = stmt.columnInt(29)
+                results.add(Pair(node, count))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
     private fun rowToFigmaEdge(stmt: NativeSqliteStatement): FigmaEdge {
         return FigmaEdge(
             edgeId = stmt.columnString(0),
@@ -1845,3 +1922,4 @@ class SqliteGraphStore(val dbPath: String) {
         )
     }
 }
+
