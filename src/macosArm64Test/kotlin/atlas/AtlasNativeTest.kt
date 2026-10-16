@@ -163,6 +163,29 @@ class AtlasNativeTest {
 
             val disconnected = store.getShortestPath("p", "p:B", "p:A")
             assertEquals(emptyList(), disconnected)
+
+            // Test file record pruning and deletion
+            store.upsertFileRecord(
+                projectId = "p",
+                relPath = "A.kt",
+                language = "kotlin",
+                moduleId = "m1",
+                sourceSet = "main",
+                semioticLayer = "syntactic",
+                archLayer = "domain",
+                sha256 = "shaA",
+                mtime = 100.0,
+                loc = 10,
+                topLevelDeclCount = 1
+            )
+            val indexed = store.listIndexedFiles("p")
+            assertTrue(indexed.contains("A.kt"))
+
+            store.deleteFileRecord("p", "A.kt")
+            val indexedAfter = store.listIndexedFiles("p")
+            assertTrue(!indexedAfter.contains("A.kt"))
+            val nodeAAfter = store.getNode("p", "A")
+            assertEquals(null, nodeAAfter)
         } finally {
             store.close()
             PlatformFiles.delete(dbPath)

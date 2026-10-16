@@ -181,6 +181,7 @@ class CodeGraphMcpServer(
         var filesSkipped = 0
 
         val allFiles = PlatformFiles.listFilesRecursively(root)
+        val validDiskFiles = mutableSetOf<String>()
         for (filePath in allFiles) {
             val relStr = filePath.removePrefix(root).removePrefix("/").replace('\\', '/')
             val parts = relStr.split('/')
@@ -198,6 +199,8 @@ class CodeGraphMcpServer(
             val lang = PolyglotAstExtractor.supportedLanguage(ext)
 
             if (lang.isEmpty() && ext != ".md") continue
+
+            validDiskFiles.add(relStr)
 
             val rawBytes = PlatformFiles.readBytes(filePath)
             val sha256 = Sha256.digest(rawBytes)
@@ -255,6 +258,20 @@ class CodeGraphMcpServer(
             allNodes.addAll(fNodes)
             rawEdges.addAll(fEdges)
             filesIndexed++
+        }
+
+        val indexedFiles = store.listIndexedFiles(projectId)
+        for (indexedRel in indexedFiles) {
+            if (subpaths != null && subpaths.isNotEmpty()) {
+                val matchesSubpath = subpaths.any { sp ->
+                    val cleanSp = sp.trimEnd('/')
+                    indexedRel == cleanSp || indexedRel.startsWith("$cleanSp/")
+                }
+                if (!matchesSubpath) continue
+            }
+            if (indexedRel !in validDiskFiles) {
+                store.deleteFileRecord(projectId, indexedRel)
+            }
         }
 
         val existingNodes = store.listNodes(projectId)

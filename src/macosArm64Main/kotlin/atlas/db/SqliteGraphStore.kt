@@ -270,6 +270,63 @@ class SqliteGraphStore(val dbPath: String) {
         return fileId
     }
 
+    fun listIndexedFiles(projectId: String): List<String> {
+        val res = mutableListOf<String>()
+        val stmt = db.prepare("SELECT rel_path FROM files WHERE project_id = ?;")
+        stmt.bindString(1, projectId)
+        try {
+            while (stmt.step()) {
+                res.add(stmt.columnString(0))
+            }
+        } finally {
+            stmt.close()
+        }
+        return res
+    }
+
+    fun deleteFileRecord(projectId: String, relPath: String) {
+        val fileId = "$projectId:$relPath"
+        val oldNodes = mutableListOf<String>()
+        val selectOld = db.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
+        selectOld.bindString(1, fileId)
+        try {
+            while (selectOld.step()) {
+                oldNodes.add(selectOld.columnString(0))
+            }
+        } finally {
+            selectOld.close()
+        }
+
+        if (oldNodes.isNotEmpty()) {
+            for (nodeId in oldNodes) {
+                val delVocab = db.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
+                delVocab.bindString(1, nodeId)
+                delVocab.step()
+                delVocab.close()
+
+                val delFts = db.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
+                delFts.bindString(1, nodeId)
+                delFts.step()
+                delFts.close()
+
+                val delEdges = db.prepare("DELETE FROM edges WHERE source_node_id = ? OR target_node_id = ?;")
+                delEdges.bindString(1, nodeId)
+                delEdges.bindString(2, nodeId)
+                delEdges.step()
+                delEdges.close()
+            }
+            val delNodes = db.prepare("DELETE FROM nodes WHERE file_id = ?;")
+            delNodes.bindString(1, fileId)
+            delNodes.step()
+            delNodes.close()
+        }
+
+        val delFile = db.prepare("DELETE FROM files WHERE file_id = ?;")
+        delFile.bindString(1, fileId)
+        delFile.step()
+        delFile.close()
+    }
+
     fun upsertNodesAndEdges(
         projectId: String,
         nodes: List<GraphNode>,
