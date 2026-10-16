@@ -20,8 +20,18 @@ class CodeGraphCli {
         private val jsonCompact = Json { prettyPrint = false }
 
         fun run(argv: Array<String>): Int {
-            if (argv.contains("--version") || argv.contains("-v") || (argv.size == 1 && argv[0] == "version")) {
-                println("atlas $VERSION")
+            if (argv.contains("--version") || argv.contains("-v") || (argv.isNotEmpty() && argv[0] == "version") ||
+                (argv.size >= 2 && argv[0] == "figma" && (argv[1] == "version" || argv[1] == "--version" || argv[1] == "-v"))
+            ) {
+                val isJson = argv.contains("--json")
+                if (isJson) {
+                    println(jsonPretty.encodeToString(buildJsonObject {
+                        put("name", "atlas")
+                        put("version", VERSION)
+                    }))
+                } else {
+                    println("atlas $VERSION")
+                }
                 return 0
             }
 
@@ -55,10 +65,10 @@ class CodeGraphCli {
                 val arg = argv[idx]
                 when {
                     arg == "figma" -> subsystem = "figma"
-                    (subsystem == "figma" || arg == "figma") && (arg == "index" || arg == "query" || arg == "audit" || arg == "synthesize-scope") -> {
+                    (subsystem == "figma" || arg == "figma") && (arg == "index" || arg == "query" || arg == "audit" || arg == "synthesize-scope" || arg == "version") -> {
                         command = arg
                     }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "serve-mcp" -> {
+                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "serve-mcp" || arg == "version" -> {
                         command = arg
                     }
                     arg == "--project" && idx + 1 < argv.size -> project = argv[++idx]
@@ -206,6 +216,17 @@ class CodeGraphCli {
                         } else {
                             val compact = jsonCompact.encodeToString(data)
                             println(truncateSummary(compact, false))
+                        }
+                        return 0
+                    }
+                    "version" -> {
+                        if (isJson) {
+                            println(jsonPretty.encodeToString(buildJsonObject {
+                                put("name", "atlas")
+                                put("version", VERSION)
+                            }))
+                        } else {
+                            println("atlas $VERSION")
                         }
                         return 0
                     }
@@ -416,6 +437,17 @@ class CodeGraphCli {
                     }
                     return 0
                 }
+                "version" -> {
+                    if (isJson) {
+                        println(jsonPretty.encodeToString(buildJsonObject {
+                            put("name", "atlas")
+                            put("version", VERSION)
+                        }))
+                    } else {
+                        println("atlas $VERSION")
+                    }
+                    return 0
+                }
                 else -> {
                     println("Unknown figma command: $command")
                     printHelp()
@@ -467,6 +499,7 @@ class CodeGraphCli {
                   synthesize-scope   Synthesize 3D Concurrency Scope (files, modules, architecture)
                   audit              Verify Clean Architecture layers and Single Declaration Principle
                   serve-mcp          Run JSON-RPC 2.0 MCP server over stdio
+                  version            Print version information
 
                 Figma Commands:
                   figma index              Index Figma document snapshot and DTCG design tokens

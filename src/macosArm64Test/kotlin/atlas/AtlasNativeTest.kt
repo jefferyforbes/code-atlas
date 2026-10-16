@@ -204,6 +204,21 @@ class AtlasNativeTest {
         val exitCodeCmd = CodeGraphCli.run(arrayOf("version"))
         assertEquals(0, exitCodeCmd)
 
+        val exitCodeVersionJson = CodeGraphCli.run(arrayOf("version", "--json"))
+        assertEquals(0, exitCodeVersionJson)
+
+        val exitCodeFlagJson = CodeGraphCli.run(arrayOf("--version", "--json"))
+        assertEquals(0, exitCodeFlagJson)
+
+        val exitCodeVJson = CodeGraphCli.run(arrayOf("-v", "--json"))
+        assertEquals(0, exitCodeVJson)
+
+        val exitCodeFigmaVersion = CodeGraphCli.run(arrayOf("figma", "version"))
+        assertEquals(0, exitCodeFigmaVersion)
+
+        val exitCodeFigmaVersionJson = CodeGraphCli.run(arrayOf("figma", "version", "--json"))
+        assertEquals(0, exitCodeFigmaVersionJson)
+
         val exitCodeFigmaHelp = CodeGraphCli.run(arrayOf("figma", "--help"))
         assertEquals(0, exitCodeFigmaHelp)
     }

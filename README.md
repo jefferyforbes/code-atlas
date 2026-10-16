@@ -83,7 +83,7 @@ flowchart TD
 3. **3D Concurrency Scope Synthesis**: Synthesizes exact 3D boundaries (`files`, `modules`, `architecture`) for AI agent orchestration (`/architect`, `/plan`, `/teamwork`), preventing collisions between concurrent task branches.
 4. **Figma Spatial AST & 2D R\*Tree Indexing**: Parses Figma document node trees, stores geometric bounds into an SQLite `rtree` virtual table, and executes spatial overlap / containment queries (`--bounds x1,x2,y1,y2`) in $<1$ ms.
 5. **Vector Bloat Stripping & W3C DTCG Token Ingestion**: Strips heavy SVG vector path and bezier payloads (~85% reduction) during ingestion, imports DTCG design token bundles, and resolves alias DAGs with cycle detection.
-6. **12 Deterministic SQL Design Invariant Audits**: Evaluates UI layout sizing (circular `FILL` in `HUG`), touch targets ($\ge 48\times 48\,\text{dp}$), hardcoded ad-hoc colors/spacings, AA contrast ratios, and master component linkages.
+6. **12 Deterministic SQL Design Invariant Audits**: Evaluates bidirectional AutoLayout sizing (`CIRCULAR_V_FILL_IN_HUG`, `CIRCULAR_H_FILL_IN_HUG`), static containers (`STATIC_CONTAINER_FRAME`), default 100px frame heights (`DEFAULT_100PX_FRAME_HEIGHT`), minimum touch targets (`MIN_TOUCH_TARGET`), negative offset coordinates (`NEGATIVE_COORDINATES`), child width amputation (`CHILD_AMPUTATION_WIDTH`), zero emojis (`NO_EMOJI`), unbound token ratios (`UNBOUND_TOKENS`), detached gym specimens (`AD_HOC_DETACHED_SPECIMEN`), 2D canvas spatial topology (`CANVAS_SPATIAL_TOPOLOGY`), and WCAG relative luminance contrast ratios (`WCAG_CONTRAST`).
 7. **Clean Architecture & `BOOST-003` Auditor**: Enforces Clean Architecture layer boundaries (flagging illegal Domain $\to$ UI or Domain $\to$ concrete Data references) and the Single Declaration Principle (Rule 6: at most 1 top-level declaration per production file).
 8. **Experiential Work Memory**: Attaches agent debugging outcomes (`useful`, `dead_end`, `corrected`) to graph nodes, weighted by an automated 30-day exponential decay half-life.
 9. **Dual-Profile Enterprise Cache**: Stores the SQLite database in `~/Library/Caches/atlas/<repo_hash>/atlas.db` by default, keeping your git repository working tree 100% clean.
@@ -152,7 +152,7 @@ atlas figma --help
 ### Global Options
 
 ```text
-  --version, -v            Print version information
+  --version, -v            Print version information (supports --json)
   --help, -h               Print help information
   --project <name>         Target project slug (default: organisation)
   --workspace <dir>        Workspace root directory (default: .)
@@ -254,7 +254,7 @@ cat snapshot.json | atlas figma index --project relay --file LVhI2ueu8A6igT14N8m
 
 *Output:*
 ```text
-[Figma Index] file=LVhI2ueu8A6igT14N8m1MM nodes=1420 variables=84 edges=2180
+[Atlas Figma] Indexed project=relay fileKey=LVhI2ueu8A6igT14N8m1MM nodes=1420 variables=84 edges=2180
 ```
 
 #### 2. `atlas figma query`
@@ -290,28 +290,32 @@ atlas figma audit --project relay --file LVhI2ueu8A6igT14N8m1MM
 
 *Output:*
 ```text
-[Figma Audit] file=LVhI2ueu8A6igT14N8m1MM passed=true score=95.0 violations=0
+[Figma Audit] project=relay file=LVhI2ueu8A6igT14N8m1MM passed=true score=95/100 violations=0 polish_delta=4
 ```
 
 *JSON output (`--json`):*
 ```json
 {
-  "file_key": "LVhI2ueu8A6igT14N8m1MM",
+  "fileKey": "LVhI2ueu8A6igT14N8m1MM",
   "passed": false,
-  "maturity_score": 82.5,
-  "violation_counts": {
-    "TOUCH_TARGET_SUB48": 2,
-    "AD_HOC_COLOR": 3
-  },
+  "maturityScore": 82.5,
+  "polishDelta": [
+    "Resolve 2 blocking invariant violation(s) to reach 90+ Gate 1 maturity",
+    "Optical kerning and tabular numeral alignment on dynamic data labels",
+    "Responsive fluid auto-wrap transitions between mobile and tablet breakpoints",
+    "Micro-interaction spring physics and capacitive press state damping",
+    "Dynamic multi-line text wrapping resilience and localized string safety"
+  ],
   "violations": [
     {
-      "rule": "TOUCH_TARGET_SUB48",
-      "node_id": "12:34",
-      "node_name": "IconButton",
-      "page_name": "Design System",
-      "message": "Interactive control 'IconButton' has bounds 24x24dp (< 48dp minimum touch target). Wrap in 48x48dp AutoLayout container."
+      "rule": "MIN_TOUCH_TARGET",
+      "nodeId": "12:34",
+      "nodeName": "IconButton",
+      "message": "Interactive control 'IconButton' has hitbox dimensions 24.0x24.0 (< 48x48dp) without a >= 48dp AutoLayout container",
+      "severity": "ERROR"
     }
-  ]
+  ],
+  "totalNodes": 1420
 }
 ```
 
@@ -324,7 +328,7 @@ atlas figma synthesize-scope --project relay --file LVhI2ueu8A6igT14N8m1MM --see
 
 *Output:*
 ```text
-[Figma 3D Scope] file=LVhI2ueu8A6igT14N8m1MM seeds=[TaskCard, FilterChip] nodes=14 variables=6 bounds=x:[0.0,400.0] y:[120.0,600.0] collisions=0
+[Figma 3D Scope] project=relay file=LVhI2ueu8A6igT14N8m1MM bounds=[0..400, 120..600] nodes=14 shared_components=2 tokens=6
 ```
 
 ---
@@ -335,18 +339,18 @@ Atlas evaluates Figma documents against 12 non-negotiable design system invarian
 
 | Rule ID | Invariant Category | Description & Enforcement Standard |
 | :--- | :--- | :--- |
-| `CIRCULAR_H_FILL_IN_HUG` | AutoLayout Geometry | Child node has horizontal sizing `FILL` inside a parent with horizontal sizing `HUG`. Causes infinite circular layout calculations in Figma. |
-| `CIRCULAR_V_FILL_IN_HUG` | AutoLayout Geometry | Child node has vertical sizing `FILL` inside a parent with vertical sizing `HUG`. |
-| `STATIC_COMPONENT_FRAME` | Component Hygiene | Component or component set variant has `layoutMode == NONE` (absolute positioning). Production components must use AutoLayout (`HORIZONTAL` or `VERTICAL`). |
-| `TOUCH_TARGET_SUB48` | Accessibility | Interactive control (button, chip, toggle, icon button, checkbox) has bounds $< 48\times 48\,\text{dp}$ without an enclosing $\ge 48\times 48\,\text{dp}$ touch target frame. |
-| `AD_HOC_COLOR` | Token Discipline | Solid color fills or strokes using raw unlinked hex values instead of binding to a design token / variable alias. |
-| `AD_HOC_SPACING` | Token Discipline | Frame gap or padding values not aligned to the standard 4dp/8dp spatial grid system. |
-| `EMPTY_TEXT_TOKEN` | Content Integrity | Text layers with empty strings (`""`) or uncurated placeholder tokens (`"Settings label"`, `"Label"`). |
-| `UNNAMED_FRAME` | Canvas Hygiene | Layers with default uncurated names (`"Frame 123"`, `"Rectangle 4"`). Curated naming is required for production AST indexing. |
-| `CONTRAST_FAIL_AA` | Accessibility (WCAG) | Text nodes with color contrast ratio $< 4.5:1$ against their immediate background ($< 3.0:1$ for large text $\ge 18.66\,\text{px}$). |
-| `NEGATIVE_COORDINATE` | Coordinate Hygiene | Elements inside AutoLayout containers with negative offsets (`x < 0` or `y < 0`), causing clipping and phantom layout boundaries. |
-| `DISCONNECTED_INSTANCE` | Component Integrity | Component instance nodes (`INSTANCE`) whose master `componentId` is missing, deleted, or unresolvable in the document. |
-| `ASYNC_PAGE_LEAK` | Document Integrity | Unresolved dynamic-page node references or cross-page leaks across asynchronous node boundaries. |
+| `CIRCULAR_V_FILL_IN_HUG` | AutoLayout Geometry | Child node has vertical sizing `FILL` inside a parent with vertical sizing `HUG`. Causes infinite circular layout calculations in Figma. |
+| `CIRCULAR_H_FILL_IN_HUG` | AutoLayout Geometry | Child node has horizontal sizing `FILL` inside a parent with horizontal sizing `HUG`. |
+| `STATIC_CONTAINER_FRAME` | Component Hygiene | Interactive container, component, or component set variant has `layoutMode == NONE` (absolute positioning). Production components must use AutoLayout (`HORIZONTAL` or `VERTICAL`). |
+| `DEFAULT_100PX_FRAME_HEIGHT` | Layout Bug Prevention | Frame has default fixed height 100.0px (stuck at unmanaged `figma.createFrame()` default). Inner chips, pills, or rows must use `HUG` sizing or optical vertical centering. |
+| `MIN_TOUCH_TARGET` | Accessibility | Interactive control (button, chip, toggle, icon button, checkbox) has hitbox bounds $< 48\times 48\,\text{dp}$ without an enclosing $\ge 48\times 48\,\text{dp}$ AutoLayout touch target container. |
+| `NEGATIVE_COORDINATES` | Coordinate Hygiene | Elements inside containers with negative local offsets (`local_x < 0` or `local_y < 0`), causing clipping and phantom 300px+ layout boundaries. |
+| `CHILD_AMPUTATION_WIDTH` | AutoLayout Sizing | Child element inside padded AutoLayout container has fixed width $\ge$ parent width, causing visual truncation. Must use `layoutSizingHorizontal = FILL`. |
+| `NO_EMOJI` | Professional Iconography | Layers with unicode emojis in node names or text content. Enforces professional iconography (Lucide, Material Symbols, SF Symbols) over unicode emojis. |
+| `UNBOUND_TOKENS` | Token Discipline | Flags documents where unbound raw color fills or strokes exceed 5% of total document nodes. Enforces semantic token bindings. |
+| `AD_HOC_DETACHED_SPECIMEN` | Generative Gym Discipline | Detached static frames inside Generative Gym arenas instead of live master component instances (`INSTANCE`). |
+| `CANVAS_SPATIAL_TOPOLOGY` | Canvas Topology | Top-level canvas sections violating the 2D orthogonal matrix grid (Row 1 User Flows at $y=0$, Design System column at $y=5000, x=0$, Gym Arenas at $y\ge 5000, x\ge 4000$). |
+| `WCAG_CONTRAST` | Accessibility (WCAG) | Text nodes with color contrast ratio $< 4.5:1$ against immediate background ($< 3.0:1$ for large text $\ge 24\,\text{px}$). |
 
 ### Maturity Scoring
 - Calculated on a **0–100 scale** with weighted point deductions based on violation severity.
