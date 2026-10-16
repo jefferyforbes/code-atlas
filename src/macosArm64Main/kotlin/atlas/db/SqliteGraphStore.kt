@@ -1398,6 +1398,11 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun queryFigmaSpatialIntersection(
         fileKey: String,
+        bounds: FigmaSpatialBounds
+    ): List<FigmaNode> = queryFigmaSpatialIntersection(fileKey, bounds.minX, bounds.maxX, bounds.minY, bounds.maxY)
+
+    fun queryFigmaSpatialIntersection(
+        fileKey: String,
         minX: Double,
         maxX: Double,
         minY: Double,
