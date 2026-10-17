@@ -59,6 +59,12 @@ class NativeSqliteStatement(
         return sqlite3_column_text(s, index)?.reinterpret<ByteVar>()?.toKString() ?: ""
     }
 
+    fun columnStringNullable(index: Int): String? {
+        val s = requireStmt()
+        if (sqlite3_column_type(s, index) == SQLITE_NULL) return null
+        return sqlite3_column_text(s, index)?.reinterpret<ByteVar>()?.toKString()
+    }
+
     fun columnInt(index: Int): Int {
         val s = requireStmt()
         return sqlite3_column_int(s, index)
