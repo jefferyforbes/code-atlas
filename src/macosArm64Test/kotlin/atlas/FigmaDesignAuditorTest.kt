@@ -1191,4 +1191,65 @@ class FigmaDesignAuditorTest {
         assertEquals(92.0, score, 0.01)
         assertFalse(finalViolations.any { it.rule == "GATE_1_MATURITY_SCORE" })
     }
+
+    @Test
+    fun testFigma3DScopeBatchedInstantiatesAndSharedMasterCollisions() = withTempStore { store ->
+        val fileKey = "batched_scope_test"
+        insertBasicDocument(store, fileKey)
+
+        val masterComp = FigmaNode(
+            nodeId = "master_1",
+            fileKey = fileKey,
+            pageName = "Page 1",
+            name = "PrimaryButton",
+            nodeType = "COMPONENT",
+            canvasX = 0.0,
+            canvasY = 0.0,
+            width = 120.0,
+            height = 48.0
+        )
+        val insideInstance = FigmaNode(
+            nodeId = "inst_inside",
+            fileKey = fileKey,
+            pageName = "Page 1",
+            name = "BtnInstanceInside",
+            nodeType = "INSTANCE",
+            canvasX = 10.0,
+            canvasY = 10.0,
+            width = 120.0,
+            height = 48.0
+        )
+        val outsideInstance = FigmaNode(
+            nodeId = "inst_outside",
+            fileKey = fileKey,
+            pageName = "Page 1",
+            name = "BtnInstanceOutside",
+            nodeType = "INSTANCE",
+            canvasX = 5000.0,
+            canvasY = 5000.0,
+            width = 120.0,
+            height = 48.0
+        )
+
+        store.insertFigmaNodes(fileKey, listOf(masterComp, insideInstance, outsideInstance))
+        store.insertFigmaEdges(fileKey, listOf(
+            FigmaEdge("e1", fileKey, "inst_inside", "master_1", "INSTANTIATES"),
+            FigmaEdge("e2", fileKey, "inst_outside", "master_1", "INSTANTIATES")
+        ))
+
+        val instEdges = store.queryFigmaEdgesByType(fileKey, "INSTANTIATES")
+        assertEquals(2, instEdges.size)
+
+        val auditor = FigmaDesignAuditor(store)
+        val scope = auditor.synthesizeFigmaScope(
+            project = "relay",
+            fileKey = fileKey,
+            seedNodeNames = listOf("BtnInstanceInside")
+        )
+
+        assertEquals(1, scope.sharedMasterComponents.size)
+        assertTrue(scope.sharedMasterComponents.contains("PrimaryButton"))
+        assertEquals(1, scope.potentialCollisions.size)
+        assertTrue(scope.potentialCollisions[0].contains("1 external instance(s)"))
+    }
 }

@@ -481,6 +481,16 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
                                     "Property '$propName' on '$className' has $mutationCount active write-site mutation(s) in the call graph; refactor mutations to immutable .copy(...) before converting 'var' -> 'val'."
                                 )
                             }
+                            val classNode = store.listNodes(projectSlug).firstOrNull {
+                                (it.name == className || it.qualifiedName.endsWith(".$className")) &&
+                                    it.kind in setOf("class", "data class", "value class", "interface")
+                            }
+                            val targetFilePath = classNode?.let {
+                                val f = it.fileId
+                                if (f.contains(':')) f.substringAfter(':') else f
+                            } ?: node.filePath
+                            val targetLine = classNode?.startLine ?: node.startLine
+
                             candidates.add(
                                 RawCandidate(
                                     priorityScore = computePriority(2.0),
@@ -488,9 +498,9 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
                                     ruleId = if (reason.startsWith("BROKEN")) "COMPOSE-STAB-002" else "COMPOSE-STAB-001",
                                     fixStrategy = "VAL_CONVERSION",
                                     writeSiteSafe = writeSiteSafe,
-                                    targetNodeId = node.nodeId,
-                                    filePath = node.filePath,
-                                    line = node.startLine,
+                                    targetNodeId = classNode?.nodeId ?: node.nodeId,
+                                    filePath = targetFilePath,
+                                    line = targetLine,
                                     downstreamCascadeCount = cascadeCount,
                                     rationale = rationale,
                                     beforeSnippet = before,
