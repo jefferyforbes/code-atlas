@@ -59,8 +59,19 @@ object VaultPlanBridge {
         if (isPlan) {
             val scopedFiles = extractScopedFiles(markdownText)
             scopedFiles.forEachIndexed { idx, scopedFile ->
-                val cleanF = scopedFile.trim().trim('\'', '"')
-                val matchedNodes = byRelFile[cleanF] ?: emptyList()
+                val cleanF = scopedFile.trim().trim('\'', '"').removePrefix("./")
+                val matchedNodes = when {
+                    cleanF.contains('*') || cleanF.contains('?') -> {
+                        val globRe = globToRegex(cleanF)
+                        byRelFile.filterKeys { rel -> globRe.matches(rel) }.values.flatten()
+                    }
+                    cleanF.endsWith('/') -> {
+                        byRelFile.filterKeys { rel -> rel.startsWith(cleanF) }.values.flatten()
+                    }
+                    else -> {
+                        byRelFile[cleanF] ?: byRelFile[cleanF.substringAfterLast('/')] ?: emptyList()
+                    }
+                }
                 for (targetNode in matchedNodes) {
                     val eid = "$docNodeId:scopes:${targetNode.nodeId}"
                     if (seenEdges.add(eid)) {
@@ -172,5 +183,36 @@ object VaultPlanBridge {
             }
         }
         return scoped
+    }
+
+    fun globToRegex(glob: String): Regex {
+        val sb = StringBuilder("^")
+        var i = 0
+        while (i < glob.length) {
+            when (val c = glob[i]) {
+                '*' -> {
+                    if (i + 1 < glob.length && glob[i + 1] == '*') {
+                        i++
+                        if (i + 1 < glob.length && glob[i + 1] == '/') {
+                            i++
+                            sb.append("(?:.*/)?")
+                        } else {
+                            sb.append(".*")
+                        }
+                    } else {
+                        sb.append("[^/]*")
+                    }
+                }
+                '?' -> sb.append("[^/]")
+                '.', '(', ')', '+', '|', '^', '$', '@', '%', '[', ']', '{', '}' -> {
+                    sb.append('\\').append(c)
+                }
+                '\\' -> sb.append('/')
+                else -> sb.append(c)
+            }
+            i++
+        }
+        sb.append('$')
+        return Regex(sb.toString())
     }
 }

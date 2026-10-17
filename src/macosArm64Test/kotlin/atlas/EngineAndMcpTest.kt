@@ -5,6 +5,7 @@ import atlas.cli.CodeGraphCli
 import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
+import atlas.engine.ScopeSynthesizer
 import atlas.extract.FigmaSnapshotExtractor
 import atlas.extract.ModuleBoundaryDetector
 import atlas.mcp.CodeGraphMcpServer
@@ -922,6 +923,150 @@ class EngineAndMcpTest {
             val deadNodes = auditor.detectDeadCode("p")
             assertEquals(1, deadNodes.size)
             assertEquals("unusedFunction", deadNodes[0].name)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testVaultPlanBridgeGlobAndDirectoryScoping() {
+        val nodeService = GraphNode(
+            nodeId = "p:src/services/deep/PaymentService.kt#PaymentService",
+            projectId = "p",
+            fileId = "p:src/services/deep/PaymentService.kt",
+            name = "PaymentService",
+            qualifiedName = "com.services.deep.PaymentService",
+            kind = "class"
+        )
+        val nodeModel = GraphNode(
+            nodeId = "p:src/models/Payment.kt#Payment",
+            projectId = "p",
+            fileId = "p:src/models/Payment.kt",
+            name = "Payment",
+            qualifiedName = "com.models.Payment",
+            kind = "class"
+        )
+        val nodeApi = GraphNode(
+            nodeId = "p:src/api/v1/Routes.kt#Routes",
+            projectId = "p",
+            fileId = "p:src/api/v1/Routes.kt",
+            name = "Routes",
+            qualifiedName = "com.api.v1.Routes",
+            kind = "class"
+        )
+        val nodeExact = GraphNode(
+            nodeId = "p:src/exact/Target.kt#Target",
+            projectId = "p",
+            fileId = "p:src/exact/Target.kt",
+            name = "Target",
+            qualifiedName = "com.exact.Target",
+            kind = "class"
+        )
+
+        val planMd = """
+            ---
+            status: active
+            scope:
+              files:
+                - src/services/**/*.kt
+                - src/models/*.kt
+                - src/api/
+                - ./src/exact/Target.kt
+            ---
+            # Glob Scoped Plan
+        """.trimIndent()
+
+        val (nodes, edges) = VaultPlanBridge.extractMarkdownAndPlans(
+            projectId = "p",
+            relPath = "plans/glob_plan.md",
+            markdownText = planMd,
+            indexedNodes = listOf(nodeService, nodeModel, nodeApi, nodeExact)
+        )
+
+        assertEquals(1, nodes.size)
+        val scopedTargetIds = edges.filter { it.edgeType == "PLAN_SCOPES_FILE" }.map { it.targetNodeId }.toSet()
+        assertTrue(nodeService.nodeId in scopedTargetIds, "src/services/**/*.kt must match deep nested service")
+        assertTrue(nodeModel.nodeId in scopedTargetIds, "src/models/*.kt must match model")
+        assertTrue(nodeApi.nodeId in scopedTargetIds, "src/api/ must match files under api directory")
+        assertTrue(nodeExact.nodeId in scopedTargetIds, "./src/exact/Target.kt must match exact path")
+    }
+
+    @Test
+    fun testScopeSynthesizerGlobDirectoryAndFileResolution() {
+        val pid = getpid()
+        val dbPath = "/tmp/test_synthesizer_globs_$pid.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            store.upsertFileRecord(
+                projectId = "p",
+                relPath = "src/service/OrderService.kt",
+                language = "kotlin",
+                moduleId = ":service",
+                sourceSet = "commonMain",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                sha256 = "sha1",
+                mtime = 100.0,
+                loc = 50,
+                topLevelDeclCount = 2
+            )
+            store.upsertFileRecord(
+                projectId = "p",
+                relPath = "src/models/Order.kt",
+                language = "kotlin",
+                moduleId = ":models",
+                sourceSet = "commonMain",
+                semioticLayer = "syntactic",
+                archLayer = "domain",
+                sha256 = "sha2",
+                mtime = 100.0,
+                loc = 20,
+                topLevelDeclCount = 1
+            )
+
+            val classNode = GraphNode(
+                nodeId = "p:src/service/OrderService.kt#OrderService",
+                projectId = "p",
+                fileId = "p:src/service/OrderService.kt",
+                name = "OrderService",
+                qualifiedName = "com.OrderService",
+                kind = "class"
+            )
+            val fnNode = GraphNode(
+                nodeId = "p:src/service/OrderService.kt#processOrder",
+                projectId = "p",
+                fileId = "p:src/service/OrderService.kt",
+                name = "processOrder",
+                qualifiedName = "com.processOrder",
+                kind = "function"
+            )
+            val modelNode = GraphNode(
+                nodeId = "p:src/models/Order.kt#Order",
+                projectId = "p",
+                fileId = "p:src/models/Order.kt",
+                name = "Order",
+                qualifiedName = "com.Order",
+                kind = "class"
+            )
+            store.upsertNodesAndEdges("p", listOf(classNode, fnNode, modelNode), emptyList())
+
+            val synthesizer = ScopeSynthesizer(store)
+
+            // 1. Seed by glob: "src/**/*.kt" resolves all files
+            val globScope = synthesizer.synthesizeScope("p", listOf("src/**/*.kt"))
+            assertTrue(globScope.files.contains("src/service/OrderService.kt"))
+            assertTrue(globScope.files.contains("src/models/Order.kt"))
+
+            // 2. Seed by directory prefix: "src/service/"
+            val dirScope = synthesizer.synthesizeScope("p", listOf("src/service/"))
+            assertTrue(dirScope.files.contains("src/service/OrderService.kt"))
+            assertFalse(dirScope.files.contains("src/models/Order.kt"))
+
+            // 3. Seed by specific file path: "src/service/OrderService.kt" resolves both nodes in that file
+            val fileScope = synthesizer.synthesizeScope("p", listOf("src/service/OrderService.kt"))
+            assertTrue(fileScope.files.contains("src/service/OrderService.kt"))
         } finally {
             store.close()
             PlatformFiles.delete(dbPath)

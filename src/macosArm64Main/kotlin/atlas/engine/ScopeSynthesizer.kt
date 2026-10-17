@@ -1,5 +1,6 @@
 package atlas.engine
 
+import atlas.bridge.VaultPlanBridge
 import atlas.db.SqliteGraphStore
 import atlas.model.Compose3DScope
 import atlas.model.GraphNode
@@ -17,12 +18,37 @@ class ScopeSynthesizer(private val store: SqliteGraphStore) {
     ): ScopeRecommendation {
         val resolvedNodes = mutableListOf<GraphNode>()
         for (target in seedTargets) {
-            val node = store.getNode(projectId, target)
-            if (node != null) {
-                resolvedNodes.add(node)
+            val cleanTarget = target.trim().trim('\'', '"').removePrefix("./").replace('\\', '/')
+            val matchedNodes = when {
+                cleanTarget.contains('*') || cleanTarget.contains('?') -> {
+                    val globRe = VaultPlanBridge.globToRegex(cleanTarget)
+                    val allFiles = store.listIndexedFiles(projectId)
+                    val matchingFiles = allFiles.filter { rel -> globRe.matches(rel) }
+                    val fileIds = matchingFiles.map { "$projectId:$it" }
+                    store.getNodesForFileIds(projectId, fileIds)
+                }
+                cleanTarget.endsWith('/') -> {
+                    val allFiles = store.listIndexedFiles(projectId)
+                    val matchingFiles = allFiles.filter { rel -> rel.startsWith(cleanTarget) }
+                    val fileIds = matchingFiles.map { "$projectId:$it" }
+                    store.getNodesForFileIds(projectId, fileIds)
+                }
+                cleanTarget.contains('.') -> {
+                    store.getNodesForFile(projectId, cleanTarget)
+                }
+                else -> emptyList()
+            }
+
+            if (matchedNodes.isNotEmpty()) {
+                resolvedNodes.addAll(matchedNodes)
             } else {
-                val matches = store.searchNodes(projectId, target, limit = 3)
-                resolvedNodes.addAll(matches)
+                val node = store.getNode(projectId, target)
+                if (node != null) {
+                    resolvedNodes.add(node)
+                } else {
+                    val matches = store.searchNodes(projectId, target, limit = 3)
+                    resolvedNodes.addAll(matches)
+                }
             }
         }
 
