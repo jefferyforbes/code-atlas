@@ -330,6 +330,7 @@ class SqliteGraphStore(val dbPath: String) {
                 delStmt.bindString(2, normalizedFileId)
                 delStmt.step()
 
+                var insertedCount = 0
                 for (edge in edges) {
                     if (edge.edgeType == "CONTAINS") continue
                     val targetSym = if (edge.targetNodeId.startsWith("sym:")) {
@@ -351,6 +352,21 @@ class SqliteGraphStore(val dbPath: String) {
                     insStmt.bindInt(8, edge.lineNumber)
                     insStmt.bindString(9, edge.edgeId)
                     insStmt.step()
+                    insertedCount++
+                }
+                if (insertedCount == 0) {
+                    insStmt.reset()
+                    insStmt.clearBindings()
+                    insStmt.bindString(1, projectId)
+                    insStmt.bindString(2, normalizedFileId)
+                    insStmt.bindString(3, "")
+                    insStmt.bindString(4, "")
+                    insStmt.bindString(5, "INDEXED_MARKER")
+                    insStmt.bindDouble(6, 1.0)
+                    insStmt.bindString(7, "EXTRACTED_AST")
+                    insStmt.bindInt(8, 0)
+                    insStmt.bindString(9, "")
+                    insStmt.step()
                 }
             } finally {
                 delStmt.close()
@@ -369,7 +385,7 @@ class SqliteGraphStore(val dbPath: String) {
             SELECT edge_id, project_id, source_node_id, target_symbol, edge_type,
                    confidence, provenance, line_number
             FROM raw_symbol_edges
-            WHERE project_id = ?
+            WHERE project_id = ? AND edge_type != 'INDEXED_MARKER'
             ORDER BY rowid ASC;
             """.trimIndent()
         )
@@ -408,6 +424,20 @@ class SqliteGraphStore(val dbPath: String) {
         return results
     }
 
+    fun filesWithRawSymbolEdges(projectId: String): Set<String> {
+        val stmt = db.prepare("SELECT DISTINCT file_id FROM raw_symbol_edges WHERE project_id = ?;")
+        val result = mutableSetOf<String>()
+        try {
+            stmt.bindString(1, projectId)
+            while (stmt.step()) {
+                result.add(stmt.columnString(0))
+            }
+        } finally {
+            stmt.close()
+        }
+        return result
+    }
+
     fun deleteFileRawSymbolEdges(projectId: String, fileId: String) {
         val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
         val stmt = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
@@ -432,6 +462,22 @@ class SqliteGraphStore(val dbPath: String) {
         try {
             stmt.bindString(1, projectId)
             stmt.bindString(2, fileId)
+            stmt.step()
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun deleteAllResolvedCodeEdges(projectId: String) {
+        val stmt = db.prepare(
+            """
+            DELETE FROM edges
+            WHERE project_id = ?
+              AND edge_type NOT IN ('PLAN_SCOPES_FILE', 'WIKILINK_REFS', 'CODE_SPAN_REFS');
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, projectId)
             stmt.step()
         } finally {
             stmt.close()

@@ -2,6 +2,7 @@ package atlas.engine
 
 import atlas.db.SqliteGraphStore
 import atlas.model.AuditReport
+import atlas.model.GraphNode
 import atlas.model.LayerInversionViolation
 import atlas.model.PlanCollision
 import atlas.model.SingleDeclarationViolation
@@ -139,5 +140,34 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
             }
         }
         return collisions
+    }
+
+    /**
+     * Detects potentially dead production symbols (`inDegree == 0`) excluding tests, test doubles,
+     * module/doc/plan/variable/typealias/namespace nodes, and standard entrypoints (`main`, `init`, etc.).
+     */
+    fun detectDeadCode(projectId: String): List<GraphNode> {
+        val entrypointNames = setOf("main", "init", "run", "invoke", "Companion", "onCreate", "onStart")
+        val excludedKinds = setOf(
+            "module", "markdown_doc", "markdown_note", "plan_contract", "expect_decl", "actual_decl",
+            "typealias", "namespace", "variable", "composable"
+        )
+        return store.listNodes(projectId)
+            .filter { node ->
+                node.inDegree == 0 &&
+                    node.semioticLayer != "test" &&
+                    node.archLayer != "test" &&
+                    !node.isTestDouble &&
+                    !node.fileId.endsWith(".md") &&
+                    node.kind !in excludedKinds &&
+                    node.name !in entrypointNames &&
+                    !node.name.endsWith("Test") &&
+                    !node.name.endsWith("Cli") &&
+                    !node.name.endsWith("Server") &&
+                    !node.signature.contains("override ") &&
+                    !node.signature.contains("@Preview") &&
+                    !node.signature.contains("@Test")
+            }
+            .sortedWith(compareBy({ it.fileId }, { it.startLine }))
     }
 }
