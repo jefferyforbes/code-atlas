@@ -295,75 +295,91 @@ class SqliteGraphStore(val dbPath: String) {
     ): String {
         val fileId = "$projectId:$relPath"
 
-        // Find old nodes to purge associated indexes
-        val oldNodes = mutableListOf<String>()
-        val selectOld = db.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
-        selectOld.bindString(1, fileId)
+        db.exec("BEGIN TRANSACTION;")
         try {
-            while (selectOld.step()) {
-                oldNodes.add(selectOld.columnString(0))
+            // Find old nodes to purge associated indexes
+            val oldNodes = mutableListOf<String>()
+            val selectOld = db.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
+            try {
+                selectOld.bindString(1, fileId)
+                while (selectOld.step()) {
+                    oldNodes.add(selectOld.columnString(0))
+                }
+            } finally {
+                selectOld.close()
             }
-        } finally {
-            selectOld.close()
-        }
 
-        if (oldNodes.isNotEmpty()) {
-            for (nodeId in oldNodes) {
+            if (oldNodes.isNotEmpty()) {
                 val delVocab = db.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-                delVocab.bindString(1, nodeId)
-                delVocab.step()
-                delVocab.close()
-
                 val delFts = db.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
-                delFts.bindString(1, nodeId)
-                delFts.step()
-                delFts.close()
-
                 val delEdges = db.prepare("DELETE FROM edges WHERE source_node_id = ?;")
-                delEdges.bindString(1, nodeId)
-                delEdges.step()
-                delEdges.close()
-            }
-            val delNodes = db.prepare("DELETE FROM nodes WHERE file_id = ?;")
-            delNodes.bindString(1, fileId)
-            delNodes.step()
-            delNodes.close()
-        }
+                val delNodes = db.prepare("DELETE FROM nodes WHERE file_id = ?;")
+                try {
+                    for (nodeId in oldNodes) {
+                        delVocab.reset()
+                        delVocab.clearBindings()
+                        delVocab.bindString(1, nodeId)
+                        delVocab.step()
 
-        val upsertStmt = db.prepare(
-            """
-            INSERT INTO files (
-                file_id, project_id, rel_path, language, module_id, source_set,
-                semiotic_layer, arch_layer, sha256, mtime, loc, top_level_decl_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(file_id) DO UPDATE SET
-                language = excluded.language,
-                module_id = excluded.module_id,
-                source_set = excluded.source_set,
-                semiotic_layer = excluded.semiotic_layer,
-                arch_layer = excluded.arch_layer,
-                sha256 = excluded.sha256,
-                mtime = excluded.mtime,
-                loc = excluded.loc,
-                top_level_decl_count = excluded.top_level_decl_count;
-            """.trimIndent()
-        )
-        try {
-            upsertStmt.bindString(1, fileId)
-            upsertStmt.bindString(2, projectId)
-            upsertStmt.bindString(3, relPath)
-            upsertStmt.bindString(4, language)
-            upsertStmt.bindString(5, moduleId)
-            upsertStmt.bindString(6, sourceSet)
-            upsertStmt.bindString(7, semioticLayer)
-            upsertStmt.bindString(8, archLayer)
-            upsertStmt.bindString(9, sha256)
-            upsertStmt.bindDouble(10, mtime)
-            upsertStmt.bindInt(11, loc)
-            upsertStmt.bindInt(12, topLevelDeclCount)
-            upsertStmt.step()
-        } finally {
-            upsertStmt.close()
+                        delFts.reset()
+                        delFts.clearBindings()
+                        delFts.bindString(1, nodeId)
+                        delFts.step()
+
+                        delEdges.reset()
+                        delEdges.clearBindings()
+                        delEdges.bindString(1, nodeId)
+                        delEdges.step()
+                    }
+                    delNodes.bindString(1, fileId)
+                    delNodes.step()
+                } finally {
+                    delVocab.close()
+                    delFts.close()
+                    delEdges.close()
+                    delNodes.close()
+                }
+            }
+
+            val upsertStmt = db.prepare(
+                """
+                INSERT INTO files (
+                    file_id, project_id, rel_path, language, module_id, source_set,
+                    semiotic_layer, arch_layer, sha256, mtime, loc, top_level_decl_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(file_id) DO UPDATE SET
+                    language = excluded.language,
+                    module_id = excluded.module_id,
+                    source_set = excluded.source_set,
+                    semiotic_layer = excluded.semiotic_layer,
+                    arch_layer = excluded.arch_layer,
+                    sha256 = excluded.sha256,
+                    mtime = excluded.mtime,
+                    loc = excluded.loc,
+                    top_level_decl_count = excluded.top_level_decl_count;
+                """.trimIndent()
+            )
+            try {
+                upsertStmt.bindString(1, fileId)
+                upsertStmt.bindString(2, projectId)
+                upsertStmt.bindString(3, relPath)
+                upsertStmt.bindString(4, language)
+                upsertStmt.bindString(5, moduleId)
+                upsertStmt.bindString(6, sourceSet)
+                upsertStmt.bindString(7, semioticLayer)
+                upsertStmt.bindString(8, archLayer)
+                upsertStmt.bindString(9, sha256)
+                upsertStmt.bindDouble(10, mtime)
+                upsertStmt.bindInt(11, loc)
+                upsertStmt.bindInt(12, topLevelDeclCount)
+                upsertStmt.step()
+            } finally {
+                upsertStmt.close()
+            }
+            db.exec("COMMIT;")
+        } catch (e: Throwable) {
+            db.exec("ROLLBACK;")
+            throw e
         }
         return fileId
     }
@@ -384,45 +400,87 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun deleteFileRecord(projectId: String, relPath: String) {
         val fileId = "$projectId:$relPath"
-        val oldNodes = mutableListOf<String>()
-        val selectOld = db.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
-        selectOld.bindString(1, fileId)
+        db.exec("BEGIN TRANSACTION;")
         try {
-            while (selectOld.step()) {
-                oldNodes.add(selectOld.columnString(0))
+            val oldNodes = mutableListOf<String>()
+            val selectOld = db.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
+            try {
+                selectOld.bindString(1, fileId)
+                while (selectOld.step()) {
+                    oldNodes.add(selectOld.columnString(0))
+                }
+            } finally {
+                selectOld.close()
             }
-        } finally {
-            selectOld.close()
-        }
 
-        if (oldNodes.isNotEmpty()) {
-            for (nodeId in oldNodes) {
+            if (oldNodes.isNotEmpty()) {
                 val delVocab = db.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-                delVocab.bindString(1, nodeId)
-                delVocab.step()
-                delVocab.close()
-
                 val delFts = db.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
-                delFts.bindString(1, nodeId)
-                delFts.step()
-                delFts.close()
-
                 val delEdges = db.prepare("DELETE FROM edges WHERE source_node_id = ? OR target_node_id = ?;")
-                delEdges.bindString(1, nodeId)
-                delEdges.bindString(2, nodeId)
-                delEdges.step()
-                delEdges.close()
-            }
-            val delNodes = db.prepare("DELETE FROM nodes WHERE file_id = ?;")
-            delNodes.bindString(1, fileId)
-            delNodes.step()
-            delNodes.close()
-        }
+                val delNodes = db.prepare("DELETE FROM nodes WHERE file_id = ?;")
+                try {
+                    for (nodeId in oldNodes) {
+                        delVocab.reset()
+                        delVocab.clearBindings()
+                        delVocab.bindString(1, nodeId)
+                        delVocab.step()
 
-        val delFile = db.prepare("DELETE FROM files WHERE file_id = ?;")
-        delFile.bindString(1, fileId)
-        delFile.step()
-        delFile.close()
+                        delFts.reset()
+                        delFts.clearBindings()
+                        delFts.bindString(1, nodeId)
+                        delFts.step()
+
+                        delEdges.reset()
+                        delEdges.clearBindings()
+                        delEdges.bindString(1, nodeId)
+                        delEdges.bindString(2, nodeId)
+                        delEdges.step()
+                    }
+                    delNodes.bindString(1, fileId)
+                    delNodes.step()
+                } finally {
+                    delVocab.close()
+                    delFts.close()
+                    delEdges.close()
+                    delNodes.close()
+                }
+            }
+
+            val delFile = db.prepare("DELETE FROM files WHERE file_id = ?;")
+            try {
+                delFile.bindString(1, fileId)
+                delFile.step()
+            } finally {
+                delFile.close()
+            }
+
+            if (oldNodes.isNotEmpty()) {
+                val updateDeg = db.prepare(
+                    """
+                    UPDATE nodes SET
+                        in_degree = (
+                            SELECT COUNT(*) FROM edges e
+                            WHERE e.project_id = nodes.project_id AND e.target_node_id = nodes.node_id
+                        ),
+                        out_degree = (
+                            SELECT COUNT(*) FROM edges e
+                            WHERE e.project_id = nodes.project_id AND e.source_node_id = nodes.node_id
+                        )
+                    WHERE project_id = ?;
+                    """.trimIndent()
+                )
+                try {
+                    updateDeg.bindString(1, projectId)
+                    updateDeg.step()
+                } finally {
+                    updateDeg.close()
+                }
+            }
+            db.exec("COMMIT;")
+        } catch (e: Throwable) {
+            db.exec("ROLLBACK;")
+            throw e
+        }
     }
 
     fun upsertNodesAndEdges(
@@ -432,114 +490,69 @@ class SqliteGraphStore(val dbPath: String) {
     ) {
         db.exec("BEGIN TRANSACTION;")
         try {
-            for (node in nodes) {
-                val delFts = db.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
-                delFts.bindString(1, node.nodeId)
-                delFts.step()
-                delFts.close()
-
-                val delVocab = db.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-                delVocab.bindString(1, node.nodeId)
-                delVocab.step()
-                delVocab.close()
-
-                val insNode = db.prepare(
-                    """
-                    INSERT INTO nodes (
-                        node_id, project_id, file_id, name, qualified_name, kind, signature,
-                        start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                        is_test_double, in_degree, out_degree
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(node_id) DO UPDATE SET
-                        file_id = excluded.file_id,
-                        name = excluded.name,
-                        qualified_name = excluded.qualified_name,
-                        kind = excluded.kind,
-                        signature = excluded.signature,
-                        start_line = excluded.start_line,
-                        end_line = excluded.end_line,
-                        module_id = excluded.module_id,
-                        source_set = excluded.source_set,
-                        semiotic_layer = excluded.semiotic_layer,
-                        arch_layer = excluded.arch_layer,
-                        is_test_double = excluded.is_test_double;
-                    """.trimIndent()
-                )
-                insNode.bindString(1, node.nodeId)
-                insNode.bindString(2, node.projectId)
-                insNode.bindString(3, node.fileId)
-                insNode.bindString(4, node.name)
-                insNode.bindString(5, node.qualifiedName)
-                insNode.bindString(6, node.kind)
-                insNode.bindString(7, node.signature)
-                insNode.bindInt(8, node.startLine)
-                insNode.bindInt(9, node.endLine)
-                insNode.bindString(10, node.moduleId)
-                insNode.bindString(11, node.sourceSet)
-                insNode.bindString(12, node.semioticLayer)
-                insNode.bindString(13, node.archLayer)
-                insNode.bindInt(14, if (node.isTestDouble) 1 else 0)
-                insNode.bindInt(15, node.inDegree)
-                insNode.bindInt(16, node.outDegree)
-                insNode.step()
-                insNode.close()
-
-                val insFts = db.prepare(
-                    """
-                    INSERT INTO nodes_fts (node_id, project_id, name, qualified_name, signature, file_id)
-                    VALUES (?, ?, ?, ?, ?, ?);
-                    """.trimIndent()
-                )
-                insFts.bindString(1, node.nodeId)
-                insFts.bindString(2, node.projectId)
-                insFts.bindString(3, node.name)
-                insFts.bindString(4, node.qualifiedName)
-                insFts.bindString(5, node.signature)
-                insFts.bindString(6, node.fileId)
-                insFts.step()
-                insFts.close()
-
-                for (seg in NameSegmentTokenizer.tokenize("${node.name} ${node.qualifiedName}")) {
-                    val insVocab = db.prepare(
-                        """
-                        INSERT OR IGNORE INTO name_segment_vocab (segment, node_id, project_id)
-                        VALUES (?, ?, ?);
-                        """.trimIndent()
+            val delFts = db.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
+            val delVocab = db.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
+            val insNode = db.prepare(
+                """
+                INSERT INTO nodes (
+                    node_id, project_id, file_id, name, qualified_name, kind, signature,
+                    start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                    is_test_double, in_degree, out_degree
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET
+                    file_id = excluded.file_id,
+                    name = excluded.name,
+                    qualified_name = excluded.qualified_name,
+                    kind = excluded.kind,
+                    signature = excluded.signature,
+                    start_line = excluded.start_line,
+                    end_line = excluded.end_line,
+                    module_id = excluded.module_id,
+                    source_set = excluded.source_set,
+                    semiotic_layer = excluded.semiotic_layer,
+                    arch_layer = excluded.arch_layer,
+                    is_test_double = excluded.is_test_double;
+                """.trimIndent()
+            )
+            val insFts = db.prepare(
+                """
+                INSERT INTO nodes_fts (node_id, project_id, name, qualified_name, signature, file_id)
+                VALUES (?, ?, ?, ?, ?, ?);
+                """.trimIndent()
+            )
+            val insVocab = db.prepare(
+                """
+                INSERT OR IGNORE INTO name_segment_vocab (segment, node_id, project_id)
+                VALUES (?, ?, ?);
+                """.trimIndent()
+            )
+            val insEdge = db.prepare(
+                """
+                INSERT INTO edges (
+                    edge_id, project_id, source_node_id, target_node_id,
+                    edge_type, provenance, confidence, line_number
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(edge_id) DO UPDATE SET
+                    edge_type = excluded.edge_type,
+                    provenance = excluded.provenance,
+                    confidence = excluded.confidence,
+                    line_number = excluded.line_number;
+                """.trimIndent()
+            )
+            val sweepOrphanEdges = db.prepare(
+                """
+                DELETE FROM edges
+                WHERE project_id = ?
+                  AND (
+                    source_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
+                    OR (
+                      target_node_id NOT LIKE 'vault_ref#%'
+                      AND target_node_id NOT LIKE '%:vault_ref#%'
+                      AND target_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
                     )
-                    insVocab.bindString(1, seg)
-                    insVocab.bindString(2, node.nodeId)
-                    insVocab.bindString(3, node.projectId)
-                    insVocab.step()
-                    insVocab.close()
-                }
-            }
-
-            for (edge in edges) {
-                val insEdge = db.prepare(
-                    """
-                    INSERT INTO edges (
-                        edge_id, project_id, source_node_id, target_node_id,
-                        edge_type, provenance, confidence, line_number
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(edge_id) DO UPDATE SET
-                        edge_type = excluded.edge_type,
-                        provenance = excluded.provenance,
-                        confidence = excluded.confidence,
-                        line_number = excluded.line_number;
-                    """.trimIndent()
-                )
-                insEdge.bindString(1, edge.edgeId)
-                insEdge.bindString(2, edge.projectId)
-                insEdge.bindString(3, edge.sourceNodeId)
-                insEdge.bindString(4, edge.targetNodeId)
-                insEdge.bindString(5, edge.edgeType)
-                insEdge.bindString(6, edge.provenance)
-                insEdge.bindDouble(7, edge.confidence)
-                insEdge.bindInt(8, edge.lineNumber)
-                insEdge.step()
-                insEdge.close()
-            }
-
+                  );
+                """.trimIndent()
+            )
             val updateDeg = db.prepare(
                 """
                 UPDATE nodes SET
@@ -554,9 +567,90 @@ class SqliteGraphStore(val dbPath: String) {
                 WHERE project_id = ?;
                 """.trimIndent()
             )
-            updateDeg.bindString(1, projectId)
-            updateDeg.step()
-            updateDeg.close()
+
+            try {
+                for (node in nodes) {
+                    delFts.reset()
+                    delFts.clearBindings()
+                    delFts.bindString(1, node.nodeId)
+                    delFts.step()
+
+                    delVocab.reset()
+                    delVocab.clearBindings()
+                    delVocab.bindString(1, node.nodeId)
+                    delVocab.step()
+
+                    insNode.reset()
+                    insNode.clearBindings()
+                    insNode.bindString(1, node.nodeId)
+                    insNode.bindString(2, node.projectId)
+                    insNode.bindString(3, node.fileId)
+                    insNode.bindString(4, node.name)
+                    insNode.bindString(5, node.qualifiedName)
+                    insNode.bindString(6, node.kind)
+                    insNode.bindString(7, node.signature)
+                    insNode.bindInt(8, node.startLine)
+                    insNode.bindInt(9, node.endLine)
+                    insNode.bindString(10, node.moduleId)
+                    insNode.bindString(11, node.sourceSet)
+                    insNode.bindString(12, node.semioticLayer)
+                    insNode.bindString(13, node.archLayer)
+                    insNode.bindInt(14, if (node.isTestDouble) 1 else 0)
+                    insNode.bindInt(15, node.inDegree)
+                    insNode.bindInt(16, node.outDegree)
+                    insNode.step()
+
+                    insFts.reset()
+                    insFts.clearBindings()
+                    insFts.bindString(1, node.nodeId)
+                    insFts.bindString(2, node.projectId)
+                    insFts.bindString(3, node.name)
+                    insFts.bindString(4, node.qualifiedName)
+                    insFts.bindString(5, node.signature)
+                    insFts.bindString(6, node.fileId)
+                    insFts.step()
+
+                    for (seg in NameSegmentTokenizer.tokenize("${node.name} ${node.qualifiedName}")) {
+                        insVocab.reset()
+                        insVocab.clearBindings()
+                        insVocab.bindString(1, seg)
+                        insVocab.bindString(2, node.nodeId)
+                        insVocab.bindString(3, node.projectId)
+                        insVocab.step()
+                    }
+                }
+
+                for (edge in edges) {
+                    insEdge.reset()
+                    insEdge.clearBindings()
+                    insEdge.bindString(1, edge.edgeId)
+                    insEdge.bindString(2, edge.projectId)
+                    insEdge.bindString(3, edge.sourceNodeId)
+                    insEdge.bindString(4, edge.targetNodeId)
+                    insEdge.bindString(5, edge.edgeType)
+                    insEdge.bindString(6, edge.provenance)
+                    insEdge.bindDouble(7, edge.confidence)
+                    insEdge.bindInt(8, edge.lineNumber)
+                    insEdge.step()
+                }
+
+                sweepOrphanEdges.bindString(1, projectId)
+                sweepOrphanEdges.bindString(2, projectId)
+                sweepOrphanEdges.bindString(3, projectId)
+                sweepOrphanEdges.step()
+
+                updateDeg.bindString(1, projectId)
+                updateDeg.step()
+            } finally {
+                delFts.close()
+                delVocab.close()
+                insNode.close()
+                insFts.close()
+                insVocab.close()
+                insEdge.close()
+                sweepOrphanEdges.close()
+                updateDeg.close()
+            }
 
             db.exec("COMMIT;")
         } catch (e: Throwable) {
@@ -637,16 +731,19 @@ class SqliteGraphStore(val dbPath: String) {
                     LIMIT ?;
                     """.trimIndent()
                 )
-                ftsStmt.bindString(1, projectId)
-                ftsStmt.bindString(2, ftsExpr)
-                ftsStmt.bindInt(3, limit * 3)
-                while (ftsStmt.step()) {
-                    val nid = ftsStmt.columnString(0)
-                    val rank = ftsStmt.columnDouble(1)
-                    val current = scores.getOrElse(nid) { 0.0 }
-                    scores[nid] = current + (10.0 / (1.0 + abs(rank)))
+                try {
+                    ftsStmt.bindString(1, projectId)
+                    ftsStmt.bindString(2, ftsExpr)
+                    ftsStmt.bindInt(3, limit * 3)
+                    while (ftsStmt.step()) {
+                        val nid = ftsStmt.columnString(0)
+                        val rank = ftsStmt.columnDouble(1)
+                        val current = scores.getOrElse(nid) { 0.0 }
+                        scores[nid] = current + (10.0 / (1.0 + abs(rank)))
+                    }
+                } finally {
+                    ftsStmt.close()
                 }
-                ftsStmt.close()
             } catch (_: Throwable) {}
 
             val placeholders = segments.joinToString(",") { "?" }
@@ -657,16 +754,19 @@ class SqliteGraphStore(val dbPath: String) {
                 GROUP BY node_id;
             """.trimIndent()
             val vocabStmt = db.prepare(vocabSql)
-            vocabStmt.bindString(1, projectId)
-            segments.forEachIndexed { i, s -> vocabStmt.bindString(2 + i, s) }
-            while (vocabStmt.step()) {
-                val nid = vocabStmt.columnString(0)
-                val matched = vocabStmt.columnInt(1)
-                val coverage = matched.toDouble() / segments.size.toDouble()
-                val current = scores.getOrElse(nid) { 0.0 }
-                scores[nid] = current + (coverage * coverage * 15.0)
+            try {
+                vocabStmt.bindString(1, projectId)
+                segments.forEachIndexed { i, s -> vocabStmt.bindString(2 + i, s) }
+                while (vocabStmt.step()) {
+                    val nid = vocabStmt.columnString(0)
+                    val matched = vocabStmt.columnInt(1)
+                    val coverage = matched.toDouble() / segments.size.toDouble()
+                    val current = scores.getOrElse(nid) { 0.0 }
+                    scores[nid] = current + (coverage * coverage * 15.0)
+                }
+            } finally {
+                vocabStmt.close()
             }
-            vocabStmt.close()
         }
 
         val likeStmt = db.prepare(
@@ -676,18 +776,21 @@ class SqliteGraphStore(val dbPath: String) {
             LIMIT ?;
             """.trimIndent()
         )
-        likeStmt.bindString(1, projectId)
-        likeStmt.bindString(2, "%$query%")
-        likeStmt.bindString(3, "%$query%")
-        likeStmt.bindInt(4, limit * 2)
-        while (likeStmt.step()) {
-            val nid = likeStmt.columnString(0)
-            val name = likeStmt.columnString(1)
-            val bonus = if (name.equals(query, ignoreCase = true)) 25.0 else 12.0
-            val current = scores.getOrElse(nid) { 0.0 }
-            scores[nid] = current + bonus
+        try {
+            likeStmt.bindString(1, projectId)
+            likeStmt.bindString(2, "%$query%")
+            likeStmt.bindString(3, "%$query%")
+            likeStmt.bindInt(4, limit * 2)
+            while (likeStmt.step()) {
+                val nid = likeStmt.columnString(0)
+                val name = likeStmt.columnString(1)
+                val bonus = if (name.equals(query, ignoreCase = true)) 25.0 else 12.0
+                val current = scores.getOrElse(nid) { 0.0 }
+                scores[nid] = current + bonus
+            }
+        } finally {
+            likeStmt.close()
         }
-        likeStmt.close()
 
         if (scores.isEmpty()) return emptyList()
 
@@ -704,12 +807,15 @@ class SqliteGraphStore(val dbPath: String) {
             FROM nodes WHERE node_id IN ($placeholders);
             """.trimIndent()
         )
-        batchIds.forEachIndexed { i, id -> nodesStmt.bindString(1 + i, id) }
-        while (nodesStmt.step()) {
-            val node = rowToNode(nodesStmt)
-            nodeMap[node.nodeId] = node
+        try {
+            batchIds.forEachIndexed { i, id -> nodesStmt.bindString(1 + i, id) }
+            while (nodesStmt.step()) {
+                val node = rowToNode(nodesStmt)
+                nodeMap[node.nodeId] = node
+            }
+        } finally {
+            nodesStmt.close()
         }
-        nodesStmt.close()
 
         val results = mutableListOf<GraphNode>()
         for (nid in rankedIds) {
@@ -844,14 +950,16 @@ class SqliteGraphStore(val dbPath: String) {
             FROM nodes WHERE project_id = ? AND node_id IN ($placeholders);
             """.trimIndent()
         )
-        stmt.bindString(1, projectId)
-        impactedIds.forEachIndexed { i, id -> stmt.bindString(2 + i, id) }
-
         val nodes = mutableListOf<GraphNode>()
-        while (stmt.step()) {
-            nodes.add(rowToNode(stmt))
+        try {
+            stmt.bindString(1, projectId)
+            impactedIds.forEachIndexed { i, id -> stmt.bindString(2 + i, id) }
+            while (stmt.step()) {
+                nodes.add(rowToNode(stmt))
+            }
+        } finally {
+            stmt.close()
         }
-        stmt.close()
 
         val files = nodes.mapNotNull { n ->
             if (n.fileId.isNotEmpty()) n.fileId.substringAfter(":") else null
@@ -971,9 +1079,12 @@ class SqliteGraphStore(val dbPath: String) {
         val liveSha256 = Sha256.digest(rawBytes)
 
         val stmt = db.prepare("SELECT sha256 FROM files WHERE file_id = ?;")
-        stmt.bindString(1, node.fileId)
-        val indexedSha256 = if (stmt.step()) stmt.columnString(0) else ""
-        stmt.close()
+        val indexedSha256 = try {
+            stmt.bindString(1, node.fileId)
+            if (stmt.step()) stmt.columnString(0) else ""
+        } finally {
+            stmt.close()
+        }
 
         val isFresh = liveSha256 == indexedSha256
         val text = rawBytes.decodeToString()
@@ -1089,19 +1200,28 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun getStats(projectId: String): GraphStats {
         val filesStmt = db.prepare("SELECT COUNT(*) FROM files WHERE project_id = ?;")
-        filesStmt.bindString(1, projectId)
-        val filesCount = if (filesStmt.step()) filesStmt.columnInt(0) else 0
-        filesStmt.close()
+        val filesCount = try {
+            filesStmt.bindString(1, projectId)
+            if (filesStmt.step()) filesStmt.columnInt(0) else 0
+        } finally {
+            filesStmt.close()
+        }
 
         val nodesStmt = db.prepare("SELECT COUNT(*) FROM nodes WHERE project_id = ?;")
-        nodesStmt.bindString(1, projectId)
-        val nodesCount = if (nodesStmt.step()) nodesStmt.columnInt(0) else 0
-        nodesStmt.close()
+        val nodesCount = try {
+            nodesStmt.bindString(1, projectId)
+            if (nodesStmt.step()) nodesStmt.columnInt(0) else 0
+        } finally {
+            nodesStmt.close()
+        }
 
         val edgesStmt = db.prepare("SELECT COUNT(*) FROM edges WHERE project_id = ?;")
-        edgesStmt.bindString(1, projectId)
-        val edgesCount = if (edgesStmt.step()) edgesStmt.columnInt(0) else 0
-        edgesStmt.close()
+        val edgesCount = try {
+            edgesStmt.bindString(1, projectId)
+            if (edgesStmt.step()) edgesStmt.columnInt(0) else 0
+        } finally {
+            edgesStmt.close()
+        }
 
         val provStmt = db.prepare(
             """
@@ -1110,12 +1230,15 @@ class SqliteGraphStore(val dbPath: String) {
             GROUP BY provenance;
             """.trimIndent()
         )
-        provStmt.bindString(1, projectId)
         val provMap = mutableMapOf<String, Int>()
-        while (provStmt.step()) {
-            provMap[provStmt.columnString(0)] = provStmt.columnInt(1)
+        try {
+            provStmt.bindString(1, projectId)
+            while (provStmt.step()) {
+                provMap[provStmt.columnString(0)] = provStmt.columnInt(1)
+            }
+        } finally {
+            provStmt.close()
         }
-        provStmt.close()
 
         return GraphStats(
             projectId = projectId,
@@ -1178,29 +1301,32 @@ class SqliteGraphStore(val dbPath: String) {
         db.exec("BEGIN TRANSACTION;")
         try {
             val delSpatial = db.prepare("DELETE FROM figma_spatial_index WHERE id IN (SELECT rowid_pk FROM figma_nodes WHERE file_key = ?);")
-            delSpatial.bindString(1, fileKey)
-            delSpatial.step()
-            delSpatial.close()
-
             val delNodes = db.prepare("DELETE FROM figma_nodes WHERE file_key = ?;")
-            delNodes.bindString(1, fileKey)
-            delNodes.step()
-            delNodes.close()
-
             val delEdges = db.prepare("DELETE FROM figma_edges WHERE file_key = ?;")
-            delEdges.bindString(1, fileKey)
-            delEdges.step()
-            delEdges.close()
-
             val delVars = db.prepare("DELETE FROM figma_variables WHERE file_key = ?;")
-            delVars.bindString(1, fileKey)
-            delVars.step()
-            delVars.close()
-
             val delDoc = db.prepare("DELETE FROM figma_documents WHERE file_key = ?;")
-            delDoc.bindString(1, fileKey)
-            delDoc.step()
-            delDoc.close()
+            try {
+                delSpatial.bindString(1, fileKey)
+                delSpatial.step()
+
+                delNodes.bindString(1, fileKey)
+                delNodes.step()
+
+                delEdges.bindString(1, fileKey)
+                delEdges.step()
+
+                delVars.bindString(1, fileKey)
+                delVars.step()
+
+                delDoc.bindString(1, fileKey)
+                delDoc.step()
+            } finally {
+                delSpatial.close()
+                delNodes.close()
+                delEdges.close()
+                delVars.close()
+                delDoc.close()
+            }
 
             db.exec("COMMIT;")
         } catch (e: Throwable) {
@@ -1966,6 +2092,503 @@ class SqliteGraphStore(val dbPath: String) {
         } finally {
             edgeStmt.close()
         }
+    }
+
+    fun countFigmaNodes(fileKey: String): Int {
+        val stmt = db.prepare("SELECT COUNT(*) FROM figma_nodes WHERE file_key = ?;")
+        try {
+            stmt.bindString(1, fileKey)
+            return if (stmt.step()) stmt.columnInt(0) else 0
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun queryFigmaNodesByNameLike(fileKey: String, substring: String): List<FigmaNode> {
+        val stmt = db.prepare("SELECT node_id FROM figma_nodes WHERE file_key = ? AND name LIKE ?;")
+        val ids = mutableListOf<String>()
+        try {
+            stmt.bindString(1, fileKey)
+            stmt.bindString(2, "%$substring%")
+            while (stmt.step()) {
+                ids.add(stmt.columnString(0))
+            }
+        } finally {
+            stmt.close()
+        }
+        return ids.mapNotNull { queryFigmaNodeById(fileKey, it) }
+    }
+
+    fun queryDistinctInstantiatedTargets(fileKey: String): Set<String> {
+        val stmt = db.prepare(
+            """
+            SELECT DISTINCT target_node_id
+            FROM figma_edges
+            WHERE file_key = ? AND edge_type = 'INSTANTIATES';
+            """.trimIndent()
+        )
+        val targets = mutableSetOf<String>()
+        try {
+            stmt.bindString(1, fileKey)
+            while (stmt.step()) {
+                targets.add(stmt.columnString(0))
+            }
+        } finally {
+            stmt.close()
+        }
+        return targets
+    }
+
+    fun queryCircularFillInHugViolations(fileKey: String): List<FigmaViolation> {
+        val violations = mutableListOf<FigmaViolation>()
+
+        val vStmt = db.prepare(
+            """
+            SELECT c.node_id, c.name, p.name
+            FROM figma_nodes c
+            JOIN figma_nodes p ON c.parent_id = p.node_id AND c.file_key = p.file_key
+            WHERE c.file_key = ? AND c.sizing_vertical = 'FILL' AND p.sizing_vertical = 'HUG';
+            """.trimIndent()
+        )
+        try {
+            vStmt.bindString(1, fileKey)
+            while (vStmt.step()) {
+                val cId = vStmt.columnString(0)
+                val cName = vStmt.columnString(1)
+                val pName = vStmt.columnString(2)
+                violations.add(
+                    FigmaViolation(
+                        rule = "CIRCULAR_V_FILL_IN_HUG",
+                        nodeId = cId,
+                        nodeName = cName,
+                        message = "Child node '$cName' has vertical sizing FILL inside parent '$pName' with vertical sizing HUG"
+                    )
+                )
+            }
+        } finally {
+            vStmt.close()
+        }
+
+        val hStmt = db.prepare(
+            """
+            SELECT c.node_id, c.name, p.name
+            FROM figma_nodes c
+            JOIN figma_nodes p ON c.parent_id = p.node_id AND c.file_key = p.file_key
+            WHERE c.file_key = ? AND c.sizing_horizontal = 'FILL' AND p.sizing_horizontal = 'HUG';
+            """.trimIndent()
+        )
+        try {
+            hStmt.bindString(1, fileKey)
+            while (hStmt.step()) {
+                val cId = hStmt.columnString(0)
+                val cName = hStmt.columnString(1)
+                val pName = hStmt.columnString(2)
+                violations.add(
+                    FigmaViolation(
+                        rule = "CIRCULAR_H_FILL_IN_HUG",
+                        nodeId = cId,
+                        nodeName = cName,
+                        message = "Child node '$cName' has horizontal sizing FILL inside parent '$pName' with horizontal sizing HUG"
+                    )
+                )
+            }
+        } finally {
+            hStmt.close()
+        }
+
+        return violations
+    }
+
+    fun queryStaticContainerFrameViolations(fileKey: String): List<FigmaViolation> {
+        val stmt = db.prepare(
+            """
+            SELECT node_id, name, node_type
+            FROM figma_nodes
+            WHERE file_key = ?
+              AND layout_mode = 'NONE'
+              AND (
+                  node_type IN ('COMPONENT', 'COMPONENT_SET')
+                  OR is_interactive = 1
+                  OR LOWER(name) LIKE '%button%'
+                  OR LOWER(name) LIKE '%chip%'
+                  OR LOWER(name) LIKE '%card%'
+                  OR LOWER(name) LIKE '%input%'
+              )
+              AND node_type NOT IN ('CANVAS_SECTION', 'SECTION', 'PAGE', 'DOCUMENT', 'VECTOR', 'RECTANGLE', 'TEXT', 'ELLIPSE', 'LINE', 'STAR', 'REGULAR_POLYGON', 'GROUP');
+            """.trimIndent()
+        )
+        val violations = mutableListOf<FigmaViolation>()
+        try {
+            stmt.bindString(1, fileKey)
+            while (stmt.step()) {
+                val id = stmt.columnString(0)
+                val name = stmt.columnString(1)
+                val type = stmt.columnString(2)
+                violations.add(
+                    FigmaViolation(
+                        rule = "STATIC_CONTAINER_FRAME",
+                        nodeId = id,
+                        nodeName = name,
+                        message = "Interactive container or component '$name' ($type) uses static layoutMode NONE instead of AutoLayout"
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return violations
+    }
+
+    fun queryDefault100PxFrameHeightViolations(fileKey: String): List<FigmaViolation> {
+        val stmt = db.prepare(
+            """
+            SELECT node_id, name
+            FROM figma_nodes
+            WHERE file_key = ?
+              AND node_type IN ('FRAME', 'COMPONENT', 'INSTANCE')
+              AND abs(height - 100.0) < 0.001
+              AND sizing_vertical = 'FIXED'
+              AND (parent_id IS NOT NULL OR node_type = 'FRAME');
+            """.trimIndent()
+        )
+        val violations = mutableListOf<FigmaViolation>()
+        try {
+            stmt.bindString(1, fileKey)
+            while (stmt.step()) {
+                val id = stmt.columnString(0)
+                val name = stmt.columnString(1)
+                violations.add(
+                    FigmaViolation(
+                        rule = "DEFAULT_100PX_FRAME_HEIGHT",
+                        nodeId = id,
+                        nodeName = name,
+                        message = "Frame '$name' has default fixed height 100.0px (stuck at figma.createFrame() default)"
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return violations
+    }
+
+    fun queryMinTouchTargetViolations(fileKey: String): List<FigmaViolation> {
+        val stmt = db.prepare(
+            """
+            SELECT c.node_id, c.name, c.width, c.height
+            FROM figma_nodes c
+            LEFT JOIN figma_nodes p ON c.parent_id = p.node_id AND c.file_key = p.file_key
+            WHERE c.file_key = ?
+              AND c.is_interactive = 1
+              AND (c.width < 48.0 OR c.height < 48.0)
+              AND (
+                  p.node_id IS NULL
+                  OR p.width < 48.0
+                  OR p.height < 48.0
+                  OR p.layout_mode = 'NONE'
+                  OR (
+                      p.node_type != 'TOUCH_TARGET_FRAME'
+                      AND LOWER(p.name) NOT LIKE '%touch%'
+                      AND LOWER(p.name) NOT LIKE '%hitbox%'
+                      AND (p.width > 80.0 OR p.height > 80.0)
+                      AND (SELECT COUNT(*) FROM figma_nodes WHERE parent_id = p.node_id AND file_key = c.file_key) > 1
+                  )
+              );
+            """.trimIndent()
+        )
+        val violations = mutableListOf<FigmaViolation>()
+        try {
+            stmt.bindString(1, fileKey)
+            while (stmt.step()) {
+                val id = stmt.columnString(0)
+                val name = stmt.columnString(1)
+                val w = stmt.columnDouble(2)
+                val h = stmt.columnDouble(3)
+                violations.add(
+                    FigmaViolation(
+                        rule = "MIN_TOUCH_TARGET",
+                        nodeId = id,
+                        nodeName = name,
+                        message = "Interactive control '$name' has hitbox dimensions ${w}x${h} (< 48x48dp) without a >= 48dp AutoLayout container"
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return violations
+    }
+
+    fun queryNegativeCoordinateViolations(fileKey: String): List<FigmaViolation> {
+        val stmt = db.prepare(
+            """
+            SELECT node_id, name, local_x, local_y
+            FROM figma_nodes
+            WHERE file_key = ?
+              AND (local_x < -0.001 OR local_y < -0.001)
+              AND parent_id IS NOT NULL;
+            """.trimIndent()
+        )
+        val violations = mutableListOf<FigmaViolation>()
+        try {
+            stmt.bindString(1, fileKey)
+            while (stmt.step()) {
+                val id = stmt.columnString(0)
+                val name = stmt.columnString(1)
+                val lx = stmt.columnDouble(2)
+                val ly = stmt.columnDouble(3)
+                violations.add(
+                    FigmaViolation(
+                        rule = "NEGATIVE_COORDINATES",
+                        nodeId = id,
+                        nodeName = name,
+                        message = "Node '$name' has negative local offset coordinates (localX=$lx, localY=$ly)"
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return violations
+    }
+
+    fun queryChildAmputationWidthViolations(fileKey: String): List<FigmaViolation> {
+        val stmt = db.prepare(
+            """
+            SELECT c.node_id, c.name, c.width, p.name, p.width
+            FROM figma_nodes c
+            JOIN figma_nodes p ON c.parent_id = p.node_id AND c.file_key = p.file_key
+            WHERE c.file_key = ?
+              AND p.layout_mode IN ('HORIZONTAL', 'VERTICAL')
+              AND (p.padding_left > 0.0 OR p.padding_right > 0.0)
+              AND c.sizing_horizontal = 'FIXED'
+              AND c.width >= (p.width - 0.001)
+              AND p.width > 0.0;
+            """.trimIndent()
+        )
+        val violations = mutableListOf<FigmaViolation>()
+        try {
+            stmt.bindString(1, fileKey)
+            while (stmt.step()) {
+                val cId = stmt.columnString(0)
+                val cName = stmt.columnString(1)
+                val cWidth = stmt.columnDouble(2)
+                val pName = stmt.columnString(3)
+                val pWidth = stmt.columnDouble(4)
+                violations.add(
+                    FigmaViolation(
+                        rule = "CHILD_AMPUTATION_WIDTH",
+                        nodeId = cId,
+                        nodeName = cName,
+                        message = "Child node '$cName' has fixed width ($cWidth) >= parent width ($pWidth) inside padded AutoLayout parent '$pName' (must use layoutSizingHorizontal = FILL)"
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return violations
+    }
+
+    fun queryNoEmojiViolations(fileKey: String): List<FigmaViolation> {
+        val stmt = db.prepare(
+            """
+            SELECT node_id, name
+            FROM figma_nodes
+            WHERE file_key = ? AND has_emoji = 1;
+            """.trimIndent()
+        )
+        val violations = mutableListOf<FigmaViolation>()
+        try {
+            stmt.bindString(1, fileKey)
+            while (stmt.step()) {
+                val id = stmt.columnString(0)
+                val name = stmt.columnString(1)
+                violations.add(
+                    FigmaViolation(
+                        rule = "NO_EMOJI",
+                        nodeId = id,
+                        nodeName = name,
+                        message = "Node '$name' contains unicode emojis in node name or text content"
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return violations
+    }
+
+    fun queryUnboundTokenViolations(fileKey: String): List<FigmaViolation> {
+        val totalCount = countFigmaNodes(fileKey)
+        if (totalCount == 0) return emptyList()
+
+        var unboundCount = 0
+        val unbStmt = db.prepare(
+            "SELECT COUNT(*) FROM figma_nodes WHERE file_key = ? AND (unbound_fill = 1 OR unbound_stroke = 1);"
+        )
+        try {
+            unbStmt.bindString(1, fileKey)
+            if (unbStmt.step()) {
+                unboundCount = unbStmt.columnInt(0)
+            }
+        } finally {
+            unbStmt.close()
+        }
+
+        val ratio = unboundCount.toDouble() / totalCount.toDouble()
+        if (ratio <= 0.05) return emptyList()
+
+        val violations = mutableListOf<FigmaViolation>()
+        val stmt = db.prepare(
+            """
+            SELECT node_id, name, unbound_fill, unbound_stroke
+            FROM figma_nodes
+            WHERE file_key = ? AND (unbound_fill = 1 OR unbound_stroke = 1);
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, fileKey)
+            val pctStr = (ratio * 100.0).toString()
+            val shortPct = if (pctStr.length > 5) pctStr.substring(0, 5) else pctStr
+            while (stmt.step()) {
+                val id = stmt.columnString(0)
+                val name = stmt.columnString(1)
+                val uf = stmt.columnInt(2) != 0
+                val us = stmt.columnInt(3) != 0
+                val kind = if (uf && us) "fill and stroke" else if (uf) "fill" else "stroke"
+                violations.add(
+                    FigmaViolation(
+                        rule = "UNBOUND_TOKENS",
+                        nodeId = id,
+                        nodeName = name,
+                        message = "Node '$name' has unbound $kind (file unbound ratio: $shortPct%, exceeds 5% threshold)"
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return violations
+    }
+
+    fun queryAdHocDetachedSpecimenViolations(fileKey: String): List<FigmaViolation> {
+        val stmt = db.prepare(
+            """
+            SELECT n.node_id, n.name, p.name
+            FROM figma_nodes n
+            JOIN figma_nodes p ON n.parent_id = p.node_id AND n.file_key = p.file_key
+            WHERE n.file_key = ?
+              AND n.node_type = 'FRAME'
+              AND (
+                  LOWER(p.name) LIKE '%gym%'
+                  OR LOWER(p.name) LIKE '%arena%'
+                  OR LOWER(p.name) LIKE '%bay%'
+                  OR (n.canvas_x >= 3800.0 AND n.canvas_y >= 4800.0 AND p.parent_id IS NOT NULL)
+              )
+              AND LOWER(n.name) NOT LIKE '%gym%'
+              AND LOWER(n.name) NOT LIKE '%arena%'
+              AND LOWER(n.name) NOT LIKE '%bay%';
+            """.trimIndent()
+        )
+        val violations = mutableListOf<FigmaViolation>()
+        try {
+            stmt.bindString(1, fileKey)
+            while (stmt.step()) {
+                val id = stmt.columnString(0)
+                val name = stmt.columnString(1)
+                val pName = stmt.columnString(2)
+                violations.add(
+                    FigmaViolation(
+                        rule = "AD_HOC_DETACHED_SPECIMEN",
+                        nodeId = id,
+                        nodeName = name,
+                        message = "Node '$name' is a detached static FRAME inside gym container '$pName'; must instantiate a live master component INSTANCE"
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return violations
+    }
+
+    fun queryCanvasSpatialTopologyViolations(fileKey: String): List<FigmaViolation> {
+        val stmt = db.prepare(
+            """
+            SELECT n.node_id, n.name, s.min_x, s.min_y
+            FROM figma_nodes n
+            JOIN figma_spatial_index s ON n.rowid_pk = s.id
+            WHERE n.file_key = ?
+              AND n.node_type NOT IN ('DOCUMENT', 'PAGE')
+              AND (n.node_type IN ('CANVAS_SECTION', 'SECTION') OR n.parent_id IS NULL)
+              AND (
+                  (abs(s.min_y) > 200.0 AND (s.min_y < 4500.0 OR s.min_y > 15000.0))
+                  OR s.min_y < -100.0 OR s.min_x < -100.0
+                  OR ((LOWER(n.name) LIKE '%flow%' OR n.name LIKE '0%' OR LOWER(n.name) LIKE 'section 0%') AND abs(s.min_y) > 200.0)
+                  OR (LOWER(n.name) LIKE '%design system%' AND (abs(s.min_x) > 200.0 OR abs(s.min_y - 5000.0) > 500.0))
+                  OR (LOWER(n.name) LIKE '%gym%' AND (s.min_x < 3800.0 OR s.min_y < 4500.0))
+              );
+            """.trimIndent()
+        )
+        val violations = mutableListOf<FigmaViolation>()
+        try {
+            stmt.bindString(1, fileKey)
+            while (stmt.step()) {
+                val id = stmt.columnString(0)
+                val name = stmt.columnString(1)
+                val mx = stmt.columnDouble(2)
+                val my = stmt.columnDouble(3)
+                violations.add(
+                    FigmaViolation(
+                        rule = "CANVAS_SPATIAL_TOPOLOGY",
+                        nodeId = id,
+                        nodeName = name,
+                        message = "Top-level canvas section '$name' at (x=$mx, y=$my) violates the 2D matrix spatial grid (Row 1 at y=0, Design System at y=5000/x=0, Gyms at y>=5000/x>=4000)"
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return violations
+    }
+
+    fun queryWcagContrastViolations(fileKey: String): List<FigmaViolation> {
+        val stmt = db.prepare(
+            """
+            SELECT node_id, name, wcag_contrast, height
+            FROM figma_nodes
+            WHERE file_key = ?
+              AND wcag_contrast IS NOT NULL
+              AND (
+                  (height >= 24.0 AND wcag_contrast < 3.0)
+                  OR (height < 24.0 AND wcag_contrast < 4.5)
+              );
+            """.trimIndent()
+        )
+        val violations = mutableListOf<FigmaViolation>()
+        try {
+            stmt.bindString(1, fileKey)
+            while (stmt.step()) {
+                val id = stmt.columnString(0)
+                val name = stmt.columnString(1)
+                val contrast = stmt.columnDouble(2)
+                val height = stmt.columnDouble(3)
+                val req = if (height >= 24.0) "3.0:1 for large text" else "4.5:1 for normal text"
+                violations.add(
+                    FigmaViolation(
+                        rule = "WCAG_CONTRAST",
+                        nodeId = id,
+                        nodeName = name,
+                        message = "Node '$name' has WCAG contrast ratio $contrast:1 (below required $req)"
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return violations
     }
 
     private fun rowToFigmaEdge(stmt: NativeSqliteStatement): FigmaEdge {

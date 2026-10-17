@@ -22,8 +22,12 @@ class NativeSqliteDatabase(val path: String) {
             val rc = sqlite3_open_v2(path, ppDb.ptr, flags, null)
             if (rc != SQLITE_OK) {
                 val err = sqlite3_errmsg(ppDb.value)?.toKString() ?: "Error $rc"
+                if (ppDb.value != null) {
+                    sqlite3_close_v2(ppDb.value)
+                }
                 throw RuntimeException("Failed to open SQLite database at $path: $err")
             }
+            sqlite3_busy_timeout(ppDb.value, 5000)
             dbPointer = ppDb.value
         }
     }

@@ -73,6 +73,7 @@ class FigmaSnapshotExtractor {
         tokensJson: String? = null
     ): FigmaExtractedSnapshot {
         val snapshot = extract(fileKey, astJson, tokensJson)
+        store.deleteFigmaDocument(fileKey)
         store.insertFigmaDocument(snapshot.document)
         if (snapshot.nodes.isNotEmpty()) {
             store.insertFigmaNodes(fileKey, snapshot.nodes)

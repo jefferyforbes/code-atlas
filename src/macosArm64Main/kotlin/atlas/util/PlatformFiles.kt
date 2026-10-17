@@ -135,7 +135,10 @@ object PlatformFiles {
 
     fun listFilesRecursively(dirPath: String): List<String> {
         val result = mutableListOf<String>()
+        val visitedDirs = mutableSetOf<String>()
         fun scan(curr: String) {
+            val canon = canonicalPath(curr)
+            if (!visitedDirs.add(canon)) return
             val entries = listDirectory(curr)
             for (entry in entries) {
                 val full = if (curr.endsWith("/")) "$curr$entry" else "$curr/$entry"
