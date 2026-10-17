@@ -1,11 +1,13 @@
 package atlas
 
+import atlas.extract.ModuleBoundaryDetector
 import atlas.extract.PolyglotAstExtractor
 import atlas.extract.SemioticLayerClassifier
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -283,5 +285,247 @@ $tq
         assertEquals(1, fnNode.startLine)
         assertEquals(7, fnNode.endLine, "Python function with outdented triple-quoted string should not terminate early")
         assertTrue(pyEdges.any { it.sourceNodeId == fnNode.nodeId && it.targetNodeId == "sym:execute_sql_query" && it.lineNumber == 7 })
+    }
+
+    @Test
+    fun testCommentAndStringMaskingPreventsPhantomDeclarationsAndCalls() {
+        val tq = "\"\"\""
+        val ktCode = """
+            package atlas.sample
+
+            /*
+            class PhantomInBlockComment {
+                fun ghostMethod() { fakeCallInComment() }
+            }
+            */
+            // fun commentedOutTopLevelFun() {}
+            class RealService {
+                val sql = $tq
+            class PhantomInRawString {
+                fun rawStringGhost() {}
+            }
+            $tq
+                fun runRealWork(): String {
+                    val msg = "fakeCallInStringLiteral(123)"
+                    // fakeCallInLineComment()
+                    return helperAction(msg)
+                }
+            }
+        """.trimIndent()
+
+        val (nodes, edges, topLevelCount) = PolyglotAstExtractor.extractFile(
+            projectId = "mask_proj",
+            relPath = "src/RealService.kt",
+            sourceText = ktCode
+        )
+        assertEquals(1, topLevelCount, "Commented-out and raw-string declarations must not inflate topLevelCount")
+        val names = nodes.map { it.name }.toSet()
+        assertTrue("RealService" in names)
+        assertTrue("runRealWork" in names)
+        assertFalse("PhantomInBlockComment" in names)
+        assertFalse("commentedOutTopLevelFun" in names)
+        assertFalse("PhantomInRawString" in names)
+
+        val callTargets = edges.filter { it.edgeType == "CALLS" }.map { it.targetNodeId }.toSet()
+        assertTrue("sym:helperAction" in callTargets)
+        assertFalse("sym:fakeCallInStringLiteral" in callTargets)
+        assertFalse("sym:fakeCallInLineComment" in callTargets)
+        assertFalse("sym:fakeCallInComment" in callTargets)
+    }
+
+    @Test
+    fun testContextAwareCrossFileEdgeResolution() {
+        val callerNode = GraphNode(
+            nodeId = "p:feature/OrderVm.kt#OrderVm",
+            projectId = "p",
+            fileId = "p:feature/OrderVm.kt",
+            name = "OrderVm",
+            qualifiedName = "app.feature.OrderVm",
+            kind = "class",
+            moduleId = ":feature:order"
+        )
+        val unrelatedTarget = GraphNode(
+            nodeId = "p:legacy/Validator.kt#validate",
+            projectId = "p",
+            fileId = "p:legacy/Validator.kt",
+            name = "validate",
+            qualifiedName = "app.legacy.validate",
+            kind = "function",
+            moduleId = ":legacy"
+        )
+        val importedTarget = GraphNode(
+            nodeId = "p:domain/OrderValidator.kt#validate",
+            projectId = "p",
+            fileId = "p:domain/OrderValidator.kt",
+            name = "validate",
+            qualifiedName = "app.domain.validate",
+            kind = "function",
+            moduleId = ":domain"
+        )
+        val sameModuleTarget = GraphNode(
+            nodeId = "p:feature/OrderHelper.kt#formatOrder",
+            projectId = "p",
+            fileId = "p:feature/OrderHelper.kt",
+            name = "formatOrder",
+            qualifiedName = "app.feature.formatOrder",
+            kind = "function",
+            moduleId = ":feature:order"
+        )
+        val otherModuleTarget = GraphNode(
+            nodeId = "p:other/OtherHelper.kt#formatOrder",
+            projectId = "p",
+            fileId = "p:other/OtherHelper.kt",
+            name = "formatOrder",
+            qualifiedName = "app.other.formatOrder",
+            kind = "function",
+            moduleId = ":other"
+        )
+
+        val rawEdges = listOf(
+            GraphEdge(
+                edgeId = "${callerNode.nodeId}:imp:app.domain.validate:2",
+                projectId = "p",
+                sourceNodeId = callerNode.nodeId,
+                targetNodeId = "sym:app.domain.validate",
+                edgeType = "IMPORTS",
+                lineNumber = 2
+            ),
+            GraphEdge(
+                edgeId = "${callerNode.nodeId}:call:validate:15",
+                projectId = "p",
+                sourceNodeId = callerNode.nodeId,
+                targetNodeId = "sym:validate",
+                edgeType = "CALLS",
+                provenance = "INFERRED_CALL",
+                confidence = 0.85,
+                lineNumber = 15
+            ),
+            GraphEdge(
+                edgeId = "${callerNode.nodeId}:call:formatOrder:16",
+                projectId = "p",
+                sourceNodeId = callerNode.nodeId,
+                targetNodeId = "sym:formatOrder",
+                edgeType = "CALLS",
+                provenance = "INFERRED_CALL",
+                confidence = 0.85,
+                lineNumber = 16
+            )
+        )
+
+        // Note: unrelatedTarget and otherModuleTarget are placed FIRST in the list to prove we don't blindly pick candidates[0]
+        val resolved = PolyglotAstExtractor.resolveCrossFileEdges(
+            projectId = "p",
+            nodes = listOf(callerNode, unrelatedTarget, importedTarget, otherModuleTarget, sameModuleTarget),
+            rawEdges = rawEdges
+        )
+        val validateCall = resolved.firstOrNull { it.edgeType == "CALLS" && it.edgeId.contains(":call:validate:") }
+        assertNotNull(validateCall)
+        assertEquals(importedTarget.nodeId, validateCall.targetNodeId, "Explicitly imported symbol must win over first candidate")
+
+        val formatCall = resolved.firstOrNull { it.edgeType == "CALLS" && it.edgeId.contains(":call:formatOrder:") }
+        assertNotNull(formatCall)
+        assertEquals(sameModuleTarget.nodeId, formatCall.targetNodeId, "Same-module symbol must win over other-module candidate")
+    }
+
+    @Test
+    fun testTypeScriptRustCppKindsAndPythonMultilineSignature() {
+        val tsCode = """
+            // import { FakeImport } from './fake';
+            export interface UserDto {
+                id: string;
+            }
+            export type UserId = string;
+            export enum UserRole { Admin, Guest }
+            export const MAX_USERS = 100;
+            export let mutableCounter = 0;
+            export const fetchUser = async (id: UserId): Promise<UserDto> => {
+                return loadFromApi(id);
+            };
+        """.trimIndent()
+
+        val (tsNodes, tsEdges, tsTop) = PolyglotAstExtractor.extractFile("ts_p", "src/user.ts", tsCode)
+        val tsByName = tsNodes.associateBy { it.name }
+        assertEquals("interface", tsByName["UserDto"]?.kind)
+        assertEquals("typealias", tsByName["UserId"]?.kind)
+        assertEquals("enum", tsByName["UserRole"]?.kind)
+        assertEquals("variable", tsByName["MAX_USERS"]?.kind)
+        assertEquals("variable", tsByName["mutableCounter"]?.kind)
+        assertEquals("function", tsByName["fetchUser"]?.kind)
+        assertTrue(tsEdges.none { it.edgeType == "IMPORTS" && it.targetNodeId == "sym:FakeImport" }, "Commented-out TS import must be ignored")
+        // UserDto, UserRole, fetchUser count toward topLevelCount; typealias and const/let scalar variables do not
+        assertEquals(3, tsTop)
+
+        val rsCode = """
+            pub mod submod;
+            pub type NodeId = String;
+            pub trait GraphStore {
+                fn query(&self);
+            }
+            pub enum Direction { Incoming, Outgoing }
+        """.trimIndent()
+        val (rsNodes, _, rsTop) = PolyglotAstExtractor.extractFile("rs_p", "src/lib.rs", rsCode)
+        val rsByName = rsNodes.associateBy { it.name }
+        assertEquals("module", rsByName["submod"]?.kind)
+        assertEquals("typealias", rsByName["NodeId"]?.kind)
+        assertEquals("interface", rsByName["GraphStore"]?.kind)
+        assertEquals("enum", rsByName["Direction"]?.kind)
+        assertEquals(2, rsTop)
+
+        val cppCode = """
+            // #include "commented/phantom_header.hpp"
+            namespace engine {
+            struct Point { int x; int y; };
+            enum class Color { Red, Blue };
+            int computeDistance(int a, int b) {
+                return helperMath(a, b);
+            }
+            }
+        """.trimIndent()
+        val (cppNodes, cppEdges, cppTop) = PolyglotAstExtractor.extractFile("cpp_p", "src/math.cpp", cppCode)
+        val cppByName = cppNodes.associateBy { it.name }
+        assertEquals("namespace", cppByName["engine"]?.kind)
+        assertEquals("struct", cppByName["Point"]?.kind)
+        assertEquals("enum", cppByName["Color"]?.kind)
+        assertEquals("function", cppByName["computeDistance"]?.kind)
+        assertEquals(3, cppTop, "namespace wrapper should not inflate topLevelCount")
+        assertTrue(cppEdges.any { it.sourceNodeId == cppByName["computeDistance"]?.nodeId && it.targetNodeId == "sym:helperMath" })
+        assertTrue(cppEdges.none { it.edgeType == "IMPORTS" && it.targetNodeId == "sym:phantom_header.hpp" })
+
+        val pyCode = """
+            def transform_records(
+                items: list[str],
+                 delimiter: str = ":("
+            ) -> list[str]:
+                return normalize_items(items)
+        """.trimIndent()
+        val (pyNodes, pyEdges, _) = PolyglotAstExtractor.extractFile("py_p", "src/transform.py", pyCode)
+        val pyFn = pyNodes.firstOrNull { it.name == "transform_records" }
+        assertNotNull(pyFn)
+        assertTrue(pyFn.signature.contains("items: list[str]") && pyFn.signature.contains("-> list[str]:"))
+        assertEquals(5, pyFn.endLine)
+        val pyCalls = pyEdges.filter { it.sourceNodeId == pyFn.nodeId && it.edgeType == "CALLS" }
+        assertTrue(pyCalls.any { it.targetNodeId == "sym:normalize_items" && it.lineNumber == 5 })
+    }
+
+    @Test
+    fun testGradleTypesafeAccessorWithKnownModulesAndDeterministicEdgeIds() {
+        val buildKts = """
+            dependencies {
+                implementation(projects.feature.OrderCheckout)
+                implementation(project(":core:network"))
+            }
+        """.trimIndent()
+        val knownModules = listOf(":feature:order-checkout", ":core:network")
+        val (_, edges) = ModuleBoundaryDetector.extractFromBuildContent(
+            projectId = "gradle_p",
+            relPath = "app/build.gradle.kts",
+            sourceText = buildKts,
+            parentModule = ":app",
+            knownModules = knownModules
+        )
+        assertEquals(2, edges.size)
+        val edgeIds = edges.map { it.edgeId }.toSet()
+        assertTrue("gradle_p:mod_dep::app->:feature:order-checkout" in edgeIds)
+        assertTrue("gradle_p:mod_dep::app->:core:network" in edgeIds)
     }
 }
