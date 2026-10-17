@@ -275,4 +275,50 @@ class ComposeCliMcpIntegrationTest {
             cleanupDir(tmpDir)
         }
     }
+
+    @Test
+    fun testComposeDoctorApplyRemediationWithAutonomousVerifier() {
+        val tmpDir = "/tmp/atlas_compose_doc_apply_${kotlin.random.Random.nextInt(100000, 999999)}"
+        PlatformFiles.mkdirs("$tmpDir/src/commonTest/kotlin/ui")
+        val dbPath = "$tmpDir/atlas.db"
+
+        try {
+            val ktSource = """
+                package ui
+
+                import androidx.compose.runtime.Composable
+
+                data class ItemState(
+                    var title: String
+                )
+
+                @Composable
+                fun ItemCard(state: ItemState) {
+                    println(state.title)
+                }
+            """.trimIndent()
+            val ktPath = "$tmpDir/src/commonTest/kotlin/ui/ItemTest.kt"
+            PlatformFiles.writeText(ktPath, ktSource)
+
+            val idxExit = CodeGraphCli.run(
+                arrayOf("compose", "index", "--project", "doc-apply", "--workspace", tmpDir, "--db", dbPath)
+            )
+            assertEquals(0, idxExit)
+
+            val docExit = CodeGraphCli.run(
+                arrayOf("compose", "doctor", "--project", "doc-apply", "--workspace", tmpDir, "--db", dbPath)
+            )
+            assertEquals(0, docExit)
+
+            val applyExit = CodeGraphCli.run(
+                arrayOf("compose", "doctor", "--project", "doc-apply", "--workspace", tmpDir, "--db", dbPath, "--apply")
+            )
+            assertEquals(0, applyExit)
+
+            val updatedContent = PlatformFiles.readText(ktPath)
+            assertTrue(updatedContent.contains("val title: String"), "Expected var title to be converted to val title by doctor --apply")
+        } finally {
+            cleanupDir(tmpDir)
+        }
+    }
 }

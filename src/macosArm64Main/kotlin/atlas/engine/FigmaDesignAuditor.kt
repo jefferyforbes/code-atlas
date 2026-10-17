@@ -254,25 +254,23 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
         val scopedNodes = if (seedNodes.isEmpty()) emptyList() else store.queryFigmaSpatialIntersection(fileKey, spatialBounds)
         val scopedNodeIds = scopedNodes.map { it.nodeId }.toSet()
 
-        // Dimension 2: Component Hierarchy & Shared Master Components
+        // Dimension 2: Component Hierarchy & Shared Master Components (Batched)
         val sharedMasterComponents = mutableListOf<String>()
         val potentialCollisions = mutableListOf<String>()
 
         if (scopedNodeIds.isNotEmpty()) {
-            val instantiatedTargets = store.queryDistinctInstantiatedTargets(fileKey)
+            val allInstantiatesEdges = store.queryFigmaEdgesByType(fileKey, "INSTANTIATES")
+            val edgesByTarget = allInstantiatesEdges.groupBy { it.targetNodeId }
 
-            for (targetId in instantiatedTargets) {
-                val inEdges = store.queryFigmaEdgesByTarget(fileKey, targetId)
+            for ((targetId, inEdges) in edgesByTarget) {
                 var instantiatedInside = false
                 var externalCount = 0
 
                 for (edge in inEdges) {
-                    if (edge.edgeType == "INSTANTIATES") {
-                        if (edge.sourceNodeId in scopedNodeIds) {
-                            instantiatedInside = true
-                        } else {
-                            externalCount++
-                        }
+                    if (edge.sourceNodeId in scopedNodeIds) {
+                        instantiatedInside = true
+                    } else {
+                        externalCount++
                     }
                 }
 
@@ -296,43 +294,41 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
             }
         }
 
-        // Dimension 3: Design Tokens & Variable Boundary
+        // Dimension 3: Design Tokens & Variable Boundary (Batched)
         val tokenLayers = mutableSetOf<String>()
         if (scopedNodeIds.isNotEmpty()) {
-            for (nodeId in scopedNodeIds) {
-                val edges = store.queryFigmaEdgesBySource(fileKey, nodeId)
-                for (e in edges) {
-                    if (e.edgeType == "BINDS_VARIABLE") {
-                        val varTarget = e.targetNodeId
-                        tokenLayers.add(varTarget)
+            val allBindsEdges = store.queryFigmaEdgesByType(fileKey, "BINDS_VARIABLE")
+            val scopedBindsEdges = allBindsEdges.filter { it.sourceNodeId in scopedNodeIds }
+            val distinctVarTargets = scopedBindsEdges.map { it.targetNodeId }.distinct()
 
-                        val currentVar = store.queryFigmaVariableById(fileKey, varTarget)
-                            ?: store.queryFigmaVariableByName(fileKey, varTarget)
-                        if (currentVar != null) {
-                            tokenLayers.add(currentVar.name)
-                            val visitedAliases = mutableSetOf<String>()
-                            var upstreamId = currentVar.aliasedVariableId
-                            var hops = 0
-                            while (!upstreamId.isNullOrEmpty() && hops < 50 && visitedAliases.add(upstreamId)) {
-                                hops++
-                                val parentVar = store.queryFigmaVariableById(fileKey, upstreamId)
-                                    ?: store.queryFigmaVariableByName(fileKey, upstreamId)
-                                if (parentVar != null) {
-                                    tokenLayers.add(parentVar.name)
-                                    tokenLayers.add(parentVar.variableId)
-                                    upstreamId = parentVar.aliasedVariableId
-                                } else {
-                                    tokenLayers.add(upstreamId)
-                                    break
-                                }
-                            }
-                        }
+            for (varTarget in distinctVarTargets) {
+                tokenLayers.add(varTarget)
 
-                        val impact = store.resolveVariableAliasImpact(fileKey, varTarget, depth = 5)
-                        for (v in impact) {
-                            tokenLayers.add(v.name)
+                val currentVar = store.queryFigmaVariableById(fileKey, varTarget)
+                    ?: store.queryFigmaVariableByName(fileKey, varTarget)
+                if (currentVar != null) {
+                    tokenLayers.add(currentVar.name)
+                    val visitedAliases = mutableSetOf<String>()
+                    var upstreamId = currentVar.aliasedVariableId
+                    var hops = 0
+                    while (!upstreamId.isNullOrEmpty() && hops < 50 && visitedAliases.add(upstreamId)) {
+                        hops++
+                        val parentVar = store.queryFigmaVariableById(fileKey, upstreamId)
+                            ?: store.queryFigmaVariableByName(fileKey, upstreamId)
+                        if (parentVar != null) {
+                            tokenLayers.add(parentVar.name)
+                            tokenLayers.add(parentVar.variableId)
+                            upstreamId = parentVar.aliasedVariableId
+                        } else {
+                            tokenLayers.add(upstreamId)
+                            break
                         }
                     }
+                }
+
+                val impact = store.resolveVariableAliasImpact(fileKey, varTarget, depth = 5)
+                for (v in impact) {
+                    tokenLayers.add(v.name)
                 }
             }
         }

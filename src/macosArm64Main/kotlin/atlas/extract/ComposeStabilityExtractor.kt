@@ -177,7 +177,8 @@ class ComposeStabilityExtractor {
         relPath: String,
         sourceText: String,
         stabilityPatterns: List<Regex> = emptyList(),
-        workspaceNodes: List<GraphNode> = emptyList()
+        workspaceNodes: List<GraphNode> = emptyList(),
+        precomputedClassStability: Map<String, Pair<String, String>> = emptyMap()
     ): ExtractionBundle {
         val masked = PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "kotlin")
         val lineOffsets = buildLineOffsets(sourceText)
@@ -186,7 +187,9 @@ class ComposeStabilityExtractor {
         val fileId = "$projectSlug:$relPath"
 
         // Collect local class stability info within this file and workspace
-        val localClassStability = analyzeLocalClasses(projectSlug, relPath, sourceText, masked, stabilityPatterns, workspaceNodes)
+        val localClassStability = analyzeLocalClasses(
+            projectSlug, relPath, sourceText, masked, stabilityPatterns, workspaceNodes, precomputedClassStability
+        )
         val hasPreviewInFile = Regex("""@Preview[A-Za-z0-9_]*""").containsMatchIn(masked)
 
         val composeNodes = mutableListOf<ComposeNodeRecord>()
@@ -722,13 +725,13 @@ class ComposeStabilityExtractor {
         return records
     }
 
-    private fun analyzeLocalClasses(
-        projectSlug: String,
-        relPath: String,
+    /**
+     * Extracts class stability metadata directly from a Kotlin source text slice.
+     */
+    fun analyzeClassesInSource(
         sourceText: String,
         maskedText: String,
-        stabilityPatterns: List<Regex>,
-        workspaceNodes: List<GraphNode>
+        stabilityPatterns: List<Regex> = emptyList()
     ): Map<String, Pair<String, String>> {
         val result = mutableMapOf<String, Pair<String, String>>()
         val classRe = Regex("""((?:@(?:Immutable|Stable)\b[\s\S]*?)?)\b(data\s+class|value\s+class|enum\s+class|sealed\s+interface|sealed\s+class|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*(\([^)]*\))?""")
@@ -819,6 +822,21 @@ class ComposeStabilityExtractor {
                 result[className] = "STABLE" to "ALL_VAL_PROPERTIES_STABLE"
             }
         }
+        return result
+    }
+
+    private fun analyzeLocalClasses(
+        projectSlug: String,
+        relPath: String,
+        sourceText: String,
+        maskedText: String,
+        stabilityPatterns: List<Regex>,
+        workspaceNodes: List<GraphNode>,
+        precomputedClassStability: Map<String, Pair<String, String>> = emptyMap()
+    ): Map<String, Pair<String, String>> {
+        val result = mutableMapOf<String, Pair<String, String>>()
+        result.putAll(precomputedClassStability)
+        result.putAll(analyzeClassesInSource(sourceText, maskedText, stabilityPatterns))
 
         // Also incorporate workspace class signatures
         for (wn in workspaceNodes) {
@@ -827,7 +845,9 @@ class ComposeStabilityExtractor {
                 if (sig.contains("var ")) {
                     val prop = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""").find(sig)?.groupValues?.get(1) ?: "prop"
                     result[wn.name] = "UNSTABLE" to "MUTABLE_VAR_PROPERTY:$prop"
-                } else if (sig.contains("@Immutable") || sig.contains("@Stable") || sig.contains("data class")) {
+                } else if (sig.contains("@Immutable") || sig.contains("@Stable")) {
+                    result[wn.name] = "STABLE" to "EXPLICIT_STABLE_ANNOTATION"
+                } else if (sig.contains("data class") && sig.contains('(') && sig.contains(')')) {
                     result[wn.name] = "STABLE" to "WORKSPACE_DATA_CLASS"
                 }
             }

@@ -2160,6 +2160,27 @@ class SqliteGraphStore(val dbPath: String) {
         return results
     }
 
+    fun queryFigmaEdgesByType(fileKey: String, edgeType: String): List<FigmaEdge> {
+        val stmt = db.prepare(
+            """
+            SELECT edge_id, file_key, source_node_id, target_node_id, edge_type, property_slot
+            FROM figma_edges
+            WHERE file_key = ? AND edge_type = ?;
+            """.trimIndent()
+        )
+        stmt.bindString(1, fileKey)
+        stmt.bindString(2, edgeType)
+        val results = mutableListOf<FigmaEdge>()
+        try {
+            while (stmt.step()) {
+                results.add(rowToFigmaEdge(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
     fun resolveVariableAliasImpact(
         fileKey: String,
         variableIdOrName: String,

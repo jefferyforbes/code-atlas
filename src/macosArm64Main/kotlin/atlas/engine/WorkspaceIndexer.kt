@@ -237,6 +237,12 @@ class WorkspaceIndexer(
 
         // Execute Dual-Mode Compose extraction across changed Kotlin files using the full workspace node table
         val workspaceNodesSnapshot = mergedNodeMap.values.toList()
+        val precomputedStability = mutableMapOf<String, Pair<String, String>>()
+        for ((_, sourceText, _) in pendingKotlinComposeFiles) {
+            val masked = PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "kotlin")
+            precomputedStability.putAll(composeExtractor.analyzeClassesInSource(sourceText, masked, stabilityPatterns))
+        }
+
         val allNewComposeNodes = mutableListOf<ComposeNodeRecord>()
         val allNewComposeParams = mutableListOf<ComposeParamRecord>()
         for ((relStr, sourceText, baseEdges) in pendingKotlinComposeFiles) {
@@ -247,7 +253,8 @@ class WorkspaceIndexer(
                 relPath = relStr,
                 sourceText = sourceText,
                 stabilityPatterns = stabilityPatterns,
-                workspaceNodes = workspaceNodesSnapshot
+                workspaceNodes = workspaceNodesSnapshot,
+                precomputedClassStability = precomputedStability
             )
             val isComposeFile = bundle.nodes.isNotEmpty() ||
                 bundle.edges.any { it.edgeType in setOf("PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "OBSERVES_STATE") } ||

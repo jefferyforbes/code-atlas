@@ -6,7 +6,24 @@ import atlas.mcp.CodeGraphMcpServer
 import atlas.model.FigmaSpatialBounds
 import atlas.util.PlatformFiles
 import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 
 /**
  * Command-line entrypoint for indexing, querying, synthesizing 3D scopes, and auditing code graphs.
@@ -212,7 +229,10 @@ class CodeGraphCli {
                         compilerReportsDir = compilerReportsDir,
                         traceLogPath = traceLogPath,
                         strongSkipping = strongSkipping,
-                        isJson = isJson
+                        isJson = isJson,
+                        applyRemediation = applyRemediation,
+                        ruleIdArg = ruleIdArg,
+                        testCmdArg = testCmdArg
                     )
                 }
 
@@ -622,7 +642,10 @@ class CodeGraphCli {
             compilerReportsDir: String?,
             traceLogPath: String?,
             strongSkipping: Boolean,
-            isJson: Boolean
+            isJson: Boolean,
+            applyRemediation: Boolean = false,
+            ruleIdArg: String? = null,
+            testCmdArg: String? = null
         ): Int {
             when (command) {
                 "index" -> {
@@ -707,6 +730,74 @@ class CodeGraphCli {
                     }
                     val res = server.callTool("codegraph_audit", toolArgs)
                     val data = loadSpilledData(res)
+
+                    if (applyRemediation) {
+                        val prescriptionsArray = data["prescriptions"]?.jsonArray ?: emptyList()
+                        val filteredPrescriptions = if (!ruleIdArg.isNullOrBlank()) {
+                            prescriptionsArray.filter { it.jsonObject["rule_id"]?.jsonPrimitive?.content == ruleIdArg }
+                        } else {
+                            prescriptionsArray
+                        }
+
+                        val results = mutableListOf<JsonObject>()
+                        var allPassed = true
+
+                        for (rxJson in filteredPrescriptions) {
+                            val rx = rxJson.jsonObject
+                            val rxFilePath = rx["file_path"]?.jsonPrimitive?.content ?: continue
+                            val rxBefore = rx["before_snippet"]?.jsonPrimitive?.content ?: continue
+                            val rxAfter = rx["after_snippet"]?.jsonPrimitive?.content ?: continue
+                            val rxRuleId = rx["rule_id"]?.jsonPrimitive?.content ?: "COMPOSE-REMEDIATION"
+                            val rxNodeId = rx["target_node_id"]?.jsonPrimitive?.content
+
+                            val rxWriteSiteSafe = rx["write_site_safe"]?.jsonPrimitive?.booleanOrNull
+
+                            val vResult = server.remediationVerifier.verifyAndApply(
+                                projectSlug = project,
+                                relPath = rxFilePath,
+                                beforeSnippet = rxBefore,
+                                afterSnippet = rxAfter,
+                                ruleId = rxRuleId,
+                                targetNodeId = rxNodeId,
+                                writeSiteSafe = rxWriteSiteSafe ?: true,
+                                dryRun = false,
+                                testCommand = testCmdArg
+                            )
+                            if (!vResult.valid) allPassed = false
+                            results.add(buildJsonObject {
+                                put("rule_id", rxRuleId)
+                                put("file_path", rxFilePath)
+                                if (rxNodeId != null) put("target_node_id", rxNodeId)
+                                put("valid", vResult.valid)
+                                put("phase", vResult.phase)
+                                put("message", vResult.message)
+                            })
+                        }
+
+                        if (isJson) {
+                            val resObj = buildJsonObject {
+                                data.forEach { (k, v) -> put(k, v) }
+                                putJsonArray("applied_remediations") {
+                                    results.forEach { add(it) }
+                                }
+                                put("all_passed", allPassed)
+                            }
+                            println(jsonPretty.encodeToString(resObj))
+                        } else {
+                            val attempted = results.size
+                            val succeeded = results.count { it["valid"]?.jsonPrimitive?.booleanOrNull == true }
+                            val failed = attempted - succeeded
+                            val text = "[Compose Doctor: Apply] project=$project attempted=$attempted succeeded=$succeeded failed=$failed"
+                            println(truncateSummary(text, false))
+                            if (failed > 0) {
+                                results.filter { it["valid"]?.jsonPrimitive?.booleanOrNull != true }.take(3).forEach { f ->
+                                    println("  - Failed: ${f["rule_id"]?.jsonPrimitive?.content} in ${f["file_path"]?.jsonPrimitive?.content}: ${f["message"]?.jsonPrimitive?.content}")
+                                }
+                            }
+                        }
+                        return if (allPassed) 0 else 1
+                    }
+
                     if (isJson) {
                         println(jsonPretty.encodeToString(data))
                     } else {
