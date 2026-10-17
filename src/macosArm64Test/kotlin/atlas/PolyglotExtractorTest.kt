@@ -528,4 +528,198 @@ $tq
         assertTrue("gradle_p:mod_dep::app->:feature:order-checkout" in edgeIds)
         assertTrue("gradle_p:mod_dep::app->:core:network" in edgeIds)
     }
+
+    @Test
+    fun testKotlinDeclarationModifiers() {
+        val ktCode = """
+            package test.modifiers
+
+            final class FinalService
+            inner class InnerHelper
+            enum class Status { ACTIVE, INACTIVE }
+            annotation class Marker(val id: String)
+
+            class MathOps {
+                operator fun plus(other: MathOps): MathOps = this
+                infix fun to(other: MathOps): Pair<MathOps, MathOps> = Pair(this, other)
+                tailrec fun loop(n: Int): Int = if (n <= 0) 0 else loop(n - 1)
+                external fun nativeFastCompute(): Long
+            }
+        """.trimIndent()
+
+        val (nodes, edges, topLevelCount) = PolyglotAstExtractor.extractFile(
+            projectId = "p",
+            relPath = "src/main/kotlin/Modifiers.kt",
+            sourceText = ktCode
+        )
+
+        val byName = nodes.associateBy { it.name }
+        assertNotNull(byName["FinalService"])
+        assertEquals("class", byName["FinalService"]?.kind)
+
+        assertNotNull(byName["InnerHelper"])
+        assertEquals("class", byName["InnerHelper"]?.kind)
+
+        assertNotNull(byName["Status"])
+        assertEquals("enum", byName["Status"]?.kind)
+
+        assertNotNull(byName["Marker"])
+        assertEquals("annotation", byName["Marker"]?.kind)
+
+        assertNotNull(byName["plus"])
+        assertEquals("function", byName["plus"]?.kind)
+
+        assertNotNull(byName["to"])
+        assertEquals("function", byName["to"]?.kind)
+
+        assertNotNull(byName["loop"])
+        assertEquals("function", byName["loop"]?.kind)
+
+        assertNotNull(byName["nativeFastCompute"])
+        assertEquals("function", byName["nativeFastCompute"]?.kind)
+    }
+
+    @Test
+    fun testTypeScriptConstEnumAndKindResolution() {
+        val tsCode = """
+            export const enum Direction {
+                Up = "UP",
+                Down = "DOWN"
+            }
+
+            export enum RegularEnum {
+                First,
+                Second
+            }
+
+            export const regularConst = 42;
+        """.trimIndent()
+
+        val (nodes, _, topCount) = PolyglotAstExtractor.extractFile(
+            projectId = "p",
+            relPath = "src/enums.ts",
+            sourceText = tsCode
+        )
+
+        val byName = nodes.associateBy { it.name }
+        val constEnum = byName["Direction"]
+        assertNotNull(constEnum)
+        assertEquals("enum", constEnum.kind)
+        assertEquals("Direction", constEnum.name)
+
+        val regularEnum = byName["RegularEnum"]
+        assertNotNull(regularEnum)
+        assertEquals("enum", regularEnum.kind)
+
+        val regularConst = byName["regularConst"]
+        assertNotNull(regularConst)
+        assertEquals("variable", regularConst.kind)
+    }
+
+    @Test
+    fun testStringInterpolationExpressionExtraction() {
+        val q3 = "\"\"\""
+        val ktCode = "package test.interp\n\n" +
+            "fun formatGreeting(name: String): String {\n" +
+            "    val single = \"Hello \${lookupUser(name)}!\"\n" +
+            "    val multi = $q3 Multiline: \${fetchMetadata()} $q3\n" +
+            "    return single + multi\n" +
+            "}\n" +
+            "fun lookupUser(n: String): String = n\n" +
+            "fun fetchMetadata(): String = \"\"\n"
+
+        val (ktNodes, ktEdges, _) = PolyglotAstExtractor.extractFile(
+            projectId = "p",
+            relPath = "src/Interp.kt",
+            sourceText = ktCode
+        )
+        val greetingNode = ktNodes.first { it.name == "formatGreeting" }
+        val callTargets = ktEdges.filter { it.sourceNodeId == greetingNode.nodeId && it.edgeType == "CALLS" }
+            .map { it.targetNodeId }
+
+        assertTrue(callTargets.contains("sym:lookupUser"), "Function call inside single-quote interpolation must be captured")
+        assertTrue(callTargets.contains("sym:fetchMetadata"), "Function call inside triple-quote interpolation must be captured")
+
+        // TypeScript template literals
+        val tsCode = """
+            function renderCard(id: string) {
+                const message = `Card item: ${'$'}{calcItemTotal(id)} has status`;
+                return message;
+            }
+            function calcItemTotal(x: string) { return 100; }
+        """.trimIndent()
+        val (tsNodes, tsEdges, _) = PolyglotAstExtractor.extractFile(
+            projectId = "p",
+            relPath = "src/render.ts",
+            sourceText = tsCode
+        )
+        val renderNode = tsNodes.first { it.name == "renderCard" }
+        val tsCallTargets = tsEdges.filter { it.sourceNodeId == renderNode.nodeId && it.edgeType == "CALLS" }
+            .map { it.targetNodeId }
+        assertTrue(tsCallTargets.contains("sym:calcItemTotal"), "TS call inside backtick interpolation must be captured")
+
+        // Swift string interpolation
+        val swiftCode = """
+            func buildSwiftString() -> String {
+                return "Value is \(swiftHelper())!"
+            }
+            func swiftHelper() -> Int { return 1 }
+        """.trimIndent()
+        val (swiftNodes, swiftEdges, _) = PolyglotAstExtractor.extractFile(
+            projectId = "p",
+            relPath = "Sources/App.swift",
+            sourceText = swiftCode
+        )
+        val swiftFn = swiftNodes.first { it.name == "buildSwiftString" }
+        val swiftCallTargets = swiftEdges.filter { it.sourceNodeId == swiftFn.nodeId && it.edgeType == "CALLS" }
+            .map { it.targetNodeId }
+        assertTrue(swiftCallTargets.contains("sym:swiftHelper"), "Swift call inside \\(...) must be captured")
+    }
+
+    @Test
+    fun testCrossFileReceiverMatching() {
+        val file1 = """
+            package com.orders
+
+            class OrderService {
+                fun processOrder() {}
+            }
+        """.trimIndent()
+
+        val file2 = """
+            package com.cart
+
+            class CartService {
+                fun processOrder() {}
+            }
+        """.trimIndent()
+
+        val callerFile = """
+            package com.app
+
+            class AppController {
+                fun run() {
+                    val orderService = getOrderService()
+                    orderService.processOrder()
+                }
+            }
+        """.trimIndent()
+
+        val (nodes1, raw1, _) = PolyglotAstExtractor.extractFile("p", "src/OrderService.kt", file1)
+        val (nodes2, raw2, _) = PolyglotAstExtractor.extractFile("p", "src/CartService.kt", file2)
+        val (nodes3, raw3, _) = PolyglotAstExtractor.extractFile("p", "src/AppController.kt", callerFile)
+
+        val allNodes = nodes1 + nodes2 + nodes3
+        val allRaw = raw1 + raw2 + raw3
+        val resolved = PolyglotAstExtractor.resolveCrossFileEdges("p", allNodes, allRaw)
+
+        val runNode = nodes3.first { it.name == "run" }
+        val resolvedCalls = resolved.filter { it.sourceNodeId == runNode.nodeId && it.edgeType == "CALLS" }
+
+        val orderMethod = nodes1.first { it.name == "processOrder" }
+        val cartMethod = nodes2.first { it.name == "processOrder" }
+
+        assertTrue(resolvedCalls.any { it.targetNodeId == orderMethod.nodeId }, "Receiver 'orderService' must prefer OrderService.processOrder")
+        assertFalse(resolvedCalls.any { it.targetNodeId == cartMethod.nodeId }, "Receiver 'orderService' must NOT match CartService.processOrder")
+    }
 }

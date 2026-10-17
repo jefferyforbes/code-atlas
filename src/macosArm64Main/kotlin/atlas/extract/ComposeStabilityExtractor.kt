@@ -750,14 +750,60 @@ class ComposeStabilityExtractor {
             }
 
             // Inspect constructor parameters for `var` or standard `List`/`Set`/`Map`
-            val varMatch = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)\s*:""").find(ctorSlice)
+            val ctorVarMatch = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)\s*:""").find(ctorSlice)
             val rawCollectionMatch = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map|MutableList|MutableSet|MutableMap)<""").find(ctorSlice)
 
-            if (hasStableAnnotation && (varMatch != null || rawCollectionMatch != null)) {
-                val offender = varMatch?.groupValues?.get(1) ?: rawCollectionMatch?.groupValues?.get(1) ?: "field"
+            // Inspect class body { ... } at depth 1 for mutable `var` properties
+            var bodyVarName: String? = null
+            var k = m.range.last
+            var foundBrace = false
+            while (k < maskedText.length) {
+                val c = maskedText[k]
+                if (c == '{') {
+                    foundBrace = true
+                    break
+                }
+                if (c == ';' || (c == '\n' && k + 1 < maskedText.length && maskedText.substring(k + 1).trimStart().let {
+                    it.startsWith("class ") || it.startsWith("interface ") || it.startsWith("fun ") || it.startsWith("@Composable")
+                })) {
+                    break
+                }
+                k++
+            }
+
+            if (foundBrace) {
+                val openBrace = k
+                val closeBrace = findBalancedCloseBrace(maskedText, openBrace)
+                if (closeBrace > openBrace) {
+                    var depth = 1
+                    var bIdx = openBrace + 1
+                    val classLevelChars = CharArray(closeBrace - openBrace - 1)
+                    while (bIdx < closeBrace) {
+                        val ch = maskedText[bIdx]
+                        when (ch) {
+                            '{' -> { depth++; classLevelChars[bIdx - openBrace - 1] = ' ' }
+                            '}' -> { depth--; classLevelChars[bIdx - openBrace - 1] = ' ' }
+                            else -> {
+                                classLevelChars[bIdx - openBrace - 1] = if (depth == 1) ch else ' '
+                            }
+                        }
+                        bIdx++
+                    }
+                    val classLevelText = classLevelChars.concatToString()
+                    val bodyVarMatch = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""").find(classLevelText)
+                    if (bodyVarMatch != null) {
+                        bodyVarName = bodyVarMatch.groupValues[1]
+                    }
+                }
+            }
+
+            val varPropName = ctorVarMatch?.groupValues?.get(1) ?: bodyVarName
+
+            if (hasStableAnnotation && (varPropName != null || rawCollectionMatch != null)) {
+                val offender = varPropName ?: rawCollectionMatch?.groupValues?.get(1) ?: "field"
                 result[className] = "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:$className.$offender"
-            } else if (varMatch != null) {
-                result[className] = "UNSTABLE" to "MUTABLE_VAR_PROPERTY:${varMatch.groupValues[1]}"
+            } else if (varPropName != null) {
+                result[className] = "UNSTABLE" to "MUTABLE_VAR_PROPERTY:$varPropName"
             } else if (rawCollectionMatch != null) {
                 val propName = rawCollectionMatch.groupValues[1]
                 val colType = rawCollectionMatch.groupValues[2]
@@ -982,7 +1028,64 @@ class ComposeStabilityExtractor {
                 }
             }
         } else if (i < masked.length && masked[i] == '=') {
-            returnsUnit = false
+            val exprStart = i
+            var depthParen = 0
+            var depthBrace = 0
+            var depthBracket = 0
+            var j = i + 1
+            var startedExpr = false
+            var exprEnd = (masked.length - 1).coerceAtLeast(exprStart)
+
+            while (j < masked.length) {
+                val c = masked[j]
+                if (!startedExpr && !c.isWhitespace()) {
+                    startedExpr = true
+                }
+                when (c) {
+                    '(' -> depthParen++
+                    ')' -> if (depthParen > 0) depthParen--
+                    '{' -> depthBrace++
+                    '}' -> if (depthBrace > 0) depthBrace--
+                    '[' -> depthBracket++
+                    ']' -> if (depthBracket > 0) depthBracket--
+                    '\n' -> {
+                        if (startedExpr && depthParen == 0 && depthBrace == 0 && depthBracket == 0) {
+                            val prevTrimmed = masked.substring(i + 1, j).trimEnd()
+                            val isContinuation = prevTrimmed.endsWith("+") ||
+                                prevTrimmed.endsWith("-") ||
+                                prevTrimmed.endsWith("*") ||
+                                prevTrimmed.endsWith("/") ||
+                                prevTrimmed.endsWith("%") ||
+                                prevTrimmed.endsWith("&&") ||
+                                prevTrimmed.endsWith("||") ||
+                                prevTrimmed.endsWith("?:") ||
+                                prevTrimmed.endsWith(".") ||
+                                prevTrimmed.endsWith("?.") ||
+                                prevTrimmed.endsWith("::") ||
+                                prevTrimmed.endsWith(",") ||
+                                prevTrimmed.endsWith("->") ||
+                                prevTrimmed.endsWith("=")
+
+                            var nextK = j + 1
+                            while (nextK < masked.length && (masked[nextK] == ' ' || masked[nextK] == '\t' || masked[nextK] == '\r')) {
+                                nextK++
+                            }
+                            val nextStartsContinuation = if (nextK < masked.length) {
+                                masked.startsWith(".", nextK) ||
+                                masked.startsWith("?.", nextK) ||
+                                masked.startsWith("::", nextK)
+                            } else false
+
+                            if (!isContinuation && !nextStartsContinuation) {
+                                exprEnd = j - 1
+                                return Triple(returnsUnit, exprStart, exprEnd)
+                            }
+                        }
+                    }
+                }
+                j++
+            }
+            return Triple(returnsUnit, exprStart, exprEnd)
         }
         return Triple(returnsUnit, -1, -1)
     }
@@ -1058,6 +1161,15 @@ class ComposeStabilityExtractor {
                     val blockSlice = maskedBody.substring(i + 1, closeBrace)
                     if (effectRe.containsMatchIn(blockSlice)) return true
                 }
+            }
+        }
+        val arglessWhenRe = Regex("""\bwhen\s*\{""")
+        for (m in arglessWhenRe.findAll(maskedBody)) {
+            val openBrace = m.range.last
+            val closeBrace = findBalancedCloseBrace(maskedBody, openBrace)
+            if (closeBrace > openBrace) {
+                val blockSlice = maskedBody.substring(openBrace + 1, closeBrace)
+                if (effectRe.containsMatchIn(blockSlice)) return true
             }
         }
         val letRe = Regex("""\?\.\s*let\s*\{""")

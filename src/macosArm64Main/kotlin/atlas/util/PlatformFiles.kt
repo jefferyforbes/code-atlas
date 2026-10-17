@@ -133,7 +133,10 @@ object PlatformFiles {
         return result
     }
 
-    fun listFilesRecursively(dirPath: String): List<String> {
+    fun listFilesRecursively(
+        dirPath: String,
+        shouldSkipDir: ((dirName: String) -> Boolean)? = null
+    ): List<String> {
         val result = mutableListOf<String>()
         val visitedDirs = mutableSetOf<String>()
         val rootCanon = canonicalPath(dirPath).trimEnd('/')
@@ -148,6 +151,9 @@ object PlatformFiles {
             for (entry in entries) {
                 val full = if (curr.endsWith("/")) "$curr$entry" else "$curr/$entry"
                 if (isDirectory(full)) {
+                    if (shouldSkipDir != null && shouldSkipDir(entry)) {
+                        continue
+                    }
                     scan(full)
                 } else if (isRegularFile(full)) {
                     val fileCanon = canonicalPath(full)

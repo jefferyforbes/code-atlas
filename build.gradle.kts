@@ -42,6 +42,10 @@ kotlin {
     }
 }
 
+tasks.register("test") {
+    dependsOn("macosArm64Test")
+}
+
 tasks.register<Copy>("installToDist") {
     dependsOn("linkReleaseExecutableMacosArm64")
     from(layout.buildDirectory.file("bin/macosArm64/releaseExecutable/atlas.kexe"))
@@ -49,6 +53,9 @@ tasks.register<Copy>("installToDist") {
     rename { "atlas" }
     doFirst {
         layout.projectDirectory.file("dist/atlas").asFile.delete()
+    }
+    doLast {
+        layout.projectDirectory.file("dist/atlas").asFile.setExecutable(true)
     }
 }
 

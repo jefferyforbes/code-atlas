@@ -698,4 +698,146 @@ class EngineAndMcpTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testMcpMethodNotFoundReturns32601() {
+        val server = CodeGraphMcpServer(workspaceRoot = ".")
+        try {
+            val response = server.processJsonRpcMessage("""{"jsonrpc":"2.0","id":123,"method":"unknown_method","params":{}}""")
+            assertNotNull(response)
+            assertTrue(response.contains("-32601"), "Must return error code -32601 for unknown method")
+            assertTrue(response.contains("Method not found: unknown_method"))
+
+            // Notification without id should return null
+            val notif = server.processJsonRpcMessage("""{"jsonrpc":"2.0","method":"unknown_notif","params":{}}""")
+            assertEquals(null, notif)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun testTerminalPlanStatusesDoNotTriggerCollision() {
+        val pid = getpid()
+        val dbPath = "/tmp/test_plan_term_$pid.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val sharedTarget = GraphNode(
+                nodeId = "p:src/SharedFile.kt#SharedFile",
+                projectId = "p",
+                fileId = "p:src/SharedFile.kt",
+                name = "SharedFile",
+                qualifiedName = "SharedFile",
+                kind = "class"
+            )
+            val donePlan = GraphNode(
+                nodeId = "p:plans/done.md#DonePlan",
+                projectId = "p",
+                fileId = "p:plans/done.md",
+                name = "DonePlan",
+                qualifiedName = "plans/done.md",
+                kind = "plan_contract",
+                signature = "plan (done)"
+            )
+            val landedPlan = GraphNode(
+                nodeId = "p:plans/landed.md#LandedPlan",
+                projectId = "p",
+                fileId = "p:plans/landed.md",
+                name = "LandedPlan",
+                qualifiedName = "plans/landed.md",
+                kind = "plan_contract",
+                signature = "plan (landed)"
+            )
+            val closedPlan = GraphNode(
+                nodeId = "p:plans/closed.md#ClosedPlan",
+                projectId = "p",
+                fileId = "p:plans/closed.md",
+                name = "ClosedPlan",
+                qualifiedName = "plans/closed.md",
+                kind = "plan_contract",
+                signature = "plan (closed)"
+            )
+            val activePlan1 = GraphNode(
+                nodeId = "p:plans/active1.md#ActivePlan1",
+                projectId = "p",
+                fileId = "p:plans/active1.md",
+                name = "ActivePlan1",
+                qualifiedName = "plans/active1.md",
+                kind = "plan_contract",
+                signature = "plan (active)"
+            )
+            val activePlan2 = GraphNode(
+                nodeId = "p:plans/active2.md#ActivePlan2",
+                projectId = "p",
+                fileId = "p:plans/active2.md",
+                name = "ActivePlan2",
+                qualifiedName = "plans/active2.md",
+                kind = "plan_contract",
+                signature = "plan (active)"
+            )
+
+            store.upsertNodesAndEdges(
+                projectId = "p",
+                nodes = listOf(sharedTarget, donePlan, landedPlan, closedPlan, activePlan1, activePlan2),
+                edges = listOf(
+                    GraphEdge("e1", "p", donePlan.nodeId, sharedTarget.nodeId, "PLAN_SCOPES_FILE"),
+                    GraphEdge("e2", "p", landedPlan.nodeId, sharedTarget.nodeId, "PLAN_SCOPES_FILE"),
+                    GraphEdge("e3", "p", closedPlan.nodeId, sharedTarget.nodeId, "PLAN_SCOPES_FILE"),
+                    GraphEdge("e4", "p", activePlan1.nodeId, sharedTarget.nodeId, "PLAN_SCOPES_FILE"),
+                    GraphEdge("e5", "p", activePlan2.nodeId, sharedTarget.nodeId, "PLAN_SCOPES_FILE")
+                )
+            )
+
+            val auditor = ArchitectureAuditor(store)
+            val collisions = auditor.checkPlan3dCollisions("p")
+            // done, landed, closed are ignored, so only activePlan1 and activePlan2 collide
+            assertEquals(1, collisions.size)
+            assertEquals("ActivePlan1", collisions[0].planA)
+            assertEquals("ActivePlan2", collisions[0].planB)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testDeadCodeExcludesFileScope() {
+        val pid = getpid()
+        val dbPath = "/tmp/test_dead_code_$pid.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val fileScopeNode = GraphNode(
+                nodeId = "p:src/Main.kt#file_scope",
+                projectId = "p",
+                fileId = "p:src/Main.kt",
+                name = "file_scope",
+                qualifiedName = "file_scope",
+                kind = "file_scope",
+                inDegree = 0
+            )
+            val deadFn = GraphNode(
+                nodeId = "p:src/Main.kt#unusedFunction",
+                projectId = "p",
+                fileId = "p:src/Main.kt",
+                name = "unusedFunction",
+                qualifiedName = "com.example.unusedFunction",
+                kind = "function",
+                inDegree = 0
+            )
+            store.upsertNodesAndEdges(
+                projectId = "p",
+                nodes = listOf(fileScopeNode, deadFn),
+                edges = emptyList()
+            )
+            val auditor = ArchitectureAuditor(store)
+            val deadNodes = auditor.detectDeadCode("p")
+            assertEquals(1, deadNodes.size)
+            assertEquals("unusedFunction", deadNodes[0].name)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }

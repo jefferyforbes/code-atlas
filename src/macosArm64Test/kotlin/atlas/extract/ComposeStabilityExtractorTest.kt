@@ -173,4 +173,100 @@ class ComposeStabilityExtractorTest {
         assertEquals(12, traces[1].recompositionCount)
         assertEquals(5, traces[1].skipCount)
     }
+
+    @Test
+    fun testExpressionBodyComposableFunction() {
+        val src = """
+            package com.example.expression
+
+            import androidx.compose.runtime.Composable
+            import androidx.compose.ui.Modifier
+
+            @Composable
+            fun ExpressionCard(
+                text: String,
+                modifier: Modifier = Modifier
+            ) = Box(modifier = modifier) {
+                Text(text = text)
+            }
+        """.trimIndent()
+
+        val bundle = extractor.extractKotlinFile(
+            projectSlug = "proj",
+            relPath = "src/commonMain/kotlin/ExpressionCard.kt",
+            sourceText = src
+        )
+
+        assertEquals(1, bundle.nodes.size)
+        val node = bundle.nodes.first()
+        assertEquals("com.example.expression.ExpressionCard", node.fqName)
+        assertTrue(node.isSkippable)
+        assertTrue(node.hasModifierParam)
+        assertTrue(node.modifierHasDefault)
+    }
+
+    @Test
+    fun testClassBodyMutablePropertyDetection() {
+        val src = """
+            package com.example.models
+
+            import androidx.compose.runtime.Composable
+
+            class CleanModel(val id: String)
+
+            class DirtyModel {
+                val id: String = ""
+                var mutableCount: Int = 0
+            }
+
+            @Composable
+            fun ComponentWithModels(
+                clean: CleanModel,
+                dirty: DirtyModel
+            ) {
+                Text(clean.id)
+            }
+        """.trimIndent()
+
+        val bundle = extractor.extractKotlinFile(
+            projectSlug = "proj",
+            relPath = "src/commonMain/kotlin/Models.kt",
+            sourceText = src
+        )
+
+        val comp = bundle.nodes.first { it.fqName == "com.example.models.ComponentWithModels" }
+        val params = bundle.params.filter { it.nodeId == comp.nodeId }.associateBy { it.paramName }
+        assertEquals("STABLE", params["clean"]?.stability)
+        assertEquals("UNSTABLE", params["dirty"]?.stability, "Class with body 'var' must be evaluated as UNSTABLE")
+    }
+
+    @Test
+    fun testArgumentlessWhenConditionalEffect() {
+        val src = """
+            package com.example.whencond
+
+            import androidx.compose.runtime.Composable
+            import androidx.compose.runtime.LaunchedEffect
+            import androidx.compose.runtime.remember
+            import androidx.compose.runtime.mutableStateOf
+
+            @Composable
+            fun WhenEffectComponent(flag: Boolean) {
+                when {
+                    flag -> {
+                        val state = remember { mutableStateOf(0) }
+                    }
+                }
+            }
+        """.trimIndent()
+
+        val bundle = extractor.extractKotlinFile(
+            projectSlug = "proj",
+            relPath = "src/commonMain/kotlin/WhenEffect.kt",
+            sourceText = src
+        )
+
+        val comp = bundle.nodes.first { it.fqName == "com.example.whencond.WhenEffectComponent" }
+        assertTrue((comp.violationMask and ComposeStabilityExtractor.BIT_STATE_001) != 0, "remember inside argumentless when must trigger BIT_STATE_001")
+    }
 }

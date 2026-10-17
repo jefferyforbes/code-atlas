@@ -60,12 +60,13 @@ class ScopeSynthesizer(private val store: SqliteGraphStore) {
             fPath.contains("fixtures/") || fPath.lowercase().contains("fake_") || fPath.lowercase().contains("commontest")
         }.sorted()
 
+        val terminalPlanStatuses = setOf("(merged)", "(completed)", "(done)", "(landed)", "(closed)")
         val collidingPlans = mutableListOf<String>()
         val planEdges = store.listEdges(projectId, edgeTypes = listOf("PLAN_SCOPES_FILE"))
         for (edge in planEdges) {
             if (edge.targetNodeId in impactedNodeIds) {
                 val planNode = store.getNode(projectId, edge.sourceNodeId)
-                if (planNode == null || planNode.signature.contains("(merged)") || planNode.signature.contains("(completed)")) {
+                if (planNode == null || terminalPlanStatuses.any { planNode.signature.contains(it) }) {
                     continue
                 }
                 val planName = planNode.name

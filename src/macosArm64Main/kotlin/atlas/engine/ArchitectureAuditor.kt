@@ -135,11 +135,12 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         val planToFiles = mutableMapOf<String, MutableSet<String>>()
         val planToModules = mutableMapOf<String, MutableSet<String>>()
 
+        val terminalPlanStatuses = setOf("(merged)", "(completed)", "(done)", "(landed)", "(closed)")
         for (edge in planEdges) {
             val planNode = nodesById[edge.sourceNodeId]
             val targetNode = nodesById[edge.targetNodeId]
             if (planNode == null || targetNode == null) continue
-            if (planNode.signature.contains("(merged)") || planNode.signature.contains("(completed)")) {
+            if (terminalPlanStatuses.any { planNode.signature.contains(it) }) {
                 continue
             }
             val planId = planNode.name
@@ -189,7 +190,7 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         val entrypointNames = setOf("main", "init", "run", "invoke", "Companion", "onCreate", "onStart")
         val excludedKinds = setOf(
             "module", "markdown_doc", "markdown_note", "plan_contract", "expect_decl", "actual_decl",
-            "typealias", "namespace", "variable", "composable"
+            "typealias", "namespace", "variable", "composable", "file_scope"
         )
         return store.listNodes(projectId)
             .filter { node ->

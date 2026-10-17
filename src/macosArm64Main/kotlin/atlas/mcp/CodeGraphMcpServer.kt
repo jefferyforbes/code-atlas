@@ -625,7 +625,10 @@ class CodeGraphMcpServer(
                 buildJsonObject {
                     put("jsonrpc", "2.0")
                     put("id", reqId)
-                    putJsonObject("result") {}
+                    putJsonObject("error") {
+                        put("code", -32601)
+                        put("message", "Method not found: $method")
+                    }
                 }
             }
         }

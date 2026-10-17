@@ -398,10 +398,9 @@ class SqliteGraphStore(val dbPath: String) {
         }
     }
 
-    fun replaceFileRawSymbolEdges(projectId: String, fileId: String, edges: List<GraphEdge>) {
-        val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
-        db.exec("BEGIN TRANSACTION;")
-        try {
+    fun replaceBatchRawSymbolEdges(projectId: String, fileEdgesMap: Map<String, List<GraphEdge>>) {
+        if (fileEdgesMap.isEmpty()) return
+        withSavepoint("sp_batch_raw_edges") {
             val delStmt = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
             val insStmt = db.prepare(
                 """
@@ -412,57 +411,62 @@ class SqliteGraphStore(val dbPath: String) {
                 """.trimIndent()
             )
             try {
-                delStmt.bindString(1, projectId)
-                delStmt.bindString(2, normalizedFileId)
-                delStmt.step()
+                for ((fileId, edges) in fileEdgesMap) {
+                    val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
+                    delStmt.reset()
+                    delStmt.clearBindings()
+                    delStmt.bindString(1, projectId)
+                    delStmt.bindString(2, normalizedFileId)
+                    delStmt.step()
 
-                var insertedCount = 0
-                for (edge in edges) {
-                    if (edge.edgeType == "CONTAINS") continue
-                    val targetSym = if (edge.targetNodeId.startsWith("sym:")) {
-                        edge.targetNodeId
-                    } else if (!edge.targetNodeId.startsWith("$projectId:")) {
-                        "sym:${edge.targetNodeId}"
-                    } else {
-                        continue
+                    var insertedCount = 0
+                    for (edge in edges) {
+                        if (edge.edgeType == "CONTAINS") continue
+                        val targetSym = if (edge.targetNodeId.startsWith("sym:")) {
+                            edge.targetNodeId
+                        } else if (!edge.targetNodeId.startsWith("$projectId:")) {
+                            "sym:${edge.targetNodeId}"
+                        } else {
+                            continue
+                        }
+                        insStmt.reset()
+                        insStmt.clearBindings()
+                        insStmt.bindString(1, projectId)
+                        insStmt.bindString(2, normalizedFileId)
+                        insStmt.bindString(3, edge.sourceNodeId)
+                        insStmt.bindString(4, targetSym)
+                        insStmt.bindString(5, edge.edgeType)
+                        insStmt.bindDouble(6, edge.confidence)
+                        insStmt.bindString(7, edge.provenance)
+                        insStmt.bindInt(8, edge.lineNumber)
+                        insStmt.bindString(9, edge.edgeId)
+                        insStmt.step()
+                        insertedCount++
                     }
-                    insStmt.reset()
-                    insStmt.clearBindings()
-                    insStmt.bindString(1, projectId)
-                    insStmt.bindString(2, normalizedFileId)
-                    insStmt.bindString(3, edge.sourceNodeId)
-                    insStmt.bindString(4, targetSym)
-                    insStmt.bindString(5, edge.edgeType)
-                    insStmt.bindDouble(6, edge.confidence)
-                    insStmt.bindString(7, edge.provenance)
-                    insStmt.bindInt(8, edge.lineNumber)
-                    insStmt.bindString(9, edge.edgeId)
-                    insStmt.step()
-                    insertedCount++
-                }
-                if (insertedCount == 0) {
-                    insStmt.reset()
-                    insStmt.clearBindings()
-                    insStmt.bindString(1, projectId)
-                    insStmt.bindString(2, normalizedFileId)
-                    insStmt.bindString(3, "")
-                    insStmt.bindString(4, "")
-                    insStmt.bindString(5, "INDEXED_MARKER")
-                    insStmt.bindDouble(6, 1.0)
-                    insStmt.bindString(7, "EXTRACTED_AST")
-                    insStmt.bindInt(8, 0)
-                    insStmt.bindString(9, "")
-                    insStmt.step()
+                    if (insertedCount == 0) {
+                        insStmt.reset()
+                        insStmt.clearBindings()
+                        insStmt.bindString(1, projectId)
+                        insStmt.bindString(2, normalizedFileId)
+                        insStmt.bindString(3, "")
+                        insStmt.bindString(4, "")
+                        insStmt.bindString(5, "INDEXED_MARKER")
+                        insStmt.bindDouble(6, 1.0)
+                        insStmt.bindString(7, "EXTRACTED_AST")
+                        insStmt.bindInt(8, 0)
+                        insStmt.bindString(9, "")
+                        insStmt.step()
+                    }
                 }
             } finally {
                 delStmt.close()
                 insStmt.close()
             }
-            db.exec("COMMIT;")
-        } catch (e: Throwable) {
-            db.exec("ROLLBACK;")
-            throw e
         }
+    }
+
+    fun replaceFileRawSymbolEdges(projectId: String, fileId: String, edges: List<GraphEdge>) {
+        replaceBatchRawSymbolEdges(projectId, mapOf(fileId to edges))
     }
 
     fun listRawSymbolEdges(projectId: String): List<GraphEdge> {
@@ -1069,26 +1073,28 @@ class SqliteGraphStore(val dbPath: String) {
                 }
             } catch (_: Throwable) {}
 
-            val placeholders = segments.joinToString(",") { "?" }
-            val vocabSql = """
-                SELECT node_id, COUNT(*) AS matched_segments
-                FROM name_segment_vocab
-                WHERE project_id = ? AND segment IN ($placeholders)
-                GROUP BY node_id;
-            """.trimIndent()
-            val vocabStmt = db.prepare(vocabSql)
-            try {
-                vocabStmt.bindString(1, projectId)
-                segments.forEachIndexed { i, s -> vocabStmt.bindString(2 + i, s) }
-                while (vocabStmt.step()) {
-                    val nid = vocabStmt.columnString(0)
-                    val matched = vocabStmt.columnInt(1)
-                    val coverage = matched.toDouble() / segments.size.toDouble()
-                    val current = scores.getOrElse(nid) { 0.0 }
-                    scores[nid] = current + (coverage * coverage * 15.0)
+            for (chunk in segments.chunked(250)) {
+                val placeholders = chunk.joinToString(",") { "?" }
+                val vocabSql = """
+                    SELECT node_id, COUNT(*) AS matched_segments
+                    FROM name_segment_vocab
+                    WHERE project_id = ? AND segment IN ($placeholders)
+                    GROUP BY node_id;
+                """.trimIndent()
+                val vocabStmt = db.prepare(vocabSql)
+                try {
+                    vocabStmt.bindString(1, projectId)
+                    chunk.forEachIndexed { i, s -> vocabStmt.bindString(2 + i, s) }
+                    while (vocabStmt.step()) {
+                        val nid = vocabStmt.columnString(0)
+                        val matched = vocabStmt.columnInt(1)
+                        val coverage = matched.toDouble() / segments.size.toDouble()
+                        val current = scores.getOrElse(nid) { 0.0 }
+                        scores[nid] = current + (coverage * coverage * 15.0)
+                    }
+                } finally {
+                    vocabStmt.close()
                 }
-            } finally {
-                vocabStmt.close()
             }
         }
 
@@ -1138,23 +1144,25 @@ class SqliteGraphStore(val dbPath: String) {
         val nodeMap = mutableMapOf<String, GraphNode>()
 
         val batchIds = rankedIds.take((limit * 5).coerceAtLeast(50))
-        val placeholders = batchIds.joinToString(",") { "?" }
-        val nodesStmt = db.prepare(
-            """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree
-            FROM nodes WHERE node_id IN ($placeholders);
-            """.trimIndent()
-        )
-        try {
-            batchIds.forEachIndexed { i, id -> nodesStmt.bindString(1 + i, id) }
-            while (nodesStmt.step()) {
-                val node = rowToNode(nodesStmt)
-                nodeMap[node.nodeId] = node
+        for (chunk in batchIds.chunked(250)) {
+            val placeholders = chunk.joinToString(",") { "?" }
+            val nodesStmt = db.prepare(
+                """
+                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                       is_test_double, in_degree, out_degree
+                FROM nodes WHERE node_id IN ($placeholders);
+                """.trimIndent()
+            )
+            try {
+                chunk.forEachIndexed { i, id -> nodesStmt.bindString(1 + i, id) }
+                while (nodesStmt.step()) {
+                    val node = rowToNode(nodesStmt)
+                    nodeMap[node.nodeId] = node
+                }
+            } finally {
+                nodesStmt.close()
             }
-        } finally {
-            nodesStmt.close()
         }
 
         val candidates = rankedIds.mapNotNull { nid ->
@@ -1290,24 +1298,26 @@ class SqliteGraphStore(val dbPath: String) {
             if (item.targetId.isNotEmpty()) impactedIds.add(item.targetId)
         }
 
-        val placeholders = impactedIds.joinToString(",") { "?" }
-        val stmt = db.prepare(
-            """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree
-            FROM nodes WHERE project_id = ? AND node_id IN ($placeholders);
-            """.trimIndent()
-        )
         val nodes = mutableListOf<GraphNode>()
-        try {
-            stmt.bindString(1, projectId)
-            impactedIds.forEachIndexed { i, id -> stmt.bindString(2 + i, id) }
-            while (stmt.step()) {
-                nodes.add(rowToNode(stmt))
+        for (chunk in impactedIds.chunked(250)) {
+            val placeholders = chunk.joinToString(",") { "?" }
+            val stmt = db.prepare(
+                """
+                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                       is_test_double, in_degree, out_degree
+                FROM nodes WHERE project_id = ? AND node_id IN ($placeholders);
+                """.trimIndent()
+            )
+            try {
+                stmt.bindString(1, projectId)
+                chunk.forEachIndexed { i, id -> stmt.bindString(2 + i, id) }
+                while (stmt.step()) {
+                    nodes.add(rowToNode(stmt))
+                }
+            } finally {
+                stmt.close()
             }
-        } finally {
-            stmt.close()
         }
 
         val files = nodes.mapNotNull { n ->
@@ -2389,29 +2399,31 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun queryFigmaNodesByIds(fileKey: String, nodeIds: List<String>): List<FigmaNode> {
         if (nodeIds.isEmpty()) return emptyList()
-        val placeholders = nodeIds.joinToString(",") { "?" }
-        val stmt = db.prepare(
-            """
-            SELECT rowid_pk, node_id, file_key, page_name, section_id, parent_id,
-                   name, node_type, layout_mode, sizing_horizontal, sizing_vertical,
-                   text_auto_resize, padding_left, padding_right, padding_top, padding_bottom,
-                   item_spacing, local_x, local_y, canvas_x, canvas_y, width, height,
-                   is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
-                   semiotic_layer
-            FROM figma_nodes
-            WHERE file_key = ? AND node_id IN ($placeholders);
-            """.trimIndent()
-        )
         val byId = mutableMapOf<String, FigmaNode>()
-        try {
-            stmt.bindString(1, fileKey)
-            nodeIds.forEachIndexed { idx, id -> stmt.bindString(2 + idx, id) }
-            while (stmt.step()) {
-                val node = rowToFigmaNode(stmt)
-                byId[node.nodeId] = node
+        for (chunk in nodeIds.chunked(250)) {
+            val placeholders = chunk.joinToString(",") { "?" }
+            val stmt = db.prepare(
+                """
+                SELECT rowid_pk, node_id, file_key, page_name, section_id, parent_id,
+                       name, node_type, layout_mode, sizing_horizontal, sizing_vertical,
+                       text_auto_resize, padding_left, padding_right, padding_top, padding_bottom,
+                       item_spacing, local_x, local_y, canvas_x, canvas_y, width, height,
+                       is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
+                       semiotic_layer
+                FROM figma_nodes
+                WHERE file_key = ? AND node_id IN ($placeholders);
+                """.trimIndent()
+            )
+            try {
+                stmt.bindString(1, fileKey)
+                chunk.forEachIndexed { idx, id -> stmt.bindString(2 + idx, id) }
+                while (stmt.step()) {
+                    val node = rowToFigmaNode(stmt)
+                    byId[node.nodeId] = node
+                }
+            } finally {
+                stmt.close()
             }
-        } finally {
-            stmt.close()
         }
         return nodeIds.mapNotNull { byId[it] }
     }

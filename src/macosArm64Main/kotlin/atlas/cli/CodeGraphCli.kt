@@ -67,6 +67,8 @@ class CodeGraphCli {
             var strongSkipping = true
             var limit = 10
             var isComposeAuditFlag = false
+            var outcome: String? = null
+            var note: String? = null
 
             var idx = 0
             while (idx < argv.size) {
@@ -90,10 +92,16 @@ class CodeGraphCli {
                         command = "query"
                         action = "shortest_path"
                     }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "dead-code" || arg == "dead_code" || arg == "serve-mcp" || arg == "version" -> {
-                        command = if (arg == "dead_code") "dead-code" else arg
+                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "version" -> {
+                        command = when (arg) {
+                            "dead_code" -> "dead-code"
+                            "record_memory" -> "record-memory"
+                            else -> arg
+                        }
                     }
                     arg == "--compose" -> isComposeAuditFlag = true
+                    arg == "--outcome" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> outcome = argv[++idx]
+                    arg == "--note" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> note = argv[++idx]
                     arg == "--project" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> project = argv[++idx]
                     arg == "--workspace" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> workspace = argv[++idx]
                     arg == "--db" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> customDb = argv[++idx]
@@ -243,6 +251,8 @@ class CodeGraphCli {
                             if (filterPaths.isNotEmpty()) {
                                 putJsonArray("targets") { filterPaths.forEach { add(it) } }
                             }
+                            if (!outcome.isNullOrBlank()) put("outcome", outcome)
+                            if (!note.isNullOrBlank()) put("note", note)
                         }
                         val res = server.callTool("codegraph_audit", toolArgs)
                         val data = loadSpilledData(res)
@@ -279,6 +289,27 @@ class CodeGraphCli {
                         println(truncateSummary(text, isJson))
                         return 0
                     }
+                    "record-memory" -> {
+                        val targetNode = if (target.isNotEmpty()) target else (if (paths.isNotEmpty()) paths.first() else "")
+                        val toolArgs = buildJsonObject {
+                            put("action", "record_memory")
+                            put("project", project)
+                            putJsonArray("targets") { if (targetNode.isNotEmpty()) add(targetNode) }
+                            if (!outcome.isNullOrBlank()) put("outcome", outcome)
+                            if (!note.isNullOrBlank()) put("note", note)
+                        }
+                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val text = if (isJson) {
+                            jsonPretty.encodeToString(res)
+                        } else {
+                            val annId = res["annotation_id"]?.jsonPrimitive?.content ?: "unknown"
+                            val nId = res["node_id"]?.jsonPrimitive?.content ?: targetNode
+                            val out = res["outcome"]?.jsonPrimitive?.content ?: (outcome ?: "useful")
+                            "[Atlas Memory] Recorded outcome=$out node=$nId id=$annId"
+                        }
+                        println(truncateSummary(text, isJson))
+                        return 0
+                    }
                     "query" -> {
                         val toolArgs = buildJsonObject {
                             put("action", action)
@@ -287,6 +318,8 @@ class CodeGraphCli {
                             put("depth", depth)
                             if (secondaryTarget.isNotEmpty()) put("secondary_target", secondaryTarget)
                             if (includeSource) put("include_source", true)
+                            if (!outcome.isNullOrBlank()) put("outcome", outcome)
+                            if (!note.isNullOrBlank()) put("note", note)
                         }
                         val res = server.callTool("codegraph_query", toolArgs)
                         val data = if (isJson) loadSpilledData(res) else res
@@ -737,6 +770,8 @@ class CodeGraphCli {
                   query              Query AST symbols, callers, callees, blast radius, or status
                   synthesize-scope   Synthesize 3D Concurrency Scope (files, modules, architecture)
                   audit              Verify Clean Architecture layers and Single Declaration Principle
+                  dead-code          Detect dead code unreferenced across indexed modules
+                  record-memory      Record execution outcome annotation for a node into work memory
                   serve-mcp          Run JSON-RPC 2.0 MCP server over stdio
                   version            Print version information
 
@@ -762,6 +797,8 @@ class CodeGraphCli {
                   --cache-profile <p>      'enterprise' (user cache) or 'in-repo' (.atlas/)
                   --json                   Emit full formatted JSON output
                   --summary                Emit compact summary <= 400 bytes (default)
+                  --outcome <status>       Outcome status for memory recording (default: useful)
+                  --note <text>            Descriptive note or rationale for memory recording
 
                 Query & Compose Options:
                   --target <sym>           Symbol name, node name, or ID

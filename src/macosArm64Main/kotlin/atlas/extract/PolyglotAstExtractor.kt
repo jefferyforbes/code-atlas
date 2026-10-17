@@ -19,7 +19,7 @@ class PolyglotAstExtractor {
         private val KT_IMP_RE = Regex("""^\s*import\s+([a-zA-Z0-9_.]+)""", RegexOption.MULTILINE)
         private val KT_DECL_RE = Regex(
             """^(?<indent>[ \t]*)(?<annotations>(?:@[A-Za-z0-9_]+(?:\((?:[^()]|\([^()]*\))*\))?\s*)*)""" +
-            """(?<modifiers>(?:(?:public|internal|private|protected|open|abstract|sealed|data|value|inline|suspend|expect|actual|override|companion|fun)\s+)*)""" +
+            """(?<modifiers>(?:(?:public|internal|private|protected|open|abstract|sealed|data|value|inline|suspend|expect|actual|override|companion|fun|final|inner|enum|annotation|operator|infix|tailrec|external)\s+)*)""" +
             """(?<kw>class|interface|object|fun|typealias)(?:\s+(?:[A-Za-z0-9_<>?,.\t ]+\.)?(?<name>[A-Za-z0-9_]+))?""",
             RegexOption.MULTILINE
         )
@@ -33,7 +33,7 @@ class PolyglotAstExtractor {
 
         private val TS_IMP_RE = Regex("""import\s+(?:type\s+)?(?:(?:\{([^}]+)\})|([A-Za-z0-9_]+))\s+from\s+['"]([^'"]+)['"]""")
         private val TS_DECL_RE = Regex(
-            """^(?<indent>[ \t]*)(?:export\s+)?(?:default\s+)?(?:async\s+)?(?<kw>class|interface|type|function|enum|const|let|var)\s+(?<name>[A-Za-z0-9_]+)""",
+            """^(?<indent>[ \t]*)(?:export\s+)?(?:default\s+)?(?:async\s+)?(?<kw>class|interface|type|function|const\s+enum|enum|const|let|var)\s+(?<name>[A-Za-z0-9_]+)""",
             RegexOption.MULTILINE
         )
 
@@ -75,6 +75,8 @@ class PolyglotAstExtractor {
             val isPy = language == "python"
             val isRust = language == "rust"
             val isTsJs = language == "typescript" || language == "javascript"
+            val isKotlin = language == "kotlin"
+            val isSwift = language == "swift"
             var i = 0
             val n = source.length
 
@@ -140,6 +142,77 @@ class PolyglotAstExtractor {
                             i += 3
                             break
                         }
+                        if (isKotlin && delim == '"' && source[i] == '$' && i + 1 < n && source[i + 1] == '{') {
+                            out[i] = ' '
+                            out[i + 1] = ' '
+                            i += 2
+                            var depth = 1
+                            while (i < n && depth > 0) {
+                                if (source[i] == '{') {
+                                    depth++
+                                    out[i] = '{'
+                                    i++
+                                } else if (source[i] == '}') {
+                                    depth--
+                                    if (depth == 0) out[i] = ' ' else out[i] = '}'
+                                    i++
+                                } else if (source[i] == '"') {
+                                    out[i] = '"'
+                                    i++
+                                    while (i < n) {
+                                        if (source[i] == '\\' && i + 1 < n) {
+                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
+                                        }
+                                        if (source[i] == '"') {
+                                            out[i] = '"'; i++; break
+                                        }
+                                        if (source[i] == '\n') {
+                                            out[i] = '\n'; i++; break
+                                        }
+                                        writeSpaceOrNewline(i)
+                                        i++
+                                    }
+                                } else {
+                                    out[i] = source[i]
+                                    i++
+                                }
+                            }
+                            continue
+                        }
+                        if (isSwift && delim == '"' && source[i] == '\\' && i + 1 < n && source[i + 1] == '(') {
+                            out[i] = ' '
+                            out[i + 1] = ' '
+                            i += 2
+                            var depth = 1
+                            while (i < n && depth > 0) {
+                                if (source[i] == '(') {
+                                    depth++
+                                    out[i] = '('
+                                    i++
+                                } else if (source[i] == ')') {
+                                    depth--
+                                    if (depth == 0) out[i] = ' ' else out[i] = ')'
+                                    i++
+                                } else if (source[i] == '"') {
+                                    out[i] = '"'
+                                    i++
+                                    while (i < n) {
+                                        if (source[i] == '\\' && i + 1 < n) {
+                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
+                                        }
+                                        if (source[i] == '"') {
+                                            out[i] = '"'; i++; break
+                                        }
+                                        writeSpaceOrNewline(i)
+                                        i++
+                                    }
+                                } else {
+                                    out[i] = source[i]
+                                    i++
+                                }
+                            }
+                            continue
+                        }
                         writeSpaceOrNewline(i)
                         i++
                     }
@@ -151,10 +224,81 @@ class PolyglotAstExtractor {
                     out[i] = '"'
                     i++
                     while (i < n) {
+                        if (isSwift && source[i] == '\\' && i + 1 < n && source[i + 1] == '(') {
+                            out[i] = ' '
+                            out[i + 1] = ' '
+                            i += 2
+                            var depth = 1
+                            while (i < n && depth > 0) {
+                                if (source[i] == '(') {
+                                    depth++
+                                    out[i] = '('
+                                    i++
+                                } else if (source[i] == ')') {
+                                    depth--
+                                    if (depth == 0) out[i] = ' ' else out[i] = ')'
+                                    i++
+                                } else if (source[i] == '"') {
+                                    out[i] = '"'
+                                    i++
+                                    while (i < n) {
+                                        if (source[i] == '\\' && i + 1 < n) {
+                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
+                                        }
+                                        if (source[i] == '"') {
+                                            out[i] = '"'; i++; break
+                                        }
+                                        writeSpaceOrNewline(i)
+                                        i++
+                                    }
+                                } else {
+                                    out[i] = source[i]
+                                    i++
+                                }
+                            }
+                            continue
+                        }
                         if (source[i] == '\\' && i + 1 < n) {
                             writeSpaceOrNewline(i)
                             writeSpaceOrNewline(i + 1)
                             i += 2
+                            continue
+                        }
+                        if (isKotlin && source[i] == '$' && i + 1 < n && source[i + 1] == '{') {
+                            out[i] = ' '
+                            out[i + 1] = ' '
+                            i += 2
+                            var depth = 1
+                            while (i < n && depth > 0) {
+                                if (source[i] == '{') {
+                                    depth++
+                                    out[i] = '{'
+                                    i++
+                                } else if (source[i] == '}') {
+                                    depth--
+                                    if (depth == 0) out[i] = ' ' else out[i] = '}'
+                                    i++
+                                } else if (source[i] == '"') {
+                                    out[i] = '"'
+                                    i++
+                                    while (i < n) {
+                                        if (source[i] == '\\' && i + 1 < n) {
+                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
+                                        }
+                                        if (source[i] == '"') {
+                                            out[i] = '"'; i++; break
+                                        }
+                                        if (source[i] == '\n') {
+                                            out[i] = '\n'; i++; break
+                                        }
+                                        writeSpaceOrNewline(i)
+                                        i++
+                                    }
+                                } else {
+                                    out[i] = source[i]
+                                    i++
+                                }
+                            }
                             continue
                         }
                         if (source[i] == '"') {
@@ -230,6 +374,44 @@ class PolyglotAstExtractor {
                             writeSpaceOrNewline(i)
                             writeSpaceOrNewline(i + 1)
                             i += 2
+                            continue
+                        }
+                        if (source[i] == '$' && i + 1 < n && source[i + 1] == '{') {
+                            out[i] = ' '
+                            out[i + 1] = ' '
+                            i += 2
+                            var depth = 1
+                            while (i < n && depth > 0) {
+                                if (source[i] == '{') {
+                                    depth++
+                                    out[i] = '{'
+                                    i++
+                                } else if (source[i] == '}') {
+                                    depth--
+                                    if (depth == 0) out[i] = ' ' else out[i] = '}'
+                                    i++
+                                } else if (source[i] == '"' || source[i] == '\'') {
+                                    val strQuote = source[i]
+                                    out[i] = strQuote
+                                    i++
+                                    while (i < n) {
+                                        if (source[i] == '\\' && i + 1 < n) {
+                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
+                                        }
+                                        if (source[i] == strQuote) {
+                                            out[i] = strQuote; i++; break
+                                        }
+                                        if (source[i] == '\n') {
+                                            out[i] = '\n'; i++; break
+                                        }
+                                        writeSpaceOrNewline(i)
+                                        i++
+                                    }
+                                } else {
+                                    out[i] = source[i]
+                                    i++
+                                }
+                            }
                             continue
                         }
                         if (source[i] == '`') {
@@ -871,6 +1053,8 @@ class PolyglotAstExtractor {
                     "expect" in modTokens -> "expect_decl"
                     "actual" in modTokens -> "actual_decl"
                     "Composable" in annTokens -> "composable"
+                    "enum" in modTokens -> "enum"
+                    "annotation" in modTokens -> "annotation"
                     kw == "fun" -> "function"
                     else -> kw
                 }
@@ -915,12 +1099,14 @@ class PolyglotAstExtractor {
                 val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
                 val seenCallees = mutableSetOf<String>()
                 for (callMatch in CALL_RE.findAll(body)) {
+                    val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
-                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(callee)) {
+                    val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
+                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:call:$callee:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$callee", edgeType = "CALLS",
+                            edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
+                            sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
                             provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
                         ))
                     }
@@ -985,12 +1171,14 @@ class PolyglotAstExtractor {
                 val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
                 val seenCallees = mutableSetOf<String>()
                 for (callMatch in CALL_RE.findAll(body)) {
+                    val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
-                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(callee)) {
+                    val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
+                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:call:$callee:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$callee", edgeType = "CALLS",
+                            edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
+                            sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
                             provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
                         ))
                     }
@@ -1033,16 +1221,17 @@ class PolyglotAstExtractor {
                 val endLine = findBlockEndLine(lines, startLine)
                 val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
                 val declHeaderSlice = maskedLines.subList(startLine - 1, minOf(maskedLines.size, minOf(endLine, startLine + 2))).joinToString(" ")
-                val kind = when (kw) {
-                    "function" -> "function"
-                    "const", "let", "var" -> if (TS_ARROW_OR_FN_RE.containsMatchIn(declHeaderSlice)) "function" else "variable"
-                    "interface" -> "interface"
-                    "type" -> "typealias"
-                    "enum" -> "enum"
+                val kind = when {
+                    kw == "function" -> "function"
+                    kw in setOf("const", "let", "var") -> if (TS_ARROW_OR_FN_RE.containsMatchIn(declHeaderSlice)) "function" else "variable"
+                    kw == "interface" -> "interface"
+                    kw == "type" -> "typealias"
+                    kw == "enum" || kw.endsWith("enum") -> "enum"
                     else -> "class"
                 }
 
                 val isTopLevel = indent.isEmpty()
+                if (!isTopLevel && kind == "variable") continue
                 if (isTopLevel && kind !in setOf("typealias", "variable")) topLevelCount++
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
                 val nodeId = "$fileId#$name"
@@ -1075,12 +1264,14 @@ class PolyglotAstExtractor {
                 val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
                 val seenCallees = mutableSetOf<String>()
                 for (callMatch in CALL_RE.findAll(body)) {
+                    val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
-                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(callee)) {
+                    val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
+                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:call:$callee:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$callee", edgeType = "CALLS",
+                            edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
+                            sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
                             provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
                         ))
                     }
@@ -1155,9 +1346,9 @@ class PolyglotAstExtractor {
                 val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
                 val seenCallees = mutableSetOf<String>()
                 for (callMatch in CALL_RE.findAll(body)) {
-                    val receiver = callMatch.groups["receiver"]?.value
+                    val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
-                    val targetSym = if (callee == "new" && !receiver.isNullOrEmpty()) receiver else callee
+                    val targetSym = if (callee == "new" && !receiver.isNullOrEmpty()) receiver else if (!receiver.isNullOrEmpty()) "$receiver::$callee" else callee
                     if (targetSym != node.name && targetSym !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
@@ -1282,12 +1473,14 @@ class PolyglotAstExtractor {
                 val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
                 val seenCallees = mutableSetOf<String>()
                 for (callMatch in CALL_RE.findAll(body)) {
+                    val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
-                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(callee)) {
+                    val targetSym = if (!receiver.isNullOrEmpty()) "$receiver::$callee" else callee
+                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:call:$callee:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$callee", edgeType = "CALLS",
+                            edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
+                            sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
                             provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
                         ))
                     }
@@ -1379,12 +1572,14 @@ class PolyglotAstExtractor {
                 val body = maskChildLineRanges(maskedLines, scanStartLine, node.endLine, childRanges)
                 val seenCallees = mutableSetOf<String>()
                 for (callMatch in CALL_RE.findAll(body)) {
+                    val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
-                    if (callee != node.name && callee !in CALL_STOPWORDS && !callee.startsWith("_") && seenCallees.add(callee)) {
+                    val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
+                    if (callee != node.name && callee !in CALL_STOPWORDS && !callee.startsWith("_") && seenCallees.add(targetSym)) {
                         val callLine = scanStartLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:call:$callee:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$callee", edgeType = "CALLS",
+                            edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
+                            sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
                             provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
                         ))
                     }
@@ -1432,6 +1627,7 @@ class PolyglotAstExtractor {
                         targetId = exact.nodeId
                     } else {
                         val shortSym = sym.substringAfterLast('.').substringAfterLast("::")
+                        val receiver = if (sym.contains('.')) sym.substringBeforeLast('.') else if (sym.contains("::")) sym.substringBeforeLast("::") else null
                         val candidates = byName[shortSym]
                         if (candidates.isNullOrEmpty()) continue
 
@@ -1442,6 +1638,15 @@ class PolyglotAstExtractor {
                             val srcFileId = srcNode?.fileId ?: edge.sourceNodeId.substringBefore("#")
                             val srcModId = srcNode?.moduleId ?: ""
                             val fileImports = importsByFile[srcFileId] ?: emptySet()
+
+                            // Priority 0: Candidate matching receiver in qualifiedName, file name, or signature
+                            val receiverMatches = if (receiver != null) {
+                                candidates.filter { cand ->
+                                    cand.qualifiedName.contains(receiver) ||
+                                        cand.fileId.substringAfterLast('/').substringBeforeLast('.').equals(receiver, ignoreCase = true) ||
+                                        cand.signature.contains(receiver)
+                                }
+                            } else emptyList()
 
                             // Priority 1: Same file
                             val sameFile = candidates.filter { it.fileId == srcFileId }
@@ -1455,6 +1660,7 @@ class PolyglotAstExtractor {
                             val sameModule = if (srcModId.isNotEmpty()) candidates.filter { it.moduleId == srcModId } else emptyList()
 
                             val chosenPool = when {
+                                receiverMatches.isNotEmpty() -> receiverMatches
                                 sameFile.isNotEmpty() -> sameFile
                                 imported.isNotEmpty() -> imported
                                 sameModule.isNotEmpty() -> sameModule

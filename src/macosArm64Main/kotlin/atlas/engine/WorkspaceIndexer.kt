@@ -91,11 +91,14 @@ class WorkspaceIndexer(
         val markdownQueue = mutableListOf<Pair<String, String>>()
         val unchangedPlanQueue = mutableListOf<Pair<String, String>>()
         val pendingKotlinComposeFiles = mutableListOf<Triple<String, String, List<GraphEdge>>>()
+        val pendingRawEdges = mutableMapOf<String, List<GraphEdge>>()
         var codeFilesIndexed = 0
         var filesIndexed = 0
         var filesSkipped = 0
 
-        val allFiles = PlatformFiles.listFilesRecursively(root)
+        val allFiles = PlatformFiles.listFilesRecursively(root) { dirName ->
+            dirName in SKIP_DIRS || dirName.startsWith(".venv")
+        }
         val validDiskFiles = mutableSetOf<String>()
         for (filePath in allFiles) {
             val relStr = filePath.removePrefix(root).removePrefix("/").replace('\\', '/')
@@ -180,7 +183,7 @@ class WorkspaceIndexer(
             if (lang == "kotlin") {
                 pendingKotlinComposeFiles.add(Triple(relStr, sourceText, fEdges))
             } else {
-                store.replaceFileRawSymbolEdges(projectId, fileId, fEdges)
+                pendingRawEdges[fileId] = fEdges
             }
             changedNodes.addAll(fNodes)
             codeFilesIndexed++
@@ -324,7 +327,11 @@ class WorkspaceIndexer(
                 }
             }
 
-            store.replaceFileRawSymbolEdges(projectId, fileId, baseEdges + bundle.edges)
+            pendingRawEdges[fileId] = baseEdges + bundle.edges
+        }
+
+        if (pendingRawEdges.isNotEmpty()) {
+            store.replaceBatchRawSymbolEdges(projectId, pendingRawEdges)
         }
 
         if (allNewComposeNodes.isNotEmpty() || allNewComposeParams.isNotEmpty()) {
