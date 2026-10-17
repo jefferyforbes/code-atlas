@@ -217,12 +217,48 @@ class CodeGraphMcpServer(
         )
     }
 
+    private val projectServers = mutableMapOf<String, CodeGraphMcpServer>()
+
     fun indexWorkspace(
         projectId: String,
         subpaths: List<String>? = null
-    ): JsonObject = indexer.indexWorkspace(projectId, subpaths)
+    ): JsonObject = resolveServerForProject(projectId).indexer.indexWorkspace(projectId, subpaths)
+
+    private fun resolveServerForProject(projectId: String): CodeGraphMcpServer {
+        if (customDbPath != null || projectId.isEmpty()) return this
+        val localStats = store.getStats(projectId)
+        if (localStats.files > 0) return this
+
+        val candidateWs = CacheProfileResolver.resolveProjectWorkspace(workspaceRoot, projectId)
+        val canonCurrent = PlatformFiles.canonicalPath(workspaceRoot).replace('\\', '/').trimEnd('/')
+        val canonCandidate = PlatformFiles.canonicalPath(candidateWs).replace('\\', '/').trimEnd('/')
+        if (canonCandidate == canonCurrent) return this
+
+        return projectServers.getOrPut(canonCandidate) {
+            CodeGraphMcpServer(
+                workspaceRoot = canonCandidate,
+                customDbPath = null,
+                cacheProfile = cacheProfile
+            )
+        }
+    }
+
+    fun close() {
+        projectServers.values.forEach { it.store.close() }
+        projectServers.clear()
+        store.close()
+    }
 
     fun callTool(name: String, arguments: JsonObject): JsonObject {
+        val project = arguments["project"]?.jsonPrimitive?.content ?: "organisation"
+        val activeServer = resolveServerForProject(project)
+        if (activeServer !== this) {
+            return activeServer.callToolDirect(name, arguments)
+        }
+        return callToolDirect(name, arguments)
+    }
+
+    private fun callToolDirect(name: String, arguments: JsonObject): JsonObject {
         val project = arguments["project"]?.jsonPrimitive?.content ?: "organisation"
         val payload = when (name) {
             "codegraph_query", "atlas_query" -> handleQuery(arguments)
@@ -339,11 +375,11 @@ class CodeGraphMcpServer(
                 }
             }
             "verify_architecture" -> {
-                val report = auditor.runFullAudit(project)
+                val report = auditor.runFullAudit(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
                 json.encodeToJsonElement(report).jsonObject
             }
             "dead_code" -> {
-                val deadNodes = auditor.detectDeadCode(project)
+                val deadNodes = auditor.detectDeadCode(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
                 buildJsonObject {
                     put("project", project)
                     put("dead_code_count", deadNodes.size)

@@ -12,10 +12,11 @@ import atlas.model.SingleDeclarationViolation
  */
 class ArchitectureAuditor(private val store: SqliteGraphStore) {
 
-    fun runFullAudit(projectId: String): AuditReport {
-        val singleDeclViolations = checkSingleDeclarationPrinciple(projectId)
-        val layerInversions = checkLayerInversions(projectId)
-        val planCollisions = checkPlan3dCollisions(projectId)
+    fun runFullAudit(projectId: String, pathPrefixes: List<String>? = null): AuditReport {
+        val normalizedPrefixes = normalizePathPrefixes(pathPrefixes)
+        val singleDeclViolations = checkSingleDeclarationPrinciple(projectId, normalizedPrefixes)
+        val layerInversions = checkLayerInversions(projectId, normalizedPrefixes)
+        val planCollisions = checkPlan3dCollisions(projectId, normalizedPrefixes)
 
         val passed = singleDeclViolations.isEmpty() && layerInversions.isEmpty() && planCollisions.isEmpty()
         return AuditReport(
@@ -27,10 +28,29 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         )
     }
 
-    fun checkSingleDeclarationPrinciple(projectId: String): List<SingleDeclarationViolation> {
+    private fun normalizePathPrefixes(pathPrefixes: List<String>?): List<String> {
+        if (pathPrefixes == null) return emptyList()
+        return pathPrefixes.mapNotNull { raw ->
+            val cleaned = raw.replace('\\', '/').trim().removePrefix("./").trimEnd('/')
+            if (cleaned.isNotEmpty()) cleaned else null
+        }
+    }
+
+    private fun matchesAnyPrefix(relPath: String, prefixes: List<String>): Boolean {
+        if (prefixes.isEmpty()) return true
+        val norm = relPath.replace('\\', '/').removePrefix("./")
+        return prefixes.any { p -> norm == p || norm.startsWith("$p/") || norm.startsWith(p) }
+    }
+
+    fun checkSingleDeclarationPrinciple(
+        projectId: String,
+        pathPrefixes: List<String> = emptyList()
+    ): List<SingleDeclarationViolation> {
+        val prefixes = normalizePathPrefixes(pathPrefixes)
         val violations = mutableListOf<SingleDeclarationViolation>()
         for (fileRec in store.listFiles(projectId)) {
             val relPath = fileRec.relPath
+            if (!matchesAnyPrefix(relPath, prefixes)) continue
             val semiotic = fileRec.semioticLayer
             val declCount = fileRec.topLevelDeclCount
             if (semiotic == "test" || relPath.endsWith("__init__.py")) {
@@ -50,7 +70,11 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         return violations
     }
 
-    fun checkLayerInversions(projectId: String): List<LayerInversionViolation> {
+    fun checkLayerInversions(
+        projectId: String,
+        pathPrefixes: List<String> = emptyList()
+    ): List<LayerInversionViolation> {
+        val prefixes = normalizePathPrefixes(pathPrefixes)
         val nodesById = store.listNodes(projectId).associateBy { it.nodeId }
         val inversions = mutableListOf<LayerInversionViolation>()
         val edges = store.listEdges(
@@ -62,6 +86,8 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
             val tgt = nodesById[edge.targetNodeId]
             if (src == null || tgt == null) continue
             if (src.semioticLayer == "test" || tgt.semioticLayer == "test") continue
+            val srcRelPath = src.fileId.substringAfter(':')
+            if (!matchesAnyPrefix(srcRelPath, prefixes)) continue
 
             if (src.archLayer == "domain" && tgt.archLayer in setOf("presentation", "data", "infrastructure")) {
                 val layerDesc = if (tgt.archLayer == "presentation") "Presentation/Pragmatic" else "Data/Infrastructure"
@@ -91,7 +117,11 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         return inversions
     }
 
-    fun checkPlan3dCollisions(projectId: String): List<PlanCollision> {
+    fun checkPlan3dCollisions(
+        projectId: String,
+        pathPrefixes: List<String> = emptyList()
+    ): List<PlanCollision> {
+        val prefixes = normalizePathPrefixes(pathPrefixes)
         val planEdges = store.listEdges(projectId, edgeTypes = listOf("PLAN_SCOPES_FILE"))
         val nodesById = store.listNodes(projectId).associateBy { it.nodeId }
 
@@ -107,6 +137,7 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
             }
             val planId = planNode.name
             val relFile = targetNode.fileId.substringAfter(':')
+            if (!matchesAnyPrefix(relFile, prefixes)) continue
             planToFiles.getOrPut(planId) { mutableSetOf() }.add(relFile)
             if (targetNode.moduleId.isNotEmpty()) {
                 planToModules.getOrPut(planId) { mutableSetOf() }.add(targetNode.moduleId)
@@ -146,7 +177,8 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
      * Detects potentially dead production symbols (`inDegree == 0`) excluding tests, test doubles,
      * module/doc/plan/variable/typealias/namespace nodes, and standard entrypoints (`main`, `init`, etc.).
      */
-    fun detectDeadCode(projectId: String): List<GraphNode> {
+    fun detectDeadCode(projectId: String, pathPrefixes: List<String>? = null): List<GraphNode> {
+        val prefixes = normalizePathPrefixes(pathPrefixes)
         val entrypointNames = setOf("main", "init", "run", "invoke", "Companion", "onCreate", "onStart")
         val excludedKinds = setOf(
             "module", "markdown_doc", "markdown_note", "plan_contract", "expect_decl", "actual_decl",
@@ -154,7 +186,9 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         )
         return store.listNodes(projectId)
             .filter { node ->
-                node.inDegree == 0 &&
+                val relFile = node.fileId.substringAfter(':')
+                matchesAnyPrefix(relFile, prefixes) &&
+                    node.inDegree == 0 &&
                     node.semioticLayer != "test" &&
                     node.archLayer != "test" &&
                     !node.isTestDouble &&
@@ -171,3 +205,4 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
             .sortedWith(compareBy({ it.fileId }, { it.startLine }))
     }
 }
+

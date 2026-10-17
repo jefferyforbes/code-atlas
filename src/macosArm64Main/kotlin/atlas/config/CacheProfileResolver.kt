@@ -67,4 +67,25 @@ object CacheProfileResolver {
         PlatformFiles.mkdirs(fallbackArtifacts)
         return Pair(inRepoDb, fallbackArtifacts)
     }
+
+    /**
+     * Resolves an existing enterprise cache directory or Development workspace root for a given projectId
+     * when the MCP server is started from an unindexed working directory (e.g., `/`).
+     */
+    fun resolveProjectWorkspace(defaultWorkspace: String, projectId: String): String {
+        if (projectId.isEmpty()) return defaultWorkspace
+        val home = PlatformFiles.userHome()
+        val devRoot = "$home/Development"
+        if (!PlatformFiles.isDirectory(devRoot)) return defaultWorkspace
+
+        val entries = PlatformFiles.listDirectory(devRoot)
+        val normalizedTarget = projectId.lowercase().replace("_", "-").trim()
+        val matchedEntry = entries.firstOrNull { entry ->
+            entry.lowercase().replace("_", "-") == normalizedTarget
+        } ?: return defaultWorkspace
+
+        val candidateDir = "$devRoot/$matchedEntry"
+        return if (PlatformFiles.isDirectory(candidateDir)) candidateDir else defaultWorkspace
+    }
 }
+
