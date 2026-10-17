@@ -106,4 +106,12 @@ class NativeSqliteStatement(
             sqlite3_finalize(s)
         }
     }
+
+    inline fun <R> use(block: (NativeSqliteStatement) -> R): R {
+        try {
+            return block(this)
+        } finally {
+            close()
+        }
+    }
 }

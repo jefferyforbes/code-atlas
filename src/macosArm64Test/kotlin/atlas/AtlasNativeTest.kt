@@ -58,6 +58,16 @@ class AtlasNativeTest {
         val (uiSemiotic, uiArch, _) = SemioticLayerClassifier.classify("feature/cart/ui/CartScreen.kt")
         assertEquals("pragmatic", uiSemiotic)
         assertEquals("presentation", uiArch)
+
+        // Non-test production files containing "test" suffix must not be misclassified as test
+        val (contestSem, contestArch, _) = SemioticLayerClassifier.classify("shared/domain/model/Contest.kt")
+        assertEquals("syntactic", contestSem)
+        assertEquals("domain", contestArch)
+
+        // Actual test files ending in Test.kt or in test/ directory must be classified as test
+        val (testSem, testArch, _) = SemioticLayerClassifier.classify("shared/domain/model/ContestTest.kt")
+        assertEquals("test", testSem)
+        assertEquals("test", testArch)
     }
 
     @Test
