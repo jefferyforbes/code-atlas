@@ -987,4 +987,86 @@ $tq
         assertTrue(undocNode.isTopLevel)
         assertEquals(null, undocNode.description)
     }
+
+    @Test
+    fun testDocDescriptionWithMultilineAnnotation() {
+        val src = """
+            package demo
+
+            /**
+             * Handles refunds and chargebacks securely.
+             */
+            @Deprecated(
+                message = "Migrate to RefundService",
+                replaceWith = ReplaceWith("RefundService")
+            )
+            class OldRefundService
+        """.trimIndent()
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/Refund.kt", src)
+        val node = nodes.firstOrNull { it.name == "OldRefundService" }
+        assertNotNull(node)
+        assertTrue(node.isTopLevel)
+        assertEquals("Handles refunds and chargebacks securely.", node.description)
+    }
+
+    @Test
+    fun testRustInnerModuleCommentNotAttachedToStruct() {
+        val src = """
+            //! This crate provides serialization tools.
+            //! Copyright (C) 2026.
+
+            pub struct Serializer {
+                buffer: Vec<u8>,
+            }
+        """.trimIndent()
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/serializer.rs", src)
+        val node = nodes.firstOrNull { it.name == "Serializer" }
+        assertNotNull(node)
+        assertTrue(node.isTopLevel)
+        assertEquals(null, node.description)
+    }
+
+    @Test
+    fun testPythonInlineDocstring() {
+        val src = """
+            def compute_hash(payload: bytes) -> str: ${"\"\"\""}Computes SHA-256 digest.${"\"\"\""}
+                pass
+        """.trimIndent()
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/hasher.py", src)
+        val node = nodes.firstOrNull { it.name == "compute_hash" }
+        assertNotNull(node)
+        assertTrue(node.isTopLevel)
+        assertEquals("Computes SHA-256 digest.", node.description)
+    }
+
+    @Test
+    fun testNonDocCommentsIgnored() {
+        val src = """
+            package demo
+
+            // Copyright 2026 Acme Corp. All rights reserved.
+            // Licensed under Apache 2.0.
+            class LicenseTestService
+
+            // ============================================
+            // Section Divider
+            // ============================================
+            class SectionTestService
+
+            // MARK: - Navigation Handlers
+            class MarkTestService
+        """.trimIndent()
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/Demo.kt", src)
+        val licenseNode = nodes.firstOrNull { it.name == "LicenseTestService" }
+        assertNotNull(licenseNode)
+        assertEquals(null, licenseNode.description)
+
+        val sectionNode = nodes.firstOrNull { it.name == "SectionTestService" }
+        assertNotNull(sectionNode)
+        assertEquals(null, sectionNode.description)
+
+        val markNode = nodes.firstOrNull { it.name == "MarkTestService" }
+        assertNotNull(markNode)
+        assertEquals(null, markNode.description)
+    }
 }

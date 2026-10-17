@@ -1016,6 +1016,19 @@ class PolyglotAstExtractor {
             return results
         }
 
+        private val NON_DOC_LINE_PREFIXES = listOf(
+            "// copyright", "// (c)", "// license", "// spdx-", "// all rights reserved",
+            "// mark:", "// todo", "// fixme", "// note:", "// hack:", "// xxx",
+            "// nolint", "// clang-format", "// eslint-", "// @ts-", "// ts-ignore",
+            "// --", "// ==", "// **", "// ##"
+        )
+
+        private val PYTHON_NON_DOC_PREFIXES = listOf(
+            "# copyright", "# (c)", "# license", "# spdx-", "# all rights reserved",
+            "# todo", "# fixme", "# note:", "# type:", "# noqa", "# pylint:", "# flake8:",
+            "# mypy:", "# pyright:", "# --", "# ==", "# **", "# ##"
+        )
+
         /**
          * Extracts doc comment description (KDoc, Javadoc, JSDoc, Swift/Rust ///, C++ Doxygen)
          * preceding a declaration at [matchStartLine] (1-based line of the declaration or leading annotation).
@@ -1039,22 +1052,61 @@ class PolyglotAstExtractor {
                     cur--
                     continue
                 }
-                // Skip annotations or attributes preceding the declaration
+                // Skip single-line annotations or attributes preceding the declaration
                 if (isAnnotationOrAttributeLine(trimmed, language)) {
                     blankCount = 0
                     cur--
                     continue
                 }
+                // Skip multi-line annotations / attributes / templates ending on this line:
+                if (trimmed.endsWith(")") || trimmed.endsWith("]") || (language == "cpp" && trimmed.endsWith(">"))) {
+                    var pDepth = 0
+                    var bDepth = 0
+                    var aDepth = 0
+                    var scanIdx = cur
+                    var matchedAnnoStart = false
+                    while (scanIdx >= 0) {
+                        val sLine = lines[scanIdx].trim()
+                        for (c in sLine) {
+                            when (c) {
+                                '(' -> pDepth--
+                                ')' -> pDepth++
+                                '[' -> bDepth--
+                                ']' -> bDepth++
+                                '<' -> if (language == "cpp") aDepth--
+                                '>' -> if (language == "cpp") aDepth++
+                            }
+                        }
+                        if (pDepth <= 0 && bDepth <= 0 && aDepth <= 0) {
+                            if (isAnnotationOrAttributeLine(sLine, language)) {
+                                matchedAnnoStart = true
+                                cur = scanIdx - 1
+                                blankCount = 0
+                                break
+                            }
+                        }
+                        scanIdx--
+                    }
+                    if (matchedAnnoStart) continue
+                }
                 // Block doc comment closing */
                 if (trimmed.endsWith("*/")) {
                     return parseBlockDocComment(lines, cur)
+                }
+                // Rust inner doc comments document the module/crate, not the item
+                if (language == "rust" && (trimmed.startsWith("//!") || trimmed.startsWith("/*!"))) {
+                    break
                 }
                 // Triple-slash doc comment ///
                 if (trimmed.startsWith("///")) {
                     return parseTripleSlashDocComment(lines, cur)
                 }
                 // Double-slash doc comment //
-                if (trimmed.startsWith("//") && !trimmed.startsWith("// TODO") && !trimmed.startsWith("// FIXME")) {
+                if (trimmed.startsWith("//")) {
+                    val low = trimmed.lowercase()
+                    if (NON_DOC_LINE_PREFIXES.any { low.startsWith(it) }) {
+                        break
+                    }
                     return parseDoubleSlashDocComment(lines, cur)
                 }
                 // Any other code line means no doc comment immediately preceding
@@ -1066,7 +1118,9 @@ class PolyglotAstExtractor {
         private fun isAnnotationOrAttributeLine(trimmed: String, language: String): Boolean {
             return when (language) {
                 "rust" -> trimmed.startsWith("#[") || trimmed.startsWith("#![")
-                "cpp" -> trimmed.startsWith("[[") || trimmed.startsWith("template")
+                "cpp" -> trimmed.startsWith("[[") || trimmed.startsWith("template") ||
+                         trimmed.startsWith("__attribute__") ||
+                         trimmed.matches(Regex("""^[A-Z][A-Z0-9_]+(?:\(.*\))?$"""))
                 else -> trimmed.startsWith("@")
             }
         }
@@ -1130,16 +1184,17 @@ class PolyglotAstExtractor {
 
         private fun parseDoubleSlashDocComment(lines: List<String>, endIdx: Int): String? {
             var startIdx = endIdx
-            while (startIdx > 0 && lines[startIdx - 1].trim().startsWith("//")
-                && !lines[startIdx - 1].trim().startsWith("// TODO")
-                && !lines[startIdx - 1].trim().startsWith("// FIXME")
-            ) {
+            while (startIdx > 0 && lines[startIdx - 1].trim().startsWith("//")) {
+                val prevLow = lines[startIdx - 1].trim().lowercase()
+                if (NON_DOC_LINE_PREFIXES.any { prevLow.startsWith(it) }) break
                 startIdx--
             }
             val contentLines = mutableListOf<String>()
             for (i in startIdx..endIdx) {
-                val line = lines[i].trim().removePrefix("//").trim()
-                if (line.startsWith("@") || line.startsWith("TODO") || line.startsWith("FIXME")) {
+                val rawTrim = lines[i].trim()
+                val line = rawTrim.removePrefix("//").trim()
+                val lLow = rawTrim.lowercase()
+                if (NON_DOC_LINE_PREFIXES.any { lLow.startsWith(it) }) {
                     break
                 }
                 if (line.isNotEmpty()) {
@@ -1159,6 +1214,42 @@ class PolyglotAstExtractor {
             hdrEndLine: Int,
             bodyEndLine: Int
         ): String? {
+            // Check if inline docstring on the header line itself
+            val declLineIdx = declStartLine - 1
+            if (declLineIdx >= 0 && declLineIdx < lines.size) {
+                val declLine = lines[declLineIdx]
+                var pDepth = 0
+                var bDepth = 0
+                var headerColonIdx = -1
+                for (i in declLine.indices) {
+                    when (declLine[i]) {
+                        '(' -> pDepth++
+                        ')' -> if (pDepth > 0) pDepth--
+                        '[' -> bDepth++
+                        ']' -> if (bDepth > 0) bDepth--
+                        ':' -> if (pDepth == 0 && bDepth == 0) {
+                            headerColonIdx = i
+                            break
+                        }
+                    }
+                }
+                if (headerColonIdx >= 0 && headerColonIdx + 1 < declLine.length) {
+                    val afterColon = declLine.substring(headerColonIdx + 1).trim()
+                    val quote = when {
+                        afterColon.startsWith("\"\"\"") || afterColon.startsWith("r\"\"\"") || afterColon.startsWith("f\"\"\"") -> "\"\"\""
+                        afterColon.startsWith("'''") || afterColon.startsWith("r'''") || afterColon.startsWith("f'''") -> "'''"
+                        else -> null
+                    }
+                    if (quote != null) {
+                        val afterFirst = afterColon.substring(afterColon.indexOf(quote) + quote.length)
+                        if (afterFirst.contains(quote)) {
+                            val content = afterFirst.substringBefore(quote).trim()
+                            if (content.isNotEmpty()) return content
+                        }
+                    }
+                }
+            }
+
             val searchStart = hdrEndLine
             val searchEnd = minOf(lines.size, bodyEndLine)
             var docLineIdx = -1
@@ -1213,16 +1304,18 @@ class PolyglotAstExtractor {
                 if (cur >= 0 && lines[cur].trim().startsWith("#")) {
                     var cEnd = cur
                     var cStart = cur
-                    while (cStart > 0 && lines[cStart - 1].trim().startsWith("#")
-                        && !lines[cStart - 1].trim().startsWith("# type:")
-                        && !lines[cStart - 1].trim().startsWith("# noqa")
-                    ) {
+                    while (cStart > 0 && lines[cStart - 1].trim().startsWith("#")) {
+                        val prevLow = lines[cStart - 1].trim().lowercase()
+                        if (PYTHON_NON_DOC_PREFIXES.any { prevLow.startsWith(it) }) break
                         cStart--
                     }
                     val commentLines = mutableListOf<String>()
                     for (i in cStart..cEnd) {
-                        val c = lines[i].trim().removePrefix("#").trim()
-                        if (c.isNotEmpty() && !c.startsWith("type:") && !c.startsWith("noqa") && !c.startsWith("TODO")) {
+                        val cTrim = lines[i].trim()
+                        val cLow = cTrim.lowercase()
+                        if (PYTHON_NON_DOC_PREFIXES.any { cLow.startsWith(it) }) break
+                        val c = cTrim.removePrefix("#").trim()
+                        if (c.isNotEmpty()) {
                             commentLines.add(c)
                         }
                     }
