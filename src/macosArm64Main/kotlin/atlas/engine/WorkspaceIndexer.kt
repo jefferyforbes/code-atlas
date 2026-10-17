@@ -86,6 +86,9 @@ class WorkspaceIndexer(
         val (modNodes, modEdges, knownModules) = ModuleBoundaryDetector.extractModuleGraph(root, projectId)
         val cachedFiles = store.getFileRecordsMap(projectId)
         val filesWithRawEdges = store.filesWithRawSymbolEdges(projectId)
+        val storedVersion = store.getProjectMetadata(projectId, "extractor_version")
+        val versionMismatch = storedVersion != PolyglotAstExtractor.EXTRACTOR_VERSION
+        val effectiveForce = forceComposeReindex || versionMismatch
 
         val changedNodes = mutableListOf<GraphNode>()
         val markdownQueue = mutableListOf<Pair<String, String>>()
@@ -124,7 +127,7 @@ class WorkspaceIndexer(
             val mtimeUnchanged = cached != null && abs(cached.second - mtime) < 1e-6
             val rawBytes: ByteArray by lazy { PlatformFiles.readBytes(filePath) }
             val sha256 = if (mtimeUnchanged) cached!!.first else Sha256.digest(rawBytes)
-            val isUnchanged = !forceComposeReindex && (mtimeUnchanged || (cached != null && cached.first == sha256))
+            val isUnchanged = !effectiveForce && (mtimeUnchanged || (cached != null && cached.first == sha256))
 
             if (ext == ".md") {
                 if (!isUnchanged) {
@@ -206,7 +209,7 @@ class WorkspaceIndexer(
         }
 
         // BUG-12: Short-circuit no-op runs when zero files were indexed or deleted and project already has nodes
-        if (filesIndexed == 0 && filesDeleted == 0 && cachedFiles.isNotEmpty()) {
+        if (!effectiveForce && filesIndexed == 0 && filesDeleted == 0 && cachedFiles.isNotEmpty()) {
             val stats = store.getStats(projectId)
             val composeNodes = store.listComposeNodes(projectId)
             return buildJsonObject {
@@ -405,6 +408,7 @@ class WorkspaceIndexer(
             nodes = modNodes + changedNodes.distinctBy { it.nodeId } + docNodes,
             edges = modEdges + resolvedEdges + kmpEdges + docEdges
         )
+        store.setProjectMetadata(projectId, "extractor_version", PolyglotAstExtractor.EXTRACTOR_VERSION)
 
         val stats = store.getStats(projectId)
         val composeNodes = store.listComposeNodes(projectId)

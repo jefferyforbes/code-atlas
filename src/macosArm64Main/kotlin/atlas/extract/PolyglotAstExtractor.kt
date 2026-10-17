@@ -63,6 +63,20 @@ class PolyglotAstExtractor {
             "require", "check", "match", "throw", "yield", "guard", "case", "typeof"
         )
 
+        const val EXTRACTOR_VERSION: String = "1.2.0"
+
+        private val INFIX_CALL_RE = Regex(
+            """(?<=\s|[)\]a-zA-Z0-9_])\s+(?<callee>[a-zA-Z_][a-zA-Z0-9_]{1,})\s+(?=[A-Za-z0-9_"'(\[])"""
+        )
+        private val INFIX_STOPWORDS = setOf(
+            "val", "var", "fun", "class", "interface", "object", "package", "import",
+            "return", "throw", "if", "else", "when", "for", "while", "do", "try", "catch", "finally",
+            "in", "is", "as", "by", "where", "get", "set", "constructor", "init", "out", "super",
+            "this", "typealias", "companion", "enum", "sealed", "open", "abstract", "data", "value",
+            "inline", "noinline", "crossinline", "suspend", "expect", "actual", "const", "lateinit",
+            "override", "private", "protected", "public", "internal", "operator", "infix", "tailrec", "external"
+        )
+
         fun supportedLanguage(ext: String): String = EXT_MAP[ext.lowercase()] ?: ""
 
         /**
@@ -1018,6 +1032,9 @@ class PolyglotAstExtractor {
                 Pair(match.groupValues[1], maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
             }.toList()
 
+            data class ScopeEntry(val name: String, val startLine: Int, val endLine: Int)
+            val scopeStack = mutableListOf<ScopeEntry>()
+
             var topLevelCount = 0
             for (match in KT_DECL_RE.findAll(maskedText)) {
                 val annotations = match.groups["annotations"]?.value ?: ""
@@ -1041,11 +1058,22 @@ class PolyglotAstExtractor {
                     kwGroup.range.first
                 }
                 val startLine = maskedText.substring(0, declStartOffset).count { it == '\n' } + 1
-                val declLineRaw = if (startLine <= lines.size) lines[startLine - 1] else ""
-                val isTopLevel = declLineRaw.takeWhile { it == ' ' || it == '\t' }.isEmpty()
+                val endLine = findBlockEndLine(lines, startLine)
+
+                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
+                    scopeStack.removeAt(scopeStack.size - 1)
+                }
+
+                val isTopLevel = scopeStack.isEmpty()
                 if (isTopLevel && "private" !in modTokens && "companion" !in modTokens && kw != "typealias") topLevelCount++
 
-                val endLine = findBlockEndLine(lines, startLine)
+                val enclosingPrefix = scopeStack.joinToString(".") { it.name }
+                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
+                    Pair("$fileId#$enclosingPrefix.$name", "$pkgName.$enclosingPrefix.$name")
+                } else {
+                    Pair("$fileId#$name", "$pkgName.$name")
+                }
+
                 val sigLine = if (startLine <= lines.size) stripLeadingInlineAnnotations(lines[startLine - 1]) else name
 
                 val annTokens = Regex("""@([A-Za-z0-9_]+)""").findAll(annotations).map { it.groupValues[1] }.toList()
@@ -1060,12 +1088,11 @@ class PolyglotAstExtractor {
                 }
 
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name, annTokens)
-                val nodeId = "$fileId#$name"
 
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = "$pkgName.$name", kind = kind, signature = sigLine,
+                        qualifiedName = qualifiedName, kind = kind, signature = sigLine,
                         startLine = startLine, endLine = endLine, moduleId = moduleId,
                         sourceSet = sourceSet, semioticLayer = sem, archLayer = arch, isTestDouble = isTd
                     )
@@ -1090,6 +1117,10 @@ class PolyglotAstExtractor {
                         ))
                     }
                 }
+
+                if (kw in setOf("class", "interface", "object", "enum")) {
+                    scopeStack.add(ScopeEntry(name, startLine, endLine))
+                }
             }
 
             for (node in nodes) {
@@ -1108,6 +1139,18 @@ class PolyglotAstExtractor {
                             edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
                             sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
                             provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
+                        ))
+                    }
+                }
+
+                for (infixMatch in INFIX_CALL_RE.findAll(body)) {
+                    val callee = infixMatch.groups["callee"]?.value ?: continue
+                    if (callee != node.name && callee !in INFIX_STOPWORDS && callee !in CALL_STOPWORDS && seenCallees.add(callee)) {
+                        val callLine = node.startLine + body.substring(0, infixMatch.range.first).count { it == '\n' }
+                        edges.add(GraphEdge(
+                            edgeId = "${node.nodeId}:infix:$callee:$callLine", projectId = projectId,
+                            sourceNodeId = node.nodeId, targetNodeId = "sym:$callee", edgeType = "CALLS",
+                            provenance = "INFERRED_INFIX_CALL", confidence = 0.85, lineNumber = callLine
                         ))
                     }
                 }
@@ -1642,9 +1685,9 @@ class PolyglotAstExtractor {
                             // Priority 0: Candidate matching receiver in qualifiedName, file name, or signature
                             val receiverMatches = if (receiver != null) {
                                 candidates.filter { cand ->
-                                    cand.qualifiedName.contains(receiver) ||
+                                    cand.qualifiedName.contains(receiver, ignoreCase = true) ||
                                         cand.fileId.substringAfterLast('/').substringBeforeLast('.').equals(receiver, ignoreCase = true) ||
-                                        cand.signature.contains(receiver)
+                                        cand.signature.contains(receiver, ignoreCase = true)
                                 }
                             } else emptyList()
 

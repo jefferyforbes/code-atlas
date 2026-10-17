@@ -722,4 +722,58 @@ $tq
         assertTrue(resolvedCalls.any { it.targetNodeId == orderMethod.nodeId }, "Receiver 'orderService' must prefer OrderService.processOrder")
         assertFalse(resolvedCalls.any { it.targetNodeId == cartMethod.nodeId }, "Receiver 'orderService' must NOT match CartService.processOrder")
     }
+
+    @Test
+    fun testHierarchicalFqnDisambiguationAndDistinctNodeIdsInSameFile() {
+        val src = """
+            package com.example.repo
+
+            class UserRepository {
+                fun get(id: String): String = "user"
+            }
+
+            class OrderRepository {
+                fun get(id: String): String = "order"
+            }
+        """.trimIndent()
+
+        val (nodes, _, topCount) = PolyglotAstExtractor.extractFile("proj", "src/Repositories.kt", src)
+        assertEquals(2, topCount)
+
+        val userGet = nodes.firstOrNull { it.qualifiedName == "com.example.repo.UserRepository.get" }
+        val orderGet = nodes.firstOrNull { it.qualifiedName == "com.example.repo.OrderRepository.get" }
+
+        assertNotNull(userGet, "UserRepository.get must have hierarchical qualifiedName")
+        assertNotNull(orderGet, "OrderRepository.get must have hierarchical qualifiedName")
+        assertEquals("proj:src/Repositories.kt#UserRepository.get", userGet.nodeId)
+        assertEquals("proj:src/Repositories.kt#OrderRepository.get", orderGet.nodeId)
+        assertFalse(userGet.nodeId == orderGet.nodeId, "Node IDs in same file with same method name must be distinct")
+    }
+
+    @Test
+    fun testInfixFunctionCallRecognition() {
+        val src = """
+            package com.example.crypto
+
+            class CryptoHelper {
+                infix fun rotate(bits: Int): Int = bits
+
+                fun runHash(w: IntArray, idx: Int): Int {
+                    val a = (w[idx] rotate 7)
+                    val b = (a rotate 18)
+                    return a + b
+                }
+            }
+        """.trimIndent()
+
+        val (nodes, edges, _) = PolyglotAstExtractor.extractFile("proj", "src/CryptoHelper.kt", src)
+        val runHashNode = nodes.firstOrNull { it.name == "runHash" }
+        assertNotNull(runHashNode)
+
+        val infixCalls = edges.filter { it.sourceNodeId == runHashNode.nodeId && it.edgeType == "CALLS" }
+        assertTrue(
+            infixCalls.any { it.targetNodeId == "sym:rotate" && it.provenance == "INFERRED_INFIX_CALL" },
+            "Infix call 'rotate' must be recognized as an inferred infix call edge"
+        )
+    }
 }
