@@ -14,3 +14,5 @@ build/
 .atlas/
 artifacts/
 dist/
+.kotlin/
+local.properties
