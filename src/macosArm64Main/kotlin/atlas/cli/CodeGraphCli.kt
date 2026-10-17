@@ -192,9 +192,13 @@ class CodeGraphCli {
                         return 0
                     }
                     "audit" -> {
+                        val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
                         val toolArgs = buildJsonObject {
                             put("action", "verify_architecture")
                             put("project", project)
+                            if (filterPaths.isNotEmpty()) {
+                                putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                            }
                         }
                         val res = server.callTool("codegraph_audit", toolArgs)
                         val data = loadSpilledData(res)
@@ -211,9 +215,13 @@ class CodeGraphCli {
                         return if (passed) 0 else 1
                     }
                     "dead-code" -> {
+                        val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
                         val toolArgs = buildJsonObject {
                             put("action", "dead_code")
                             put("project", project)
+                            if (filterPaths.isNotEmpty()) {
+                                putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                            }
                         }
                         val res = server.callTool("codegraph_audit", toolArgs)
                         val data = loadSpilledData(res)
@@ -264,7 +272,7 @@ class CodeGraphCli {
                     }
                 }
             } finally {
-                server.store.close()
+                server.close()
             }
         }
 

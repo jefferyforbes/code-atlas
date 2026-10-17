@@ -608,6 +608,31 @@ class EngineAndMcpTest {
             val exitJson = CodeGraphCli.run(arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath, "--json"))
             assertEquals(1, exitJson, "atlas audit must return exit code 1 when passed=false in --json mode")
 
+            // Scoped audit on a clean subpath must pass (exit code 0) while scoped audit on src/ViolatingFile.kt fails (exit code 1)
+            PlatformFiles.writeText(
+                "$wsRoot/src/CleanFile.kt",
+                """
+                package sample
+                class CleanSingleDeclaration
+                """.trimIndent()
+            )
+            server.indexWorkspace("audit_proj")
+            val exitScopedPass = CodeGraphCli.run(
+                arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath, "--paths", "src/CleanFile.kt")
+            )
+            assertEquals(0, exitScopedPass, "Scoped atlas audit on clean file must return exit code 0")
+
+            val exitScopedFail = CodeGraphCli.run(
+                arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath, "--paths", "src/ViolatingFile.kt")
+            )
+            assertEquals(1, exitScopedFail, "Scoped atlas audit on violating file must return exit code 1")
+
+            // Verify resolveProjectWorkspace resolves ~/Development/<Project> case-insensitively
+            val resolvedDevWs = CacheProfileResolver.resolveProjectWorkspace("/", "code-atlas")
+            if (PlatformFiles.isDirectory("${PlatformFiles.userHome()}/Development/code-atlas")) {
+                assertTrue(resolvedDevWs.endsWith("/Development/code-atlas"))
+            }
+
             // Verify figma-shortest-path and figma shortest-path CLI subcommands execute cleanly
             val figmaShort1 = CodeGraphCli.run(arrayOf("figma-shortest-path", "--db", dbPath, "--from", "n1", "--to", "n2"))
             assertEquals(0, figmaShort1)
@@ -665,9 +690,10 @@ class EngineAndMcpTest {
             PlatformFiles.delete(uri1)
             PlatformFiles.delete(uri2)
         } finally {
-            server.store.close()
+            server.close()
             PlatformFiles.delete("$wsRoot/src/escaped_link")
             PlatformFiles.delete("$wsRoot/src/ViolatingFile.kt")
+            PlatformFiles.delete("$wsRoot/src/CleanFile.kt")
             PlatformFiles.delete("$outsideDir/SecretOutside.kt")
             PlatformFiles.delete(dbPath)
         }
