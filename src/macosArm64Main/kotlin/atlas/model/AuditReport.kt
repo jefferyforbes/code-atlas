@@ -12,5 +12,6 @@ data class AuditReport(
     val singleDeclarationViolations: List<SingleDeclarationViolation>,
     val layerInversions: List<LayerInversionViolation>,
     val plan3dCollisions: List<PlanCollision>,
-    val descriptionSuggestions: List<DescriptionSuggestion> = emptyList()
+    val descriptionSuggestions: List<DescriptionSuggestion> = emptyList(),
+    val complexityViolations: List<ComplexityViolation> = emptyList()
 )
