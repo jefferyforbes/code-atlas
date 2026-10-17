@@ -3,6 +3,7 @@ package atlas.mcp
 import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
+import atlas.engine.ComposeStabilityEngine
 import atlas.engine.FigmaDesignAuditor
 import atlas.engine.ScopeSynthesizer
 import atlas.engine.WorkMemoryStore
@@ -16,7 +17,7 @@ import platform.posix.stdout
 import platform.posix.time
 
 /**
- * Standards-compliant 2-tool MCP Server and incremental workspace indexer with 32KB disk spillover.
+ * Standards-compliant 4-tool MCP Server and incremental workspace indexer with 32KB disk spillover.
  */
 @OptIn(ExperimentalForeignApi::class)
 class CodeGraphMcpServer(
@@ -36,6 +37,7 @@ class CodeGraphMcpServer(
     val auditor: ArchitectureAuditor
     val memory: WorkMemoryStore
     val figmaAuditor: FigmaDesignAuditor
+    val composeEngine: ComposeStabilityEngine
     val indexer: WorkspaceIndexer
 
     private val json = Json {
@@ -57,6 +59,7 @@ class CodeGraphMcpServer(
         auditor = ArchitectureAuditor(store)
         memory = WorkMemoryStore(store)
         figmaAuditor = FigmaDesignAuditor(store)
+        composeEngine = ComposeStabilityEngine(store)
         indexer = WorkspaceIndexer(workspaceRoot, store)
     }
 
@@ -75,8 +78,11 @@ class CodeGraphMcpServer(
                         add("god_nodes")
                         add("shortest_path")
                         add("status")
+                        add("compose_summary")
+                        add("compose_cascade")
+                        add("compose_blame")
                     }
-                    put("description", "Query operation to execute against the indexed polyglot code and vault graph.")
+                    put("description", "Query operation to execute against the indexed polyglot code, Compose stability, and vault graph.")
                 }
                 putJsonObject("project") {
                     put("type", "string")
@@ -92,11 +98,15 @@ class CodeGraphMcpServer(
                 }
                 putJsonObject("depth") {
                     put("type", "integer")
-                    put("description", "Maximum traversal hops for callers, callees, or blast-radius impact (default: 2).")
+                    put("description", "Maximum traversal hops for callers, callees, cascade, or blast-radius impact (default: 2).")
                 }
                 putJsonObject("include_source") {
                     put("type", "boolean")
                     put("description", "Include live SHA-256 verified source lines sliced from disk (default: false).")
+                }
+                putJsonObject("strong_skipping") {
+                    put("type", "boolean")
+                    put("description", "Evaluate Compose stability under Kotlin 2.0+ Strong Skipping rules (default: true).")
                 }
             }
             putJsonArray("required") {
@@ -118,8 +128,11 @@ class CodeGraphMcpServer(
                         add("dead_code")
                         add("figma_audit")
                         add("figma_scope")
+                        add("audit_compose")
+                        add("compose_doctor")
+                        add("synthesize_compose_scope")
                     }
-                    put("description", "Audit, synthesis, learning, or indexing action to execute.")
+                    put("description", "Audit, synthesis, Compose compliance, learning, or indexing action to execute.")
                 }
                 putJsonObject("project") {
                     put("type", "string")
@@ -132,7 +145,7 @@ class CodeGraphMcpServer(
                 putJsonObject("targets") {
                     put("type", "array")
                     putJsonObject("items") { put("type", "string") }
-                    put("description", "Seed symbols, file paths, plan names, or Figma nodes to scope, audit, or record outcomes against.")
+                    put("description", "Seed symbols, file paths, plan names, or Figma nodes to scope, audit, or record outcomes.")
                 }
                 putJsonObject("outcome") {
                     put("type", "string")
@@ -146,6 +159,22 @@ class CodeGraphMcpServer(
                 putJsonObject("note") {
                     put("type", "string")
                     put("description", "Short rationale or learning note explaining why this path was useful or a dead end.")
+                }
+                putJsonObject("stability_config_path") {
+                    put("type", "string")
+                    put("description", "Optional path to a Compose stability_config.conf file for wildcard type matching.")
+                }
+                putJsonObject("compiler_reports_dir") {
+                    put("type", "string")
+                    put("description", "Optional directory or file path for Compose Compiler metrics reports.")
+                }
+                putJsonObject("trace_log_path") {
+                    put("type", "string")
+                    put("description", "Optional file path for bounded @TraceRecomposition JSONL or Logcat runtime telemetry.")
+                }
+                putJsonObject("strong_skipping") {
+                    put("type", "boolean")
+                    put("description", "Evaluate Compose audit rules under Kotlin 2.0+ Strong Skipping mode (default: true).")
                 }
             }
             putJsonArray("required") {
@@ -196,12 +225,12 @@ class CodeGraphMcpServer(
         return listOf(
             buildJsonObject {
                 put("name", "codegraph_query")
-                put("description", "Query indexed polyglot AST symbols, callers, callees, blast radius, God nodes, or live source slices.")
+                put("description", "Query indexed polyglot AST symbols, callers, callees, blast radius, Compose stability, or live source slices.")
                 put("inputSchema", querySchema)
             },
             buildJsonObject {
                 put("name", "codegraph_audit")
-                put("description", "Audit architectural layers, verify single-declaration rules, record outcomes, or synthesize 3D scopes.")
+                put("description", "Audit architectural layers, Compose Gate 1 compliance, Doctor fixes, or synthesize 3D scopes.")
                 put("inputSchema", auditSchema)
             },
             buildJsonObject {
@@ -223,6 +252,20 @@ class CodeGraphMcpServer(
         projectId: String,
         subpaths: List<String>? = null
     ): JsonObject = resolveServerForProject(projectId).indexer.indexWorkspace(projectId, subpaths)
+
+    fun indexComposeArtifacts(
+        projectId: String,
+        subpaths: List<String>? = null,
+        stabilityConfigPath: String? = null,
+        compilerReportsDir: String? = null,
+        traceLogPath: String? = null
+    ): JsonObject = resolveServerForProject(projectId).indexer.indexComposeArtifacts(
+        projectId = projectId,
+        subpaths = subpaths,
+        stabilityConfigPath = stabilityConfigPath,
+        compilerReportsDir = compilerReportsDir,
+        traceLogPath = traceLogPath
+    )
 
     private fun resolveServerForProject(projectId: String): CodeGraphMcpServer {
         if (customDbPath != null || projectId.isEmpty()) return this
@@ -276,6 +319,7 @@ class CodeGraphMcpServer(
         val target = args["target"]?.jsonPrimitive?.content ?: ""
         val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 2
         val includeSource = args["include_source"]?.jsonPrimitive?.booleanOrNull ?: false
+        val strongSkipping = args["strong_skipping"]?.jsonPrimitive?.booleanOrNull ?: true
 
         when (action) {
             "status" -> {
@@ -296,6 +340,17 @@ class CodeGraphMcpServer(
                     put("query", target)
                     put("results", json.encodeToJsonElement(matches))
                 }
+            }
+            "compose_summary", "compose_cascade", "compose_blame" -> {
+                val mappedAction = action.removePrefix("compose_")
+                val res = composeEngine.queryCompose(
+                    projectSlug = project,
+                    action = mappedAction,
+                    target = target.ifEmpty { null },
+                    maxDepth = if (args.containsKey("depth")) depth else 5,
+                    strongSkipping = strongSkipping
+                )
+                return json.encodeToJsonElement(res).jsonObject
             }
         }
 
@@ -363,9 +418,26 @@ class CodeGraphMcpServer(
         val action = args["action"]?.jsonPrimitive?.content ?: "verify_architecture"
         val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
         val targets = args["targets"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+        val stabilityConfigPath = args["stability_config_path"]?.jsonPrimitive?.contentOrNull
+        val compilerReportsDir = args["compiler_reports_dir"]?.jsonPrimitive?.contentOrNull
+        val traceLogPath = args["trace_log_path"]?.jsonPrimitive?.contentOrNull
+        val strongSkipping = args["strong_skipping"]?.jsonPrimitive?.booleanOrNull ?: true
+        val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 10
 
         return when (action) {
-            "sync_index" -> indexWorkspace(project, subpaths = if (targets.isNotEmpty()) targets else null)
+            "sync_index" -> {
+                if (stabilityConfigPath != null || compilerReportsDir != null || traceLogPath != null) {
+                    indexComposeArtifacts(
+                        projectId = project,
+                        subpaths = if (targets.isNotEmpty()) targets else null,
+                        stabilityConfigPath = stabilityConfigPath,
+                        compilerReportsDir = compilerReportsDir,
+                        traceLogPath = traceLogPath
+                    )
+                } else {
+                    indexWorkspace(project, subpaths = if (targets.isNotEmpty()) targets else null)
+                }
+            }
             "synthesize_3d_scope" -> {
                 val rec = synthesizer.synthesizeScope(project, targets)
                 val baseObj = json.encodeToJsonElement(rec).jsonObject
@@ -377,6 +449,28 @@ class CodeGraphMcpServer(
             "verify_architecture" -> {
                 val report = auditor.runFullAudit(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
                 json.encodeToJsonElement(report).jsonObject
+            }
+            "audit_compose" -> {
+                if (stabilityConfigPath != null || compilerReportsDir != null || traceLogPath != null) {
+                    indexComposeArtifacts(
+                        projectId = project,
+                        subpaths = if (targets.isNotEmpty()) targets else null,
+                        stabilityConfigPath = stabilityConfigPath,
+                        compilerReportsDir = compilerReportsDir,
+                        traceLogPath = traceLogPath
+                    )
+                }
+                val report = auditor.runComposeAudit(project, strongSkipping = strongSkipping)
+                json.encodeToJsonElement(report).jsonObject
+            }
+            "compose_doctor" -> {
+                val targetSym = targets.firstOrNull() ?: args["target"]?.jsonPrimitive?.contentOrNull
+                val report = composeEngine.runDoctor(project, target = targetSym, limit = limit)
+                json.encodeToJsonElement(report).jsonObject
+            }
+            "synthesize_compose_scope" -> {
+                val scope = synthesizer.synthesizeComposeScope(project, targets)
+                json.encodeToJsonElement(scope).jsonObject
             }
             "dead_code" -> {
                 val deadNodes = auditor.detectDeadCode(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
