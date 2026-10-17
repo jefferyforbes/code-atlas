@@ -3,6 +3,7 @@ package atlas.mcp
 import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
+import atlas.engine.AutonomousRemediationVerifier
 import atlas.engine.ComposeStabilityEngine
 import atlas.engine.FigmaDesignAuditor
 import atlas.engine.ScopeSynthesizer
@@ -39,6 +40,7 @@ class CodeGraphMcpServer(
     val figmaAuditor: FigmaDesignAuditor
     val composeEngine: ComposeStabilityEngine
     val indexer: WorkspaceIndexer
+    val remediationVerifier: AutonomousRemediationVerifier
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -61,6 +63,7 @@ class CodeGraphMcpServer(
         figmaAuditor = FigmaDesignAuditor(store)
         composeEngine = ComposeStabilityEngine(store)
         indexer = WorkspaceIndexer(workspaceRoot, store)
+        remediationVerifier = AutonomousRemediationVerifier(workspaceRoot, store)
     }
 
     fun toolDefinitions(): List<JsonObject> {
@@ -131,6 +134,7 @@ class CodeGraphMcpServer(
                         add("audit_compose")
                         add("compose_doctor")
                         add("synthesize_compose_scope")
+                        add("verify_remediation")
                     }
                     put("description", "Audit, synthesis, Compose compliance, learning, or indexing action to execute.")
                 }
@@ -175,6 +179,38 @@ class CodeGraphMcpServer(
                 putJsonObject("strong_skipping") {
                     put("type", "boolean")
                     put("description", "Evaluate Compose audit rules under Kotlin 2.0+ Strong Skipping mode (default: true).")
+                }
+                putJsonObject("file_path") {
+                    put("type", "string")
+                    put("description", "Target file path for autonomous remediation verification.")
+                }
+                putJsonObject("before_snippet") {
+                    put("type", "string")
+                    put("description", "Original code snippet targeted for replacement.")
+                }
+                putJsonObject("after_snippet") {
+                    put("type", "string")
+                    put("description", "Proposed replacement code snippet.")
+                }
+                putJsonObject("rule_id") {
+                    put("type", "string")
+                    put("description", "Target rule identifier (e.g. COMPOSE-STAB-001, COMPOSE-API-001).")
+                }
+                putJsonObject("target_node_id") {
+                    put("type", "string")
+                    put("description", "Optional target composable/symbol identifier to scope rule clearance verification.")
+                }
+                putJsonObject("write_site_safe") {
+                    put("type", "boolean")
+                    put("description", "Write-site safety indicator (default: true).")
+                }
+                putJsonObject("dry_run") {
+                    put("type", "boolean")
+                    put("description", "Validate without committing changes to disk (default: true).")
+                }
+                putJsonObject("test_command") {
+                    put("type", "string")
+                    put("description", "Optional shell command to verify test suite preservation (e.g. './gradlew test').")
                 }
             }
             putJsonArray("required") {
@@ -471,6 +507,29 @@ class CodeGraphMcpServer(
             "synthesize_compose_scope" -> {
                 val scope = synthesizer.synthesizeComposeScope(project, targets)
                 json.encodeToJsonElement(scope).jsonObject
+            }
+            "verify_remediation" -> {
+                val filePath = args["file_path"]?.jsonPrimitive?.contentOrNull
+                    ?: (targets.firstOrNull() ?: (args["target"]?.jsonPrimitive?.contentOrNull ?: ""))
+                val beforeSnippet = args["before_snippet"]?.jsonPrimitive?.content ?: ""
+                val afterSnippet = args["after_snippet"]?.jsonPrimitive?.content ?: ""
+                val ruleId = args["rule_id"]?.jsonPrimitive?.content ?: "GENERIC"
+                val targetNodeId = args["target_node_id"]?.jsonPrimitive?.contentOrNull
+                val writeSiteSafe = args["write_site_safe"]?.jsonPrimitive?.booleanOrNull ?: true
+                val dryRun = args["dry_run"]?.jsonPrimitive?.booleanOrNull ?: true
+                val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
+                val res = resolveServerForProject(project).remediationVerifier.verifyAndApply(
+                    projectSlug = project,
+                    relPath = filePath,
+                    beforeSnippet = beforeSnippet,
+                    afterSnippet = afterSnippet,
+                    ruleId = ruleId,
+                    targetNodeId = targetNodeId,
+                    writeSiteSafe = writeSiteSafe,
+                    dryRun = dryRun,
+                    testCommand = testCmd
+                )
+                json.encodeToJsonElement(res).jsonObject
             }
             "dead_code" -> {
                 val deadNodes = auditor.detectDeadCode(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
