@@ -632,4 +632,173 @@ class AtlasNativeTest {
         assertEquals(39, commentNode.startLine)
         assertEquals(44, commentNode.endLine)
     }
+
+    @Test
+    fun testRawSymbolEdgesPersistenceAndGetFileRecordsMap() {
+        val dbPath = "/tmp/test_atlas_raw_edges_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val idxStmt = store.prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_vocab_node', 'idx_raw_edges_proj', 'idx_raw_edges_file');"
+            )
+            val indexNames = mutableSetOf<String>()
+            try {
+                while (idxStmt.step()) {
+                    indexNames.add(idxStmt.columnString(0))
+                }
+            } finally {
+                idxStmt.close()
+            }
+            assertTrue(indexNames.contains("idx_vocab_node"))
+            assertTrue(indexNames.contains("idx_raw_edges_proj"))
+            assertTrue(indexNames.contains("idx_raw_edges_file"))
+
+            store.upsertFileRecord(
+                projectId = "p",
+                relPath = "src/Caller.kt",
+                language = "kotlin",
+                moduleId = ":app",
+                sourceSet = "main",
+                semioticLayer = "semantic",
+                archLayer = "application",
+                sha256 = "sha_caller",
+                mtime = 1234.5,
+                loc = 20,
+                topLevelDeclCount = 1
+            )
+            val fileMap = store.getFileRecordsMap("p")
+            assertEquals(Pair("sha_caller", 1234.5), fileMap["src/Caller.kt"])
+
+            val rawCall = GraphEdge(
+                edgeId = "p:src/Caller.kt#Caller.run:call:TargetService:10",
+                projectId = "p",
+                sourceNodeId = "p:src/Caller.kt#Caller.run",
+                targetNodeId = "sym:TargetService",
+                edgeType = "CALLS",
+                provenance = "INFERRED_CALL",
+                confidence = 0.85,
+                lineNumber = 10
+            )
+            val containsEdge = GraphEdge(
+                edgeId = "p:src/Caller.kt#Caller:contains:run",
+                projectId = "p",
+                sourceNodeId = "p:src/Caller.kt#Caller",
+                targetNodeId = "p:src/Caller.kt#Caller.run",
+                edgeType = "CONTAINS"
+            )
+            store.replaceFileRawSymbolEdges("p", "src/Caller.kt", listOf(rawCall, containsEdge))
+            val storedRaw = store.listRawSymbolEdges("p")
+            assertEquals(1, storedRaw.size)
+            assertEquals("sym:TargetService", storedRaw[0].targetNodeId)
+            assertEquals("p:src/Caller.kt#Caller.run:call:TargetService:10", storedRaw[0].edgeId)
+
+            store.deleteFileRawSymbolEdges("p", "src/Caller.kt")
+            assertTrue(store.listRawSymbolEdges("p").isEmpty())
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testCyclicCallersAndCalleesTerminateDeterministically() {
+        val dbPath = "/tmp/test_atlas_cyclic_cte_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val nA = GraphNode("p:A", "p", "p:A.kt", "A", "pkg.A", "function")
+            val nB = GraphNode("p:B", "p", "p:B.kt", "B", "pkg.B", "function")
+            val nC = GraphNode("p:C", "p", "p:C.kt", "C", "pkg.C", "function")
+            val edges = listOf(
+                GraphEdge("e_ab", "p", "p:A", "p:B", "CALLS"),
+                GraphEdge("e_ba", "p", "p:B", "p:A", "CALLS"),
+                GraphEdge("e_bc", "p", "p:B", "p:C", "CALLS"),
+                GraphEdge("e_ca", "p", "p:C", "p:A", "CALLS")
+            )
+            store.upsertNodesAndEdges("p", listOf(nA, nB, nC), edges)
+
+            val callersA = store.getCallers("p", "p:A", depth = 10)
+            assertTrue(callersA.isNotEmpty())
+            assertTrue(callersA.all { it.hop <= 3 }, "Cyclic caller traversal must terminate without walking up to depth=10")
+            assertTrue(callersA.any { it.sourceId == "p:B" && it.hop == 1 })
+            assertTrue(callersA.any { it.sourceId == "p:C" && it.hop == 1 })
+
+            val calleesA = store.getCallees("p", "p:A", depth = 10)
+            assertTrue(calleesA.isNotEmpty())
+            assertTrue(calleesA.all { it.hop <= 3 }, "Cyclic callee traversal must terminate without walking up to depth=10")
+            assertTrue(calleesA.any { it.targetId == "p:B" && it.hop == 1 })
+            assertTrue(calleesA.any { it.targetId == "p:C" && it.hop == 2 })
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testSearchNodesRankedOrderAndGetNodeQualifiedNameAndFileAnchoring() {
+        val dbPath = "/tmp/test_atlas_search_getnode_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val nodes = mutableListOf<GraphNode>()
+            val edges = mutableListOf<GraphEdge>()
+            for (i in 1..25) {
+                nodes.add(
+                    GraphNode(
+                        nodeId = "p:noise_$i",
+                        projectId = "p",
+                        fileId = "p:src/FooBar.kt",
+                        name = "parseItemNoise$i",
+                        qualifiedName = "pkg.noise.parseItemNoise$i",
+                        kind = "function"
+                    )
+                )
+            }
+            val exactNode = GraphNode(
+                nodeId = "p:exact",
+                projectId = "p",
+                fileId = "p:src/Bar.kt",
+                name = "parseItem",
+                qualifiedName = "pkg.core.parseItem",
+                kind = "function"
+            )
+            val highDegreeNode = GraphNode(
+                nodeId = "p:popular",
+                projectId = "p",
+                fileId = "p:src/Popular.kt",
+                name = "parseItem popular",
+                qualifiedName = "pkg.core.parseItemPopular",
+                kind = "function"
+            )
+            nodes.add(exactNode)
+            nodes.add(highDegreeNode)
+            for (i in 1..10) {
+                edges.add(GraphEdge("e_pop_$i", "p", "p:noise_$i", "p:popular", "CALLS"))
+            }
+            store.upsertNodesAndEdges("p", nodes, edges)
+
+            val topResults = store.searchNodes("p", "parseItem", limit = 3)
+            assertTrue(topResults.isNotEmpty())
+            assertEquals("p:exact", topResults[0].nodeId)
+            assertTrue(topResults.any { it.nodeId == "p:popular" })
+
+            // Verify wildcard escaping in searchNodes does not treat % as match-all
+            val wildcardResults = store.searchNodes("p", "100%GuaranteedNonExistent", limit = 5)
+            assertTrue(wildcardResults.isEmpty())
+
+            // Verify getNode prioritizes exact qualified_name over higher in_degree file matches
+            val byQName = store.getNode("p", "pkg.core.parseItem")
+            assertNotNull(byQName)
+            assertEquals("p:exact", byQName.nodeId)
+
+            // Verify getNode anchors file suffix: "Bar.kt" matches "p:src/Bar.kt" and NOT "p:src/FooBar.kt"
+            val byFileSuffix = store.getNode("p", "Bar.kt")
+            assertNotNull(byFileSuffix)
+            assertEquals("p:exact", byFileSuffix.nodeId)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }
