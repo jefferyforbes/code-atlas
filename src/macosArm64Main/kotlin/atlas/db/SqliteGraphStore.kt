@@ -271,9 +271,48 @@ class SqliteGraphStore(val dbPath: String) {
                 recorded_at INTEGER NOT NULL,
                 PRIMARY KEY(node_id, session_id)
             ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS project_metadata (
+                project_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (project_id, key)
+            );
             """.trimIndent()
         )
         migrateComposeSchema()
+    }
+
+    fun getProjectMetadata(projectId: String, key: String): String? {
+        val stmt = db.prepare("SELECT value FROM project_metadata WHERE project_id = ? AND key = ?;")
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindString(2, key)
+            if (stmt.step()) {
+                return stmt.columnString(0)
+            }
+            return null
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun setProjectMetadata(projectId: String, key: String, value: String) {
+        val stmt = db.prepare(
+            """
+            INSERT INTO project_metadata (project_id, key, value)
+            VALUES (?, ?, ?)
+            ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value;
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindString(2, key)
+            stmt.bindString(3, value)
+            stmt.step()
+        } finally {
+            stmt.close()
+        }
     }
 
     fun migrateComposeSchema() {
@@ -299,6 +338,23 @@ class SqliteGraphStore(val dbPath: String) {
     }
 
     fun <T> withSavepoint(name: String, block: () -> T): T = db.withSavepoint(name, block)
+
+    private class StatementScope(private val db: NativeSqliteDatabase) {
+        private val statements = mutableListOf<NativeSqliteStatement>()
+
+        fun prepare(sql: String): NativeSqliteStatement {
+            val stmt = db.prepare(sql)
+            statements.add(stmt)
+            return stmt
+        }
+
+        fun closeAll() {
+            for (i in statements.indices.reversed()) {
+                try { statements[i].close() } catch (_: Throwable) {}
+            }
+            statements.clear()
+        }
+    }
 
 
     fun close() {
@@ -401,16 +457,17 @@ class SqliteGraphStore(val dbPath: String) {
     fun replaceBatchRawSymbolEdges(projectId: String, fileEdgesMap: Map<String, List<GraphEdge>>) {
         if (fileEdgesMap.isEmpty()) return
         withSavepoint("sp_batch_raw_edges") {
-            val delStmt = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
-            val insStmt = db.prepare(
-                """
-                INSERT INTO raw_symbol_edges (
-                    project_id, file_id, source_node_id, target_symbol,
-                    edge_type, confidence, provenance, line_number, edge_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """.trimIndent()
-            )
+            val scope = StatementScope(db)
             try {
+                val delStmt = scope.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
+                val insStmt = scope.prepare(
+                    """
+                    INSERT INTO raw_symbol_edges (
+                        project_id, file_id, source_node_id, target_symbol,
+                        edge_type, confidence, provenance, line_number, edge_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """.trimIndent()
+                )
                 for ((fileId, edges) in fileEdgesMap) {
                     val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
                     delStmt.reset()
@@ -459,8 +516,7 @@ class SqliteGraphStore(val dbPath: String) {
                     }
                 }
             } finally {
-                delStmt.close()
-                insStmt.close()
+                scope.closeAll()
             }
         }
     }
@@ -588,27 +644,23 @@ class SqliteGraphStore(val dbPath: String) {
         topLevelDeclCount: Int
     ): String {
         val fileId = "$projectId:$relPath"
-
-        db.exec("BEGIN TRANSACTION;")
-        try {
-            // Find old nodes to purge associated indexes
-            val oldNodes = mutableListOf<String>()
-            val selectOld = db.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
+        withSavepoint("sp_index_file") {
+            val scope = StatementScope(db)
             try {
+                // Find old nodes to purge associated indexes
+                val oldNodes = mutableListOf<String>()
+                val selectOld = scope.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
                 selectOld.bindString(1, fileId)
                 while (selectOld.step()) {
                     oldNodes.add(selectOld.columnString(0))
                 }
-            } finally {
-                selectOld.close()
-            }
 
-            if (oldNodes.isNotEmpty()) {
-                val delVocab = db.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-                val delFts = db.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
-                val delEdges = db.prepare("DELETE FROM edges WHERE source_node_id = ?;")
-                val delNodes = db.prepare("DELETE FROM nodes WHERE file_id = ?;")
-                try {
+                if (oldNodes.isNotEmpty()) {
+                    val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
+                    val delFts = scope.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
+                    val delEdges = scope.prepare("DELETE FROM edges WHERE source_node_id = ?;")
+                    val delNodes = scope.prepare("DELETE FROM nodes WHERE file_id = ?;")
+
                     for (nodeId in oldNodes) {
                         delVocab.reset()
                         delVocab.clearBindings()
@@ -627,42 +679,31 @@ class SqliteGraphStore(val dbPath: String) {
                     }
                     delNodes.bindString(1, fileId)
                     delNodes.step()
-                } finally {
-                    delVocab.close()
-                    delFts.close()
-                    delEdges.close()
-                    delNodes.close()
                 }
-            }
 
-            val delRawEdges = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
-            try {
+                val delRawEdges = scope.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
                 delRawEdges.bindString(1, projectId)
                 delRawEdges.bindString(2, fileId)
                 delRawEdges.step()
-            } finally {
-                delRawEdges.close()
-            }
 
-            val upsertStmt = db.prepare(
-                """
-                INSERT INTO files (
-                    file_id, project_id, rel_path, language, module_id, source_set,
-                    semiotic_layer, arch_layer, sha256, mtime, loc, top_level_decl_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(file_id) DO UPDATE SET
-                    language = excluded.language,
-                    module_id = excluded.module_id,
-                    source_set = excluded.source_set,
-                    semiotic_layer = excluded.semiotic_layer,
-                    arch_layer = excluded.arch_layer,
-                    sha256 = excluded.sha256,
-                    mtime = excluded.mtime,
-                    loc = excluded.loc,
-                    top_level_decl_count = excluded.top_level_decl_count;
-                """.trimIndent()
-            )
-            try {
+                val upsertStmt = scope.prepare(
+                    """
+                    INSERT INTO files (
+                        file_id, project_id, rel_path, language, module_id, source_set,
+                        semiotic_layer, arch_layer, sha256, mtime, loc, top_level_decl_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(file_id) DO UPDATE SET
+                        language = excluded.language,
+                        module_id = excluded.module_id,
+                        source_set = excluded.source_set,
+                        semiotic_layer = excluded.semiotic_layer,
+                        arch_layer = excluded.arch_layer,
+                        sha256 = excluded.sha256,
+                        mtime = excluded.mtime,
+                        loc = excluded.loc,
+                        top_level_decl_count = excluded.top_level_decl_count;
+                    """.trimIndent()
+                )
                 upsertStmt.bindString(1, fileId)
                 upsertStmt.bindString(2, projectId)
                 upsertStmt.bindString(3, relPath)
@@ -677,12 +718,8 @@ class SqliteGraphStore(val dbPath: String) {
                 upsertStmt.bindInt(12, topLevelDeclCount)
                 upsertStmt.step()
             } finally {
-                upsertStmt.close()
+                scope.closeAll()
             }
-            db.exec("COMMIT;")
-        } catch (e: Throwable) {
-            db.exec("ROLLBACK;")
-            throw e
         }
         return fileId
     }
@@ -736,25 +773,22 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun deleteFileRecord(projectId: String, relPath: String, recomputeDegrees: Boolean = true) {
         val fileId = "$projectId:$relPath"
-        db.exec("BEGIN TRANSACTION;")
-        try {
+        withSavepoint("sp_delete_file") {
+            val scope = StatementScope(db)
             val oldNodes = mutableListOf<String>()
-            val selectOld = db.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
             try {
+                val selectOld = scope.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
                 selectOld.bindString(1, fileId)
                 while (selectOld.step()) {
                     oldNodes.add(selectOld.columnString(0))
                 }
-            } finally {
-                selectOld.close()
-            }
 
-            if (oldNodes.isNotEmpty()) {
-                val delVocab = db.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-                val delFts = db.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
-                val delEdges = db.prepare("DELETE FROM edges WHERE source_node_id = ? OR target_node_id = ?;")
-                val delNodes = db.prepare("DELETE FROM nodes WHERE file_id = ?;")
-                try {
+                if (oldNodes.isNotEmpty()) {
+                    val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
+                    val delFts = scope.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
+                    val delEdges = scope.prepare("DELETE FROM edges WHERE source_node_id = ? OR target_node_id = ?;")
+                    val delNodes = scope.prepare("DELETE FROM nodes WHERE file_id = ?;")
+
                     for (nodeId in oldNodes) {
                         delVocab.reset()
                         delVocab.clearBindings()
@@ -774,38 +808,23 @@ class SqliteGraphStore(val dbPath: String) {
                     }
                     delNodes.bindString(1, fileId)
                     delNodes.step()
-                } finally {
-                    delVocab.close()
-                    delFts.close()
-                    delEdges.close()
-                    delNodes.close()
                 }
-            }
 
-            val delRawEdges = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
-            try {
+                val delRawEdges = scope.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
                 delRawEdges.bindString(1, projectId)
                 delRawEdges.bindString(2, fileId)
                 delRawEdges.step()
-            } finally {
-                delRawEdges.close()
-            }
 
-            val delFile = db.prepare("DELETE FROM files WHERE file_id = ?;")
-            try {
+                val delFile = scope.prepare("DELETE FROM files WHERE file_id = ?;")
                 delFile.bindString(1, fileId)
                 delFile.step()
             } finally {
-                delFile.close()
+                scope.closeAll()
             }
 
             if (recomputeDegrees && oldNodes.isNotEmpty()) {
                 recomputeDegrees(projectId)
             }
-            db.exec("COMMIT;")
-        } catch (e: Throwable) {
-            db.exec("ROLLBACK;")
-            throw e
         }
     }
 
@@ -815,73 +834,73 @@ class SqliteGraphStore(val dbPath: String) {
         edges: List<GraphEdge>
     ) {
         if (nodes.isEmpty() && edges.isEmpty()) return
-        db.exec("BEGIN TRANSACTION;")
-        try {
-            val delFts = db.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
-            val delVocab = db.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-            val insNode = db.prepare(
-                """
-                INSERT INTO nodes (
-                    node_id, project_id, file_id, name, qualified_name, kind, signature,
-                    start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                    is_test_double, in_degree, out_degree
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(node_id) DO UPDATE SET
-                    file_id = excluded.file_id,
-                    name = excluded.name,
-                    qualified_name = excluded.qualified_name,
-                    kind = excluded.kind,
-                    signature = excluded.signature,
-                    start_line = excluded.start_line,
-                    end_line = excluded.end_line,
-                    module_id = excluded.module_id,
-                    source_set = excluded.source_set,
-                    semiotic_layer = excluded.semiotic_layer,
-                    arch_layer = excluded.arch_layer,
-                    is_test_double = excluded.is_test_double;
-                """.trimIndent()
-            )
-            val insFts = db.prepare(
-                """
-                INSERT INTO nodes_fts (node_id, project_id, name, qualified_name, signature, file_id)
-                VALUES (?, ?, ?, ?, ?, ?);
-                """.trimIndent()
-            )
-            val insVocab = db.prepare(
-                """
-                INSERT OR IGNORE INTO name_segment_vocab (segment, node_id, project_id)
-                VALUES (?, ?, ?);
-                """.trimIndent()
-            )
-            val insEdge = db.prepare(
-                """
-                INSERT INTO edges (
-                    edge_id, project_id, source_node_id, target_node_id,
-                    edge_type, provenance, confidence, line_number
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(edge_id) DO UPDATE SET
-                    edge_type = excluded.edge_type,
-                    provenance = excluded.provenance,
-                    confidence = excluded.confidence,
-                    line_number = excluded.line_number;
-                """.trimIndent()
-            )
-            val sweepOrphanEdges = db.prepare(
-                """
-                DELETE FROM edges
-                WHERE project_id = ?
-                  AND (
-                    source_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
-                    OR (
-                      target_node_id NOT LIKE 'vault_ref#%'
-                      AND target_node_id NOT LIKE '%:vault_ref#%'
-                      AND target_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
-                    )
-                  );
-                """.trimIndent()
-            )
-
+        withSavepoint("sp_upsert_nodes_edges") {
+            val scope = StatementScope(db)
             try {
+                val delFts = scope.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
+                val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
+                val insNode = scope.prepare(
+                    """
+                    INSERT INTO nodes (
+                        node_id, project_id, file_id, name, qualified_name, kind, signature,
+                        start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                        is_test_double, in_degree, out_degree
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(node_id) DO UPDATE SET
+                        file_id = excluded.file_id,
+                        name = excluded.name,
+                        qualified_name = excluded.qualified_name,
+                        kind = excluded.kind,
+                        signature = excluded.signature,
+                        start_line = excluded.start_line,
+                        end_line = excluded.end_line,
+                        module_id = excluded.module_id,
+                        source_set = excluded.source_set,
+                        semiotic_layer = excluded.semiotic_layer,
+                        arch_layer = excluded.arch_layer,
+                        is_test_double = excluded.is_test_double;
+                    """.trimIndent()
+                )
+                val insFts = scope.prepare(
+                    """
+                    INSERT INTO nodes_fts (node_id, project_id, name, qualified_name, signature, file_id)
+                    VALUES (?, ?, ?, ?, ?, ?);
+                    """.trimIndent()
+                )
+                val insVocab = scope.prepare(
+                    """
+                    INSERT OR IGNORE INTO name_segment_vocab (segment, node_id, project_id)
+                    VALUES (?, ?, ?);
+                    """.trimIndent()
+                )
+                val insEdge = scope.prepare(
+                    """
+                    INSERT INTO edges (
+                        edge_id, project_id, source_node_id, target_node_id,
+                        edge_type, provenance, confidence, line_number
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(edge_id) DO UPDATE SET
+                        edge_type = excluded.edge_type,
+                        provenance = excluded.provenance,
+                        confidence = excluded.confidence,
+                        line_number = excluded.line_number;
+                    """.trimIndent()
+                )
+                val sweepOrphanEdges = scope.prepare(
+                    """
+                    DELETE FROM edges
+                    WHERE project_id = ?
+                      AND (
+                        source_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
+                        OR (
+                          target_node_id NOT LIKE 'vault_ref#%'
+                          AND target_node_id NOT LIKE '%:vault_ref#%'
+                          AND target_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
+                        )
+                      );
+                    """.trimIndent()
+                )
+
                 for (node in nodes) {
                     delFts.reset()
                     delFts.clearBindings()
@@ -954,19 +973,8 @@ class SqliteGraphStore(val dbPath: String) {
 
                 recomputeDegrees(projectId)
             } finally {
-                delFts.close()
-                delVocab.close()
-                insNode.close()
-                insFts.close()
-                insVocab.close()
-                insEdge.close()
-                sweepOrphanEdges.close()
+                scope.closeAll()
             }
-
-            db.exec("COMMIT;")
-        } catch (e: Throwable) {
-            db.exec("ROLLBACK;")
-            throw e
         }
     }
 
@@ -1658,14 +1666,15 @@ class SqliteGraphStore(val dbPath: String) {
     }
 
     fun deleteFigmaDocument(fileKey: String) {
-        db.exec("BEGIN TRANSACTION;")
-        try {
-            val delSpatial = db.prepare("DELETE FROM figma_spatial_index WHERE id IN (SELECT rowid_pk FROM figma_nodes WHERE file_key = ?);")
-            val delNodes = db.prepare("DELETE FROM figma_nodes WHERE file_key = ?;")
-            val delEdges = db.prepare("DELETE FROM figma_edges WHERE file_key = ?;")
-            val delVars = db.prepare("DELETE FROM figma_variables WHERE file_key = ?;")
-            val delDoc = db.prepare("DELETE FROM figma_documents WHERE file_key = ?;")
+        withSavepoint("sp_del_figma_doc") {
+            val scope = StatementScope(db)
             try {
+                val delSpatial = scope.prepare("DELETE FROM figma_spatial_index WHERE id IN (SELECT rowid_pk FROM figma_nodes WHERE file_key = ?);")
+                val delNodes = scope.prepare("DELETE FROM figma_nodes WHERE file_key = ?;")
+                val delEdges = scope.prepare("DELETE FROM figma_edges WHERE file_key = ?;")
+                val delVars = scope.prepare("DELETE FROM figma_variables WHERE file_key = ?;")
+                val delDoc = scope.prepare("DELETE FROM figma_documents WHERE file_key = ?;")
+
                 delSpatial.bindString(1, fileKey)
                 delSpatial.step()
 
@@ -1681,74 +1690,65 @@ class SqliteGraphStore(val dbPath: String) {
                 delDoc.bindString(1, fileKey)
                 delDoc.step()
             } finally {
-                delSpatial.close()
-                delNodes.close()
-                delEdges.close()
-                delVars.close()
-                delDoc.close()
+                scope.closeAll()
             }
-
-            db.exec("COMMIT;")
-        } catch (e: Throwable) {
-            db.exec("ROLLBACK;")
-            throw e
         }
     }
 
     fun insertFigmaNodes(fileKey: String, nodes: List<FigmaNode>) {
         if (nodes.isEmpty()) return
 
-        db.exec("BEGIN TRANSACTION;")
-        try {
-            val nodeStmt = db.prepare(
-                """
-                INSERT INTO figma_nodes (
-                    node_id, file_key, page_name, section_id, parent_id, name, node_type,
-                    layout_mode, sizing_horizontal, sizing_vertical, text_auto_resize,
-                    padding_left, padding_right, padding_top, padding_bottom, item_spacing,
-                    local_x, local_y, canvas_x, canvas_y, width, height,
-                    is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
-                    semiotic_layer
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(file_key, node_id) DO UPDATE SET
-                    page_name = excluded.page_name,
-                    section_id = excluded.section_id,
-                    parent_id = excluded.parent_id,
-                    name = excluded.name,
-                    node_type = excluded.node_type,
-                    layout_mode = excluded.layout_mode,
-                    sizing_horizontal = excluded.sizing_horizontal,
-                    sizing_vertical = excluded.sizing_vertical,
-                    text_auto_resize = excluded.text_auto_resize,
-                    padding_left = excluded.padding_left,
-                    padding_right = excluded.padding_right,
-                    padding_top = excluded.padding_top,
-                    padding_bottom = excluded.padding_bottom,
-                    item_spacing = excluded.item_spacing,
-                    local_x = excluded.local_x,
-                    local_y = excluded.local_y,
-                    canvas_x = excluded.canvas_x,
-                    canvas_y = excluded.canvas_y,
-                    width = excluded.width,
-                    height = excluded.height,
-                    is_interactive = excluded.is_interactive,
-                    has_emoji = excluded.has_emoji,
-                    unbound_fill = excluded.unbound_fill,
-                    unbound_stroke = excluded.unbound_stroke,
-                    wcag_contrast = excluded.wcag_contrast,
-                    semiotic_layer = excluded.semiotic_layer
-                RETURNING rowid_pk;
-                """.trimIndent()
-            )
-
-            val spatialStmt = db.prepare(
-                """
-                INSERT OR REPLACE INTO figma_spatial_index (id, min_x, max_x, min_y, max_y)
-                VALUES (?, ?, ?, ?, ?);
-                """.trimIndent()
-            )
-
+        withSavepoint("sp_insert_figma_nodes") {
+            val scope = StatementScope(db)
             try {
+                val nodeStmt = scope.prepare(
+                    """
+                    INSERT INTO figma_nodes (
+                        node_id, file_key, page_name, section_id, parent_id, name, node_type,
+                        layout_mode, sizing_horizontal, sizing_vertical, text_auto_resize,
+                        padding_left, padding_right, padding_top, padding_bottom, item_spacing,
+                        local_x, local_y, canvas_x, canvas_y, width, height,
+                        is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
+                        semiotic_layer
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(file_key, node_id) DO UPDATE SET
+                        page_name = excluded.page_name,
+                        section_id = excluded.section_id,
+                        parent_id = excluded.parent_id,
+                        name = excluded.name,
+                        node_type = excluded.node_type,
+                        layout_mode = excluded.layout_mode,
+                        sizing_horizontal = excluded.sizing_horizontal,
+                        sizing_vertical = excluded.sizing_vertical,
+                        text_auto_resize = excluded.text_auto_resize,
+                        padding_left = excluded.padding_left,
+                        padding_right = excluded.padding_right,
+                        padding_top = excluded.padding_top,
+                        padding_bottom = excluded.padding_bottom,
+                        item_spacing = excluded.item_spacing,
+                        local_x = excluded.local_x,
+                        local_y = excluded.local_y,
+                        canvas_x = excluded.canvas_x,
+                        canvas_y = excluded.canvas_y,
+                        width = excluded.width,
+                        height = excluded.height,
+                        is_interactive = excluded.is_interactive,
+                        has_emoji = excluded.has_emoji,
+                        unbound_fill = excluded.unbound_fill,
+                        unbound_stroke = excluded.unbound_stroke,
+                        wcag_contrast = excluded.wcag_contrast,
+                        semiotic_layer = excluded.semiotic_layer
+                    RETURNING rowid_pk;
+                    """.trimIndent()
+                )
+
+                val spatialStmt = scope.prepare(
+                    """
+                    INSERT OR REPLACE INTO figma_spatial_index (id, min_x, max_x, min_y, max_y)
+                    VALUES (?, ?, ?, ?, ?);
+                    """.trimIndent()
+                )
+
                 for (node in nodes) {
                     val effectiveFileKey = if (node.fileKey.isNotBlank()) node.fileKey else fileKey
                     nodeStmt.reset()
@@ -1813,22 +1813,15 @@ class SqliteGraphStore(val dbPath: String) {
                     }
                 }
             } finally {
-                nodeStmt.close()
-                spatialStmt.close()
+                scope.closeAll()
             }
-
-            db.exec("COMMIT;")
-        } catch (e: Throwable) {
-            db.exec("ROLLBACK;")
-            throw e
         }
     }
 
     fun insertFigmaVariables(fileKey: String, variables: List<FigmaVariable>) {
         if (variables.isEmpty()) return
 
-        db.exec("BEGIN TRANSACTION;")
-        try {
+        withSavepoint("sp_insert_figma_vars") {
             val stmt = db.prepare(
                 """
                 INSERT OR REPLACE INTO figma_variables (
@@ -1857,18 +1850,13 @@ class SqliteGraphStore(val dbPath: String) {
             } finally {
                 stmt.close()
             }
-            db.exec("COMMIT;")
-        } catch (e: Throwable) {
-            db.exec("ROLLBACK;")
-            throw e
         }
     }
 
     fun insertFigmaEdges(fileKey: String, edges: List<FigmaEdge>) {
         if (edges.isEmpty()) return
 
-        db.exec("BEGIN TRANSACTION;")
-        try {
+        withSavepoint("sp_insert_figma_edges") {
             val stmt = db.prepare(
                 """
                 INSERT OR REPLACE INTO figma_edges (
@@ -1892,10 +1880,6 @@ class SqliteGraphStore(val dbPath: String) {
             } finally {
                 stmt.close()
             }
-            db.exec("COMMIT;")
-        } catch (e: Throwable) {
-            db.exec("ROLLBACK;")
-            throw e
         }
     }
 
@@ -3359,10 +3343,9 @@ class SqliteGraphStore(val dbPath: String) {
                 UNION ALL
                 SELECT e.source_node_id, e.target_node_id, c.depth + 1, e.edge_type,
                        c.path || e.target_node_id || '|'
-                FROM edges e
-                JOIN cascade_cte c ON e.source_node_id = c.callee_id
-                WHERE e.project_id = ?
-                  AND e.edge_type IN ('CALLS_COMPOSABLE', 'CALLS', 'EXPECT_ACTUAL')
+                FROM cascade_cte c
+                JOIN edges e ON e.project_id = ? AND e.source_node_id = c.callee_id
+                WHERE e.edge_type IN ('CALLS_COMPOSABLE', 'CALLS', 'EXPECT_ACTUAL')
                   AND c.depth < ?
                   AND INSTR(c.path, '|' || e.target_node_id || '|') = 0
             )

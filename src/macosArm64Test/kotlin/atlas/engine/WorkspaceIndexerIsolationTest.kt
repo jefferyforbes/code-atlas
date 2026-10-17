@@ -1,7 +1,10 @@
 package atlas.engine
 
 import atlas.db.SqliteGraphStore
+import atlas.extract.PolyglotAstExtractor
 import atlas.util.PlatformFiles
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import platform.posix.getpid
 import platform.posix.rmdir
 import kotlin.random.Random
@@ -153,6 +156,52 @@ class WorkspaceIndexerIsolationTest {
             val rawEdges = store.listRawSymbolEdges("test_proj")
             val composeEdges = rawEdges.filter { it.edgeType in setOf("MUTATES_PROPERTY", "PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "OBSERVES_STATE") }
             assertTrue(composeEdges.isEmpty(), "Non-Compose file must NOT emit synthetic Compose edges into raw_symbol_edges")
+        } finally {
+            store.close()
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testExtractorVersionSaltInvalidatesStaleCache() {
+        val tmpDir = makeTempDir()
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+
+        try {
+            val srcDir = "$tmpDir/src/main/kotlin/atlas/demo"
+            PlatformFiles.mkdirs(srcDir)
+            val demoFile = "$srcDir/SampleService.kt"
+            PlatformFiles.writeText(
+                demoFile,
+                """
+                package atlas.demo
+
+                class SampleService {
+                    fun runTask(): String = "done"
+                }
+                """.trimIndent()
+            )
+
+            val indexer = WorkspaceIndexer(tmpDir, store)
+
+            // 1. Initial indexing
+            val res1 = indexer.indexWorkspace("test_proj")
+            assertEquals(1, res1["files_indexed"]?.jsonPrimitive?.intOrNull)
+            assertEquals(PolyglotAstExtractor.EXTRACTOR_VERSION, store.getProjectMetadata("test_proj", "extractor_version"))
+
+            // 2. Second indexing immediately without file changes -> short circuits with files_indexed == 0
+            val res2 = indexer.indexWorkspace("test_proj")
+            assertEquals(0, res2["files_indexed"]?.jsonPrimitive?.intOrNull)
+
+            // 3. Stale cache: simulate older extractor version in metadata
+            store.setProjectMetadata("test_proj", "extractor_version", "1.0.0-legacy")
+            assertEquals("1.0.0-legacy", store.getProjectMetadata("test_proj", "extractor_version"))
+
+            // 4. Third indexing without file changes -> version mismatch forces re-indexing
+            val res3 = indexer.indexWorkspace("test_proj")
+            assertEquals(1, res3["files_indexed"]?.jsonPrimitive?.intOrNull)
+            assertEquals(PolyglotAstExtractor.EXTRACTOR_VERSION, store.getProjectMetadata("test_proj", "extractor_version"))
         } finally {
             store.close()
             cleanDir(tmpDir)

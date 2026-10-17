@@ -43,7 +43,9 @@ class SemioticLayerClassifier {
 
             if (isTestDouble || isTestSourceSet || "/test/" in normPath || "/tests/" in normPath ||
                 "commontest" in normPath || "test/" in normPath ||
-                normPath.startsWith("test_") || normPath.endsWith("_test.py") || normPath.endsWith("test.kt")
+                normPath.startsWith("test_") || normPath.endsWith("_test.py") ||
+                relPath.endsWith("Test.kt") || normPath.endsWith("/test.kt") || normPath == "test.kt" ||
+                normPath.endsWith("_test.kt") || normPath.endsWith(".test.kt") || normPath.endsWith("-test.kt")
             ) {
                 return Triple("test", "test", isTestDouble)
             }

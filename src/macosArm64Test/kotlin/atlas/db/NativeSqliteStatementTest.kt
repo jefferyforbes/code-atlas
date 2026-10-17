@@ -114,4 +114,33 @@ class NativeSqliteStatementTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testStatementUseClosesAutomatically() {
+        val dbPath = "/tmp/atlas_stmt_test_use_${getpid()}_${Random.nextInt(100000, 999999)}.db"
+        val db = NativeSqliteDatabase(dbPath)
+        try {
+            db.exec("CREATE TABLE items (id INTEGER, val TEXT);")
+            db.prepare("INSERT INTO items VALUES (1, 'hello');").use { stmt ->
+                assertFalse(stmt.step())
+            }
+
+            var capturedStmt: NativeSqliteStatement? = null
+            val value = db.prepare("SELECT val FROM items WHERE id = 1;").use { stmt ->
+                capturedStmt = stmt
+                assertTrue(stmt.step())
+                stmt.columnString(0)
+            }
+            assertEquals("hello", value)
+
+            // capturedStmt must be closed by .use
+            assertTrue(capturedStmt != null)
+            assertFailsWith<IllegalStateException> {
+                capturedStmt!!.step()
+            }
+        } finally {
+            db.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }

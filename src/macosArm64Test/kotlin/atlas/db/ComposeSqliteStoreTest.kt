@@ -230,4 +230,44 @@ class ComposeSqliteStoreTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testNestedSavepointRollbackIsolationForGraphStore() {
+        val dbPath = "/tmp/atlas_nested_sp_test_${kotlin.random.Random.nextInt(100000, 999999)}.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val node1 = GraphNode(
+                nodeId = "p:src/A.kt#Root", projectId = "p", fileId = "p:src/A.kt",
+                name = "Root", qualifiedName = "com.Root", kind = "class", signature = "class Root",
+                startLine = 1, endLine = 10, moduleId = ":core", sourceSet = "main",
+                semioticLayer = "semantic", archLayer = "domain", isTestDouble = false
+            )
+            store.upsertNodesAndEdges("p", listOf(node1), emptyList())
+            assertEquals(1, store.listNodes("p").size)
+
+            // Outer savepoint nesting internal savepoints of upsertNodesAndEdges and deleteFileRecord
+            assertFailsWith<RuntimeException> {
+                store.withSavepoint("outer_tx") {
+                    val node2 = node1.copy(nodeId = "p:src/B.kt#Transient", fileId = "p:src/B.kt", name = "Transient")
+                    // Inner nested savepoint called inside upsertNodesAndEdges
+                    store.upsertNodesAndEdges("p", listOf(node2), emptyList())
+                    assertEquals(2, store.listNodes("p").size)
+
+                    // Also test nested deleteFileRecord with its internal savepoint
+                    store.deleteFileRecord("p", "src/A.kt", recomputeDegrees = false)
+                    assertEquals(1, store.listNodes("p").size)
+
+                    throw RuntimeException("Aborting outer transaction")
+                }
+            }
+
+            // Both node1 and node2 changes must be completely rolled back to pre-outer_tx state
+            val nodesAfter = store.listNodes("p")
+            assertEquals(1, nodesAfter.size)
+            assertEquals("p:src/A.kt#Root", nodesAfter.first().nodeId)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }
