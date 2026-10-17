@@ -1,6 +1,7 @@
 package atlas
 
 import atlas.cli.CodeGraphCli
+import atlas.db.NativeSqliteDatabase
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
 import atlas.engine.ScopeSynthesizer
@@ -9,12 +10,25 @@ import atlas.extract.ModuleBoundaryDetector
 import atlas.extract.NameSegmentTokenizer
 import atlas.extract.PolyglotAstExtractor
 import atlas.extract.SemioticLayerClassifier
+import atlas.mcp.CodeGraphMcpServer
+import atlas.model.FigmaDocument
+import atlas.model.FigmaNode
+import atlas.model.FigmaSpatialBounds
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
 import atlas.util.Sha256
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import platform.posix.getpid
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -78,7 +92,7 @@ class AtlasNativeTest {
 
     @Test
     fun testSqliteGraphStoreAndCTE() {
-        val dbPath = "/tmp/test_atlas_unit_${platform.posix.getpid()}.db"
+        val dbPath = "/tmp/test_atlas_unit_${getpid()}.db"
         PlatformFiles.delete(dbPath)
         val store = SqliteGraphStore(dbPath)
         try {
@@ -195,6 +209,7 @@ class AtlasNativeTest {
 
     @Test
     fun testCliVersionFlag() {
+        assertEquals("0.3.1", CodeGraphCli.VERSION)
         val exitCodeVersion = CodeGraphCli.run(arrayOf("--version"))
         assertEquals(0, exitCodeVersion)
 
@@ -221,5 +236,400 @@ class AtlasNativeTest {
 
         val exitCodeFigmaHelp = CodeGraphCli.run(arrayOf("figma", "--help"))
         assertEquals(0, exitCodeFigmaHelp)
+    }
+
+    @Test
+    fun testPolyglotAstExtractorExpressionBodyAndDeclarations() {
+        val ktCode = """
+            package com.tesco.product
+            
+            fun add(a: Int, b: Int): Int = a + b
+            
+            fun sub(a: Int, b: Int): Int = a - b
+            
+            fun multiline(
+                x: Int,
+                y: Int
+            ): Int =
+                x * y
+            
+            interface Service {
+                fun fetch(): String
+                fun delete(): Boolean
+            }
+            
+            fun withBlock() {
+                val z = 10
+            }
+            
+            fun lambdaBlock() = run {
+                val step1 = 1
+                step1 + 2
+            }
+        """.trimIndent()
+
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("test_proj", "MathUtils.kt", ktCode)
+        val nodeMap = nodes.associateBy { it.name }
+
+        val addNode = nodeMap["add"]
+        assertNotNull(addNode)
+        assertEquals(3, addNode.startLine)
+        assertEquals(3, addNode.endLine)
+
+        val subNode = nodeMap["sub"]
+        assertNotNull(subNode)
+        assertEquals(5, subNode.startLine)
+        assertEquals(5, subNode.endLine)
+
+        val multilineNode = nodeMap["multiline"]
+        assertNotNull(multilineNode)
+        assertEquals(7, multilineNode.startLine)
+        assertEquals(11, multilineNode.endLine)
+
+        val fetchNode = nodeMap["fetch"]
+        assertNotNull(fetchNode)
+        assertEquals(14, fetchNode.startLine)
+        assertEquals(14, fetchNode.endLine)
+
+        val deleteNode = nodeMap["delete"]
+        assertNotNull(deleteNode)
+        assertEquals(15, deleteNode.startLine)
+        assertEquals(15, deleteNode.endLine)
+
+        val withBlockNode = nodeMap["withBlock"]
+        assertNotNull(withBlockNode)
+        assertEquals(18, withBlockNode.startLine)
+        assertEquals(20, withBlockNode.endLine)
+
+        val lambdaBlockNode = nodeMap["lambdaBlock"]
+        assertNotNull(lambdaBlockNode)
+        assertEquals(22, lambdaBlockNode.startLine)
+        assertEquals(25, lambdaBlockNode.endLine)
+    }
+
+    @Test
+    fun testScopeSynthesizerIgnoresMergedAndCompletedPlans() {
+        val dbPath = "/tmp/test_atlas_scope_plans_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val codeNode = GraphNode(
+                nodeId = "p:Code", projectId = "p", fileId = "p:Code.kt",
+                name = "Code", qualifiedName = "pkg.Code", kind = "class"
+            )
+            val activePlan = GraphNode(
+                nodeId = "p:plans/active#active", projectId = "p", fileId = "p:plans/active.md",
+                name = "active_plan", qualifiedName = "plans/active.md", kind = "plan_contract",
+                signature = "plan_contract (active): plans/active.md"
+            )
+            val mergedPlan = GraphNode(
+                nodeId = "p:plans/merged#merged", projectId = "p", fileId = "p:plans/merged.md",
+                name = "merged_plan", qualifiedName = "plans/merged.md", kind = "plan_contract",
+                signature = "plan_contract (merged): plans/merged.md"
+            )
+            val completedPlan = GraphNode(
+                nodeId = "p:plans/completed#completed", projectId = "p", fileId = "p:plans/completed.md",
+                name = "completed_plan", qualifiedName = "plans/completed.md", kind = "plan_contract",
+                signature = "plan_contract (completed): plans/completed.md"
+            )
+
+            val edgeActive = GraphEdge(
+                edgeId = "e1", projectId = "p", sourceNodeId = activePlan.nodeId,
+                targetNodeId = codeNode.nodeId, edgeType = "PLAN_SCOPES_FILE"
+            )
+            val edgeMerged = GraphEdge(
+                edgeId = "e2", projectId = "p", sourceNodeId = mergedPlan.nodeId,
+                targetNodeId = codeNode.nodeId, edgeType = "PLAN_SCOPES_FILE"
+            )
+            val edgeCompleted = GraphEdge(
+                edgeId = "e3", projectId = "p", sourceNodeId = completedPlan.nodeId,
+                targetNodeId = codeNode.nodeId, edgeType = "PLAN_SCOPES_FILE"
+            )
+
+            store.upsertNodesAndEdges("p", listOf(codeNode, activePlan, mergedPlan, completedPlan), listOf(edgeActive, edgeMerged, edgeCompleted))
+
+            val synth = ScopeSynthesizer(store)
+            val scope = synth.synthesizeScope("p", listOf("Code"))
+            assertEquals(listOf("active_plan"), scope.collidingPlans)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testCodeGraphMcpServerFigmaToolsAndSingleLineJson() {
+        val dbPath = "/tmp/test_atlas_mcp_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val server = CodeGraphMcpServer(workspaceRoot = ".", customDbPath = dbPath)
+        try {
+            val defs = server.toolDefinitions()
+            val toolNames = defs.map { it["name"]?.jsonPrimitive?.content }
+            assertTrue(toolNames.contains("codegraph_query"))
+            assertTrue(toolNames.contains("codegraph_audit"))
+            assertTrue(toolNames.contains("figma_audit"))
+            assertTrue(toolNames.contains("figma_scope"))
+
+            val auditTool = defs.first { it["name"]?.jsonPrimitive?.content == "codegraph_audit" }
+            val actions = auditTool["inputSchema"]?.jsonObject?.get("properties")?.jsonObject
+                ?.get("action")?.jsonObject?.get("enum")?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+            assertTrue(actions.contains("figma_audit"))
+            assertTrue(actions.contains("figma_scope"))
+
+            // Seed a Figma document in store
+            val doc = FigmaDocument("fk_test", "TestDoc", "1", "2026-01-01")
+            server.store.insertFigmaDocument(doc)
+            val node = FigmaNode(
+                nodeId = "1:1",
+                fileKey = "fk_test",
+                pageName = "Page 1",
+                name = "TestFrame",
+                nodeType = "FRAME",
+                layoutMode = "VERTICAL",
+                sizingHorizontal = "HUG",
+                sizingVertical = "HUG",
+                width = 100.0,
+                height = 100.0
+            )
+            server.store.insertFigmaNodes("fk_test", listOf(node))
+
+            // Test figma_audit tool call
+            val auditOut = server.callTool("figma_audit", buildJsonObject {
+                put("file_key", "fk_test")
+            })
+            assertNotNull(auditOut["maturityScore"])
+
+            // Test codegraph_audit with figma_audit action
+            val auditActionOut = server.callTool("codegraph_audit", buildJsonObject {
+                put("action", "figma_audit")
+                put("file_key", "fk_test")
+            })
+            assertNotNull(auditActionOut["maturityScore"])
+
+            // Test figma_scope tool call
+            val scopeOut = server.callTool("figma_scope", buildJsonObject {
+                put("file_key", "fk_test")
+                put("project", "test_proj")
+            })
+            assertNotNull(scopeOut["spatialBounds"])
+
+            // Test codegraph_audit with figma_scope action
+            val scopeActionOut = server.callTool("codegraph_audit", buildJsonObject {
+                put("action", "figma_scope")
+                put("file_key", "fk_test")
+                put("project", "test_proj")
+            })
+            assertNotNull(scopeActionOut["spatialBounds"])
+
+            // Verify single-line NDJSON serialization for all tool outputs
+            val encodedAudit = Json.encodeToString(JsonObject.serializer(), auditOut)
+            assertFalse(encodedAudit.contains("\n"), "MCP JSON serialization must be strict single-line NDJSON")
+
+            // Verify full JSON-RPC stdio protocol pipeline via processJsonRpcMessage
+            val initMsg = """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"""
+            val initResp = server.processJsonRpcMessage(initMsg)
+            assertNotNull(initResp)
+            assertFalse(initResp.contains("\n"), "initialize response must be strict single-line NDJSON")
+            assertTrue(initResp.contains(""""protocolVersion":"2024-11-05""""))
+            assertTrue(initResp.contains(""""version":"0.3.1""""))
+
+            val listMsg = """{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"""
+            val listResp = server.processJsonRpcMessage(listMsg)
+            assertNotNull(listResp)
+            assertFalse(listResp.contains("\n"), "tools/list response must be strict single-line NDJSON")
+            assertTrue(listResp.contains(""""name":"figma_audit""""))
+            assertTrue(listResp.contains(""""name":"figma_scope""""))
+
+            val callAuditMsg = """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"figma_audit","arguments":{"file_key":"fk_test"}}}"""
+            val callAuditResp = server.processJsonRpcMessage(callAuditMsg)
+            assertNotNull(callAuditResp)
+            assertFalse(callAuditResp.contains("\n"), "tools/call figma_audit response must be strict single-line NDJSON")
+            assertTrue(callAuditResp.contains("maturityScore"))
+
+            val callScopeMsg = """{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"figma_scope","arguments":{"file_key":"fk_test","target":"TestFrame"}}}"""
+            val callScopeResp = server.processJsonRpcMessage(callScopeMsg)
+            assertNotNull(callScopeResp)
+            assertFalse(callScopeResp.contains("\n"), "tools/call figma_scope response must be strict single-line NDJSON")
+            assertTrue(callScopeResp.contains("spatialBounds"))
+
+            val callErr = server.processJsonRpcMessage("""{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"unknown_tool","arguments":{}}}""")
+            assertNotNull(callErr)
+            assertFalse(callErr.contains("\n"), "error response must be strict single-line NDJSON")
+            assertTrue(callErr.contains("error"))
+        } finally {
+            server.store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testNativeSqliteBusyTimeout() {
+        val dbPath = "/tmp/test_atlas_busy_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val db1 = NativeSqliteDatabase(dbPath)
+        val db2 = NativeSqliteDatabase(dbPath)
+        try {
+            val pragma1 = db1.prepare("PRAGMA busy_timeout;")
+            assertTrue(pragma1.step())
+            assertEquals(5000, pragma1.columnInt(0), "db1 must have busy_timeout = 5000")
+            pragma1.close()
+
+            val pragma2 = db2.prepare("PRAGMA busy_timeout;")
+            assertTrue(pragma2.step())
+            assertEquals(5000, pragma2.columnInt(0), "db2 must have busy_timeout = 5000")
+            pragma2.close()
+
+            db1.exec("CREATE TABLE items (id TEXT PRIMARY KEY, value INT);")
+            db1.exec("INSERT INTO items VALUES ('k1', 100);")
+
+            val stmt = db2.prepare("SELECT value FROM items WHERE id = ?;")
+            stmt.bindString(1, "k1")
+            assertTrue(stmt.step())
+            assertEquals(100, stmt.columnInt(0))
+            stmt.close()
+        } finally {
+            db1.close()
+            db2.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testPolyglotAstExtractorSwiftAndTypeScriptDeclarations() {
+        val swiftCode = """
+            import Foundation
+            
+            protocol Greeter {
+                func greet(name: String) -> String
+                func bye()
+            }
+            
+            class ConcreteGreeter: Greeter {
+                func greet(name: String) -> String {
+                    return "Hello " + name
+                }
+            }
+        """.trimIndent()
+
+        val (swiftNodes, _, _) = PolyglotAstExtractor.extractFile("proj", "Greeter.swift", swiftCode)
+        val greetProto = swiftNodes.first { it.name == "greet" && it.startLine == 4 }
+        assertEquals(4, greetProto.startLine)
+        assertEquals(4, greetProto.endLine)
+
+        val byeProto = swiftNodes.first { it.name == "bye" }
+        assertEquals(5, byeProto.startLine)
+        assertEquals(5, byeProto.endLine)
+
+        val greetConcrete = swiftNodes.first { it.name == "greet" && it.startLine == 9 }
+        assertEquals(9, greetConcrete.startLine)
+        assertEquals(11, greetConcrete.endLine)
+
+        // TypeScript without semicolons (standard modern TS)
+        val tsCode = """
+            import { Item } from './types'
+            
+            export interface Repo {
+                findById(id: string): Item
+                delete(id: string): void
+            }
+            
+            export const add = (a: number, b: number) => a + b
+            export const sub = (a: number, b: number) => a - b
+        """.trimIndent()
+
+        val (tsNodes, _, _) = PolyglotAstExtractor.extractFile("proj", "repo.ts", tsCode)
+        val tsMap = tsNodes.associateBy { it.name }
+        val addTs = tsMap["add"]
+        assertNotNull(addTs)
+        assertEquals(8, addTs.startLine)
+        assertEquals(8, addTs.endLine)
+
+        val subTs = tsMap["sub"]
+        assertNotNull(subTs)
+        assertEquals(9, subTs.startLine)
+        assertEquals(9, subTs.endLine)
+    }
+
+    @Test
+    fun testPolyglotAstExtractorEdgeCases() {
+        val ktCode = """
+            package com.tesco.test
+            
+            fun withDefaultParam(
+                name: String,
+                action: () -> Unit = {}
+            ) {
+                action()
+                println("done")
+            }
+            
+            fun branchy(x: Int) = if (x > 0) {
+                val p = x * 2
+                p
+            } else {
+                val n = x - 1
+                n
+            }
+            
+            fun tryCatchy() = try {
+                100 / 2
+            } catch (e: Exception) {
+                0
+            }
+            
+            fun chainedLambdas(items: List<String>) = items
+                .map {
+                    it.trim()
+                }
+                .filter {
+                    it.isNotEmpty()
+                }
+            
+            fun rawMultilineTemplate() = ""${'"'}
+                {
+                    "item": 123
+                }
+            ""${'"'}.trimIndent()
+            
+            fun withBlockComment() {
+                /*
+                 * multiline { comment }
+                 */
+                println("safe")
+            }
+        """.trimIndent()
+
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("p", "EdgeCases.kt", ktCode)
+        val nodeMap = nodes.associateBy { it.name }
+
+        val withDef = nodeMap["withDefaultParam"]
+        assertNotNull(withDef)
+        assertEquals(3, withDef.startLine)
+        assertEquals(9, withDef.endLine)
+
+        val branchyNode = nodeMap["branchy"]
+        assertNotNull(branchyNode)
+        assertEquals(11, branchyNode.startLine)
+        assertEquals(17, branchyNode.endLine)
+
+        val tryCatchyNode = nodeMap["tryCatchy"]
+        assertNotNull(tryCatchyNode)
+        assertEquals(19, tryCatchyNode.startLine)
+        assertEquals(23, tryCatchyNode.endLine)
+
+        val chainedNode = nodeMap["chainedLambdas"]
+        assertNotNull(chainedNode)
+        assertEquals(25, chainedNode.startLine)
+        assertEquals(31, chainedNode.endLine)
+
+        val rawNode = nodeMap["rawMultilineTemplate"]
+        assertNotNull(rawNode)
+        assertEquals(33, rawNode.startLine)
+        assertEquals(37, rawNode.endLine)
+
+        val commentNode = nodeMap["withBlockComment"]
+        assertNotNull(commentNode)
+        assertEquals(39, commentNode.startLine)
+        assertEquals(44, commentNode.endLine)
     }
 }
