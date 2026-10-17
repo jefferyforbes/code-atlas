@@ -1045,6 +1045,68 @@ class SqliteGraphStore(val dbPath: String) {
         }
     }
 
+    fun getNodesForFile(projectId: String, relPath: String): List<GraphNode> {
+        val norm = relPath.trim().trim('\'', '"').removePrefix("./").replace('\\', '/')
+        val escaped = norm.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val stmt = db.prepare(
+            """
+            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                   is_test_double, in_degree, out_degree
+            FROM nodes
+            WHERE project_id = ? AND (
+                file_id = ?
+                OR file_id = ?
+                OR file_id LIKE ? ESCAPE '\'
+                OR file_id LIKE ? ESCAPE '\'
+            )
+            ORDER BY in_degree DESC;
+            """.trimIndent()
+        )
+        val results = mutableListOf<GraphNode>()
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindString(2, "$projectId:$norm")
+            stmt.bindString(3, norm)
+            stmt.bindString(4, "%:$escaped")
+            stmt.bindString(5, "%/$escaped")
+            while (stmt.step()) {
+                results.add(rowToNode(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun getNodesForFileIds(projectId: String, fileIds: List<String>): List<GraphNode> {
+        if (fileIds.isEmpty()) return emptyList()
+        val results = mutableListOf<GraphNode>()
+        for (chunk in fileIds.chunked(250)) {
+            val placeholders = chunk.joinToString(",") { "?" }
+            val stmt = db.prepare(
+                """
+                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                       is_test_double, in_degree, out_degree
+                FROM nodes
+                WHERE project_id = ? AND file_id IN ($placeholders)
+                ORDER BY in_degree DESC;
+                """.trimIndent()
+            )
+            try {
+                stmt.bindString(1, projectId)
+                chunk.forEachIndexed { i, fid -> stmt.bindString(2 + i, fid) }
+                while (stmt.step()) {
+                    results.add(rowToNode(stmt))
+                }
+            } finally {
+                stmt.close()
+            }
+        }
+        return results
+    }
+
     fun searchNodes(
         projectId: String,
         query: String,
