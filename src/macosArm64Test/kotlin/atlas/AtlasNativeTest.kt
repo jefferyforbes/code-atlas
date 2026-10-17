@@ -209,7 +209,7 @@ class AtlasNativeTest {
 
     @Test
     fun testCliVersionFlag() {
-        assertEquals("0.3.1", CodeGraphCli.VERSION)
+        assertEquals("0.4.0", CodeGraphCli.VERSION)
         val exitCodeVersion = CodeGraphCli.run(arrayOf("--version"))
         assertEquals(0, exitCodeVersion)
 
@@ -431,7 +431,7 @@ class AtlasNativeTest {
             assertNotNull(initResp)
             assertFalse(initResp.contains("\n"), "initialize response must be strict single-line NDJSON")
             assertTrue(initResp.contains(""""protocolVersion":"2024-11-05""""))
-            assertTrue(initResp.contains(""""version":"0.3.1""""))
+            assertTrue(initResp.contains(""""version":"0.4.0""""))
 
             val listMsg = """{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"""
             val listResp = server.processJsonRpcMessage(listMsg)

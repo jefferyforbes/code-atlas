@@ -6,7 +6,7 @@
 
 *Sub-15ms Cold-Start &middot; Ahead-Of-Time Native Binary &middot; Zero Runtime Dependencies &middot; Model Context Protocol (MCP)*
 
-[![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
 [![Kotlin](https://img.shields.io/badge/Kotlin_Native-2.2.0-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/native-overview.html)
 [![macOS](https://img.shields.io/badge/macOS-Apple_Silicon_(arm64)-000000?logo=apple&logoColor=white)](https://apple.com)
 [![Startup](https://img.shields.io/badge/Cold_Start-~3ms-00C853)](https://github.com/jefferyforbes/code-atlas)
@@ -22,12 +22,14 @@
 AI coding and design agents waste thousands of prompt tokens repeatedly reading, parsing, and grepping raw source trees and heavy design files to answer basic questions like:
 - *"What calls this function or instantiates this component?"*
 - *"If I change this interface or design token, what breaks downstream?"*
+- *"Is this Jetpack Compose composable restartable and skippable, or will it cause cascading recomposition loops?"*
 - *"Does this pull request violate Clean Architecture layers or design system invariants?"*
-- *"What files, modules, or canvas regions must be bounded so multiple agents do not collide?"*
+- *"What files, modules, composable scopes, or canvas regions must be bounded so multiple agents do not collide?"*
 
-**Atlas** solves this by providing a **sub-15ms polyglot AST and design knowledge graph engine** in a single standalone ~3.0 MB binary. Compiled ahead-of-time (AOT) via Kotlin/Native (`macosArm64`), Atlas links directly against system `libsqlite3` (`WAL` + `FTS5` + `R*Tree`), bypassing the Python virtualenv tax and JVM cold-start latency.
+**Atlas** solves this by providing a **sub-15ms polyglot AST, Jetpack Compose stability, and design knowledge graph engine** in a single standalone ~3.0 MB binary. Compiled ahead-of-time (AOT) via Kotlin/Native (`macosArm64`), Atlas links directly against system `libsqlite3` (`WAL` + `FTS5` + `R*Tree` + `WITHOUT ROWID`), bypassing the Python virtualenv tax and JVM cold-start latency.
 
-Starting in **v0.3.0**, Atlas expands beyond source code into **Figma Atlas (`atlas figma`)**: indexing Figma document snapshots and W3C Design Tokens (DTCG), querying 2D spatial layouts via R*Tree bounding boxes, running 12 deterministic SQL design audits, and synthesizing 3D Concurrency Scopes for autonomous design agents.
+- **v0.3.0 &middot; Figma Atlas (`atlas figma`)**: Indexes Figma document trees and W3C Design Tokens (DTCG), queries 2D spatial layouts via R*Tree bounding boxes, runs 12 deterministic SQL design audits, and synthesizes 3D Concurrency Scopes for design agents.
+- **v0.4.0 &middot; Jetpack Compose & KMP Stability (`atlas compose`)**: Analyzes Kotlin `@Composable` functions via single-pass AST tokenization, infers parameter stability across a 4-state join-semilattice (`STABLE < RUNTIME < UNCERTAIN < UNSTABLE`), evaluates 12 deterministic Compose rules, performs the Kotlin 2.0+ Strong Skipping Reality Check (`SILENT_WASTE` detection), runs write-site verified Compose Doctor remediation previews, detects unreferenced dead code (`atlas dead-code`), and enables path-scoped architecture auditing (`--paths`).
 
 Whether invoked directly from your shell, embedded into git pre-commit hooks, or running as a background **Model Context Protocol (MCP)** server, Atlas provides deterministic codebase and design truth with minimal token consumption.
 
@@ -38,7 +40,7 @@ Whether invoked directly from your shell, embedded into git pre-commit hooks, or
 ```mermaid
 flowchart TD
     subgraph Inputs["Polyglot Sources, Vault & Design Assets"]
-        KOTLIN["Kotlin & KMP (.kt, .kts)"]
+        KOTLIN["Kotlin & Compose (.kt, .kts)"]
         SWIFT["Swift (.swift)"]
         PYTHON["Python (.py)"]
         TS["TypeScript & JS (.ts, .tsx, .js)"]
@@ -47,47 +49,53 @@ flowchart TD
         DOCS["Obsidian Notes & Plans (.md)"]
         FIGMA["Figma Snapshots (.json, stdin)"]
         DTCG["W3C DTCG Tokens (.json)"]
+        COMPOSE_METRICS["Compose Metrics & Configs<br/>(stability_config.conf, *-composables.txt, @TraceRecomposition)"]
     end
 
     subgraph Engine["Atlas Native Core (AOT macosArm64)"]
         EXTRACT["Polyglot AST Extractor<br/>(Declarations, Calls, Imports, KMP Expect/Actual)"]
+        COMPOSE_EXTRACT["Compose Stability Extractor<br/>(Dual-Mode AST, 4-State Join Lattice, 12-Bit Violation Mask)"]
+        INDEXER["Workspace Indexer<br/>(Persistent Raw Edges, File Hash Caching, Path Scoping)"]
         MODULES["Gradle & Package Boundary Detector<br/>(Type-Safe Accessors, Projects, Modules)"]
         BRIDGE["Vault & Plan Bridge<br/>(Wikilinks, Code Spans, Plan Scopes)"]
         
         FIGMA_EXTRACT["Figma Snapshot Extractor<br/>(Vector Bloat Stripping ~85%, DTCG Token Ingestion)"]
         
-        STORE[("SQLite WAL + FTS5 + R*Tree Engine<br/>• Code Nodes & Edges Tables<br/>• Figma Nodes, Variables & Spatial R*Tree<br/>• Name Segment Vocab (WITHOUT ROWID)<br/>• FTS5 BM25 Virtual Index<br/>• Iterative FIFO BFS Path Finder")]
+        STORE[("SQLite WAL + FTS5 + R*Tree + WITHOUT ROWID Engine<br/>• Code Nodes, Raw Edges & Symbol Graph<br/>• Compose Nodes, Params & Telemetry (WITHOUT ROWID)<br/>• Figma Nodes, Variables & Spatial R*Tree<br/>• FTS5 BM25 Virtual Index<br/>• Iterative FIFO BFS Path Finder")]
         
-        SYNTH["3D Concurrency Scope Synthesizer<br/>(Code: Files, Modules, Architecture<br/>Figma: Spatial BBox, Components, Tokens)"]
-        AUDIT["Architecture Auditor<br/>(Clean Arch Inversions, BOOST-003)"]
+        SYNTH["3D Concurrency Scope Synthesizer<br/>(Code: Files, Modules, Architecture<br/>Figma: Spatial BBox, Components, Tokens<br/>Compose: Composable Functions, Shared Models, Locals)"]
+        AUDIT["Architecture Auditor<br/>(Clean Arch Inversions, BOOST-003, Dead Code Detection)"]
+        COMPOSE_ENGINE["Compose Stability Engine<br/>(12-Rule Gate 1 Audit <=95.0, Reality Check, Write-Site Safe Doctor)"]
         FIGMA_AUDIT["Figma Design Auditor<br/>(12 Deterministic SQL Invariants, Gate 1 Maturity)"]
         MEMORY["Experiential Work Memory<br/>(30-Day Exponential Decay)"]
     end
 
     subgraph Interfaces["Zero-Token-Tax Interfaces"]
-        CLI["Out-of-Process CLI<br/>(Default ≤400 Bytes Summary Mode)"]
-        MCP["Stdio JSON-RPC 2.0 MCP Server<br/>(4 Compound Tools &middot; 32KB Disk Spillover)"]
-        CI["Pre-Commit & CI Quality Gate<br/>(Exit Code 0/1 Architecture & Design Linters)"]
+        CLI["Out-of-Process CLI<br/>(atlas, atlas figma, atlas compose, atlas dead-code &middot; ≤400B Summary)"]
+        MCP["Stdio JSON-RPC 2.0 MCP Server<br/>(4 Compound Tools &middot; 32KB Disk Spillover &middot; Project Cache Auto-Resolution)"]
+        CI["Pre-Commit & CI Quality Gate<br/>(Exit Code 0/1 Architecture, Design & Compose Linters)"]
     end
 
-    Inputs --> EXTRACT & MODULES & BRIDGE & FIGMA_EXTRACT
-    EXTRACT & MODULES & BRIDGE & FIGMA_EXTRACT --> STORE
-    STORE --> SYNTH & AUDIT & FIGMA_AUDIT & MEMORY
-    SYNTH & AUDIT & FIGMA_AUDIT & MEMORY --> CLI & MCP & CI
+    Inputs --> EXTRACT & COMPOSE_EXTRACT & MODULES & BRIDGE & FIGMA_EXTRACT & INDEXER
+    EXTRACT & COMPOSE_EXTRACT & MODULES & BRIDGE & FIGMA_EXTRACT & INDEXER --> STORE
+    STORE --> SYNTH & AUDIT & COMPOSE_ENGINE & FIGMA_AUDIT & MEMORY
+    SYNTH & AUDIT & COMPOSE_ENGINE & FIGMA_AUDIT & MEMORY --> CLI & MCP & CI
 ```
 
 ### Key Pillars
 
 1. **Polyglot AST Extraction**: Native AST tokenization for Kotlin (including `@Composable`, KMP `expect`/`actual` pairs), Swift, Python, TypeScript/JavaScript, Rust, and C++ with 0 LLM token cost.
-2. **Sub-5ms Graph Traversal**: Iterative FIFO Breadth-First Search (BFS) computes directed shortest paths, caller trees, callee cones, and blast radii across 15,000+ edges in milliseconds.
-3. **3D Concurrency Scope Synthesis**: Synthesizes exact 3D boundaries (`files`, `modules`, `architecture`) for AI agent orchestration (`/architect`, `/plan`, `/teamwork`), preventing collisions between concurrent task branches.
-4. **Figma Spatial AST & 2D R\*Tree Indexing**: Parses Figma document node trees, stores geometric bounds into an SQLite `rtree` virtual table, and executes spatial overlap / containment queries (`--bounds x1,x2,y1,y2`) in $<1$ ms.
-5. **Vector Bloat Stripping & W3C DTCG Token Ingestion**: Strips heavy SVG vector path and bezier payloads (~85% reduction) during ingestion, imports DTCG design token bundles, and resolves alias DAGs with cycle detection.
-6. **12 Deterministic SQL Design Invariant Audits**: Evaluates bidirectional AutoLayout sizing (`CIRCULAR_V_FILL_IN_HUG`, `CIRCULAR_H_FILL_IN_HUG`), static containers (`STATIC_CONTAINER_FRAME`), default 100px frame heights (`DEFAULT_100PX_FRAME_HEIGHT`), minimum touch targets (`MIN_TOUCH_TARGET`), negative offset coordinates (`NEGATIVE_COORDINATES`), child width amputation (`CHILD_AMPUTATION_WIDTH`), zero emojis (`NO_EMOJI`), unbound token ratios (`UNBOUND_TOKENS`), detached gym specimens (`AD_HOC_DETACHED_SPECIMEN`), 2D canvas spatial topology (`CANVAS_SPATIAL_TOPOLOGY`), and WCAG relative luminance contrast ratios (`WCAG_CONTRAST`).
-7. **Clean Architecture & `BOOST-003` Auditor**: Enforces Clean Architecture layer boundaries (flagging illegal Domain $\to$ UI or Domain $\to$ concrete Data references) and the Single Declaration Principle (Rule 6: at most 1 top-level declaration per production file).
-8. **Experiential Work Memory**: Attaches agent debugging outcomes (`useful`, `dead_end`, `corrected`) to graph nodes, weighted by an automated 30-day exponential decay half-life.
-9. **Dual-Profile Enterprise Cache**: Stores the SQLite database in `~/Library/Caches/atlas/<repo_hash>/atlas.db` by default, keeping your git repository working tree 100% clean.
-10. **Strict Token Economy**: CLI queries default to single-line summaries ($\le 400$ bytes) to preserve agent context windows. Large query results exceeding 32 KB automatically spill to disk artifacts with lightweight URI references.
+2. **Jetpack Compose & KMP Stability Engine (`atlas compose`)**: Single-pass comment/string-masked Kotlin AST extractor inferring `@Composable` skippability, parameter stability over a 4-state join-semilattice (`STABLE < RUNTIME < UNCERTAIN < UNSTABLE`), `stability_config.conf` glob matching, Compose Compiler report ingestion, and `@TraceRecomposition` runtime telemetry.
+3. **12 Deterministic Compose Invariant Audits**: Evaluates unstable parameters, unremembered state declarations, raw collections, mutable state parameters, uncollected flows, modifier order, slot lambda conventions, heavy recomposition allocations, repeated derived state, hardcoded UI strings, and Compose layer inversions.
+4. **Strong Skipping Reality Check & Compose Doctor**: Detects `SILENT_WASTE` where Strong Skipping marks composables skippable but unstable instance churn triggers silent recompositions. Compose Doctor produces prioritized, write-site verified (`MUTATES_PROPERTY` safe) `before`/`after` remediation diffs.
+5. **Workspace Indexer & Raw Edge Persistence**: Persists raw unresolved symbol edges (`raw_symbol_edges`) across incremental runs so unchanged callers automatically link to newly added callees (`BUG-01`), with in-memory file caching and no-op short-circuiting.
+6. **Dead Code Detection & Path-Scoped Audits**: Identifies unreferenced production declarations (`atlas dead-code`) and supports targeted path filtering (`--paths`) in `atlas audit` and MCP tools for fast PR-scoped verification.
+7. **Sub-5ms Graph Traversal**: Iterative FIFO Breadth-First Search (BFS) computes directed shortest paths, caller trees, callee cones, and blast radii across 15,000+ edges in milliseconds.
+8. **3D Concurrency Scope Synthesis**: Synthesizes exact 3D boundaries (`files`, `modules`, `architecture`, `composable_functions`, `shared_state_models`, `composition_locals`) for multi-agent orchestration (`/architect`, `/plan`, `/teamwork`), preventing merge collisions.
+9. **Figma Spatial AST & 2D R\*Tree Indexing**: Parses Figma document node trees, stores geometric bounds into an SQLite `rtree` virtual table, and executes spatial overlap / containment queries (`--bounds x1,x2,y1,y2`) in $<1$ ms.
+10. **Vector Bloat Stripping & W3C DTCG Token Ingestion**: Strips heavy SVG vector path and bezier payloads (~85% reduction) during ingestion, imports DTCG design token bundles, and resolves alias DAGs with cycle detection.
+11. **12 Deterministic SQL Design Invariant Audits**: Evaluates AutoLayout geometry, static containers, default 100px frame heights, accessibility touch targets ($\ge 48\times 48\,\text{dp}$), negative coordinates, child width amputation, zero emojis, unbound token ratios, detached gym specimens, 2D canvas topology, and WCAG AA contrast ratios.
+12. **Clean Architecture & `BOOST-003` Auditor**: Enforces Clean Architecture layer boundaries (flagging illegal Domain $\to$ UI or Domain $\to$ concrete Data references) and the Single Declaration Principle (Rule 6: at most 1 top-level declaration per production file).
 
 ---
 
@@ -101,6 +109,9 @@ Measured on Apple Silicon M-Series (macOS 15 Sequoia):
 | **Memory Footprint** | **~6 MB RSS** | ~45–60 MB RSS | ~250–400 MB RSS |
 | **Code Index (812 files, 15k edges)** | **~5.2 seconds** | ~18.5 seconds | ~14.0 seconds |
 | **Incremental Re-Index (Cache Hit)** | **~0.2 seconds** | ~1.4 seconds | ~3.8 seconds |
+| **Compose Stability Extraction (50 files)** | **~18 ms** | ~240 ms | ~900 ms |
+| **Compose 12-Rule Gate 1 Audit** | **< 3 ms** | ~35 ms | ~25 ms |
+| **Compose Doctor Remediation Preview** | **< 2 ms** | ~20 ms | ~15 ms |
 | **Figma Ingestion (10k nodes, DTCG)** | **~0.4 seconds** | ~3.2 seconds | ~2.5 seconds |
 | **Figma Vector Bloat Reduction** | **~85% payload cut** | N/A | N/A |
 | **2D Spatial R\*Tree Query** | **< 1 ms** | ~12 ms | ~8 ms |
@@ -142,6 +153,7 @@ cd code-atlas
 
 # Verify installation
 atlas --version
+atlas compose --help
 atlas figma --help
 ```
 
@@ -167,13 +179,13 @@ atlas figma --help
 ### Code Commands
 
 #### 1. `atlas index`
-Incrementally scan and index repository source files and markdown contracts.
+Incrementally scan and index repository source files, markdown contracts, and Compose stability metadata. Re-resolves persisted raw symbol edges so callers link to newly added declarations.
 
 ```bash
 # Index current repository into user cache
 atlas index --project my-project
 
-# Index specific subdirectories
+# Index specific subdirectories or PR scopes
 atlas index --project my-project --paths shared/ feature/cart/
 
 # Emit full JSON metrics
@@ -222,16 +234,188 @@ atlas synthesize-scope --project my-project --target "CartScreen"
 ```
 
 #### 4. `atlas audit`
-Enforce Clean Architecture boundaries and the Single Declaration Principle (`BOOST-003`).
+Enforce Clean Architecture layer boundaries, the Single Declaration Principle (`BOOST-003`), active plan collisions, and optionally Jetpack Compose stability. Exits `0` on clean pass and `1` on violations.
 
 ```bash
+# Full workspace audit
 atlas audit --project my-project
+
+# Path-scoped audit for targeted PR verification
+atlas audit --project my-project --paths src/macosArm64Main/kotlin/atlas/engine/
+
+# Combined architecture and Compose stability audit
+atlas audit --project my-project --compose
 ```
 
 *Output:*
 ```text
 [Audit] project=my-project passed=true boost003_violations=0 layer_inversions=0 plan_3d_collisions=0
 ```
+
+#### 5. `atlas dead-code`
+Detect unreferenced top-level functions, classes, and properties with 0 incoming callers across the indexed codebase.
+
+```bash
+atlas dead-code --project my-project
+```
+
+*Output:*
+```text
+[Dead Code] project=my-project dead_symbols=3 top=[LegacyPaymentFormatter, oldUnusedHelper, StaleTokenParser]
+```
+
+---
+
+### Jetpack Compose Stability Commands (`atlas compose`)
+
+Atlas provides a dedicated native engine for Kotlin & Jetpack Compose stability analysis, compiler report verification, and automated doctor remediation.
+
+#### 1. `atlas compose index`
+Extracts Kotlin `@Composable` declarations, infers parameter stability, matches `stability_config.conf` wildcard rules, ingests Compose Compiler reports (`*-composables.txt`), and correlates `@TraceRecomposition` telemetry.
+
+```bash
+# Index Compose stability across the workspace
+atlas compose index --project android-app
+
+# Index with custom stability config and compiler reports
+atlas compose index --project android-app \
+  --stability-config app/stability_config.conf \
+  --compiler-reports build/compose_metrics/
+```
+
+*Output:*
+```text
+[Atlas Compose] project=android-app composables=142 skippable=128 compiler_upgraded=14 traces=0
+```
+
+#### 2. `atlas compose query`
+Inspect composable skippability, analyze cascading recomposition cones, or trace root causes of unstable types.
+
+```bash
+# General Compose stability summary
+atlas compose query --project android-app --target "ProductCard"
+
+# Cascade query: identify downstream composables forced to recompose
+atlas compose query --project android-app --action cascade --target "ProductCard" --depth 5
+
+# Blame query: trace upstream caller/type causing non-skippability
+atlas compose query --project android-app --action blame --target "CheckoutScreen"
+```
+
+*Output:*
+```text
+[Compose Query: summary] project=android-app composables=1 skippable=0 (0.0%) unstable_params=1 cascade=4 blame=1
+```
+
+#### 3. `atlas compose audit`
+Run 12 deterministic Compose invariant audits with Gate 1 compliance scoring ($\le 95.0$ ceiling, $\ge 80.0$ passing threshold), Strong Skipping Reality Check, and Remaining 5% Polish Delta. Exits `0` on pass and `1` on failure.
+
+```bash
+# Run Compose Gate 1 stability audit
+atlas compose audit --project android-app
+
+# Audit with Strong Skipping disabled (Kotlin 1.9 compatibility)
+atlas compose audit --project android-app --no-strong-skipping
+```
+
+*Output:*
+```text
+[Compose Audit] project=android-app status=PASS score=91.5/100 (Gate1<=95.0) composables=142 violations=3 strong_skipping=true
+```
+
+*JSON output (`--json`):*
+```json
+{
+  "projectId": "android-app",
+  "overallScore": 91.5,
+  "status": "PASS",
+  "totalComposables": 142,
+  "skippableCount": 128,
+  "skippablePercentage": 90.1,
+  "realityCheckSummary": {
+    "confirmed": 1,
+    "falseAlarm": 2,
+    "silentWaste": 0,
+    "healthy": 128
+  },
+  "violations": [
+    {
+      "ruleId": "COLLECTION_PARAM_UNSTABLE",
+      "severity": "WARNING",
+      "composableName": "ProductList",
+      "message": "Parameter 'items' has unstable collection interface 'List<ProductItem>'",
+      "filePath": "src/main/kotlin/ui/ProductList.kt",
+      "line": 42
+    }
+  ],
+  "remainingPolishDelta": [
+    "Replace standard List<T> with ImmutableList<T> or @Immutable wrapper",
+    "Verify modifier parameter ordering on secondary sub-composables",
+    "Optical kerning and tabular numeral alignment on dynamic data labels",
+    "Micro-interaction spring physics and capacitive press state damping"
+  ]
+}
+```
+
+#### 4. `atlas compose doctor`
+Synthesize write-site safe automated remediation previews. Verifies that fields are not mutated (`MUTATES_PROPERTY` check) before recommending `@Immutable`, and outputs exact Kotlin `before`/`after` code snippets.
+
+```bash
+# Generate prioritized Compose stability fixes
+atlas compose doctor --project android-app --limit 5
+
+# Target a specific composable
+atlas compose doctor --project android-app --target "OrderSummaryCard"
+```
+
+*Output:*
+```text
+[Compose Doctor] project=android-app mode=ESTIMATED prescriptions=3 top_rule=COLLECTION_PARAM_UNSTABLE
+```
+
+#### 5. `atlas compose synthesize-scope`
+Synthesizes Compose-aware 3D Concurrency Scopes (`composable_functions`, `shared_stable_models`, `composition_locals`) around seed composables to prevent concurrent coding agents from causing merge collisions on shared UI state models or theme tokens.
+
+```bash
+atlas compose synthesize-scope --project android-app --target "CartScreen"
+```
+
+*Output:*
+```text
+[Compose 3D Scope] project=android-app files=6 shared_models=2 locals=1 parallel_safe=true
+```
+
+---
+
+## The 12 Deterministic Compose Invariant Audits
+
+Atlas evaluates Jetpack Compose and Compose Multiplatform codebases against 12 deterministic stability and architecture invariants:
+
+| Rule ID | Category | Severity | Description & Enforcement Standard |
+| :--- | :--- | :--- | :--- |
+| `UNSTABLE_PARAM` | Stability | `ERROR` | Composable is marked restartable but non-skippable due to an unstable parameter type without `@Stable`/`@Immutable` or config match. |
+| `FORCE_INFER_SKIPPABLE` | Stability | `INFO` | Parameter is typed with a concrete class that can be inferred stable at runtime; suggests explicit configuration or annotation. |
+| `COLLECTION_PARAM_UNSTABLE` | Stability | `WARNING` | Parameter is typed as standard standard Java/Kotlin collection (`List`, `Set`, `Map`) without `ImmutableList` or `@Immutable`. |
+| `MUTABLE_STATE_PARAM` | State Hygiene | `ERROR` | Parameter typed directly as `MutableState<T>`; state must be hoisted via value + action lambda (`(T) -> Unit`). |
+| `STATE_DECL_NOT_REMEMBERED` | State Hygiene | `ERROR` | `mutableStateOf(...)` or `mutableStateListOf(...)` instantiated directly in composable body without enclosing `remember`. |
+| `FLOW_NOT_COLLECTED_AS_STATE` | State Hygiene | `WARNING` | `StateFlow` or `Flow` referenced directly in composable body without `collectAsStateWithLifecycle()` or `collectAsState()`. |
+| `MODIFIER_NOT_FIRST_DEFAULT` | API Design | `WARNING` | Composable accepts a `Modifier` that is not the first optional parameter or fails to provide `= Modifier` default. |
+| `LAMBDA_TRAILING_SLOT` | API Design | `INFO` | Composable with multiple lambda parameters does not order trailing slot content lambda as the final parameter. |
+| `HEAVY_ALLOCATION_IN_RECOMPOSITION`| Performance | `WARNING` | Complex computation, regex compilation, date formatters, or collection filtering executed in body without `remember`. |
+| `REPEATED_DERIVED_STATE` | Performance | `INFO` | Dependent state computations recalculated on every recomposition instead of being cached with `derivedStateOf`. |
+| `HARDCODED_UI_STRING` | Internationalization | `WARNING` | Raw string literals in UI composable body instead of `stringResource(...)` or `Res.string`. |
+| `LAYER_INVERSION_COMPOSE` | Architecture | `ERROR` | Leaf presentation sub-composable directly imports database DAO, network client, or repository instead of hoisted state. |
+
+### Strong Skipping Reality Check
+
+Under Kotlin 2.0+ Strong Skipping mode, Atlas classifies every composable into four empirical behavioral categories:
+
+| Status | Definition & Behavioral Consequence |
+| :--- | :--- |
+| `CONFIRMED` | **Real Recomposition Hazard**: Unstable parameter instance identity changes on every parent recomposition, triggering child recomposition despite Strong Skipping. |
+| `FALSE_ALARM` | **Safe Unstable Parameter**: Parameter type is theoretically unstable, but callers pass stable references or hoisted lambdas; no redundant recomposition occurs. |
+| `SILENT_WASTE` | **Invisible Waste**: Strong Skipping marks the composable skippable, but unstable parameter churn continuously triggers silent recompositions with 0 compiler warnings. |
+| `HEALTHY` | **Fully Skippable**: Composable contains only stable primitives, `@Immutable` models, or stable lambdas, correctly skipping when inputs are unchanged. |
 
 ---
 
@@ -293,32 +477,6 @@ atlas figma audit --project relay --file LVhI2ueu8A6igT14N8m1MM
 [Figma Audit] project=relay file=LVhI2ueu8A6igT14N8m1MM passed=true score=95/100 violations=0 polish_delta=4
 ```
 
-*JSON output (`--json`):*
-```json
-{
-  "fileKey": "LVhI2ueu8A6igT14N8m1MM",
-  "passed": false,
-  "maturityScore": 82.5,
-  "polishDelta": [
-    "Resolve 2 blocking invariant violation(s) to reach 90+ Gate 1 maturity",
-    "Optical kerning and tabular numeral alignment on dynamic data labels",
-    "Responsive fluid auto-wrap transitions between mobile and tablet breakpoints",
-    "Micro-interaction spring physics and capacitive press state damping",
-    "Dynamic multi-line text wrapping resilience and localized string safety"
-  ],
-  "violations": [
-    {
-      "rule": "MIN_TOUCH_TARGET",
-      "nodeId": "12:34",
-      "nodeName": "IconButton",
-      "message": "Interactive control 'IconButton' has hitbox dimensions 24.0x24.0 (< 48x48dp) without a >= 48dp AutoLayout container",
-      "severity": "ERROR"
-    }
-  ],
-  "totalNodes": 1420
-}
-```
-
 #### 4. `atlas figma synthesize-scope`
 Synthesizes 3D Concurrency Scope (`spatial_bounds`, `component_instances`, `variable_tokens`) around seed nodes to prevent concurrent agents from colliding on canvas regions, component hierarchies, or shared design tokens.
 
@@ -352,18 +510,43 @@ Atlas evaluates Figma documents against 12 non-negotiable design system invarian
 | `CANVAS_SPATIAL_TOPOLOGY` | Canvas Topology | Top-level canvas sections violating the 2D orthogonal matrix grid (Row 1 User Flows at $y=0$, Design System column at $y=5000, x=0$, Gym Arenas at $y\ge 5000, x\ge 4000$). |
 | `WCAG_CONTRAST` | Accessibility (WCAG) | Text nodes with color contrast ratio $< 4.5:1$ against immediate background ($< 3.0:1$ for large text $\ge 24\,\text{px}$). |
 
-### Maturity Scoring
-- Calculated on a **0–100 scale** with weighted point deductions based on violation severity.
-- **Gate 1 Passing Threshold**: Score $\ge 80.0$ and 0 critical violations.
-- **Gate 1 Maturity Standard**: Active remediation targets $\ge 95.0$, with remaining polish items documented.
-
 ---
 
 ## Model Context Protocol (MCP) Integration
 
-Atlas exposes a standard **JSON-RPC 2.0 stdio MCP server** with 4 tools (`codegraph_query`, `codegraph_audit`, `figma_audit`, `figma_scope`) conforming strictly to the $\le 15$ tools ceiling, $\le 25$-word parameter descriptions, and 32 KB disk spillover safeguards.
+Atlas exposes a standard **JSON-RPC 2.0 stdio MCP server** with strictly **4 compound tools** (`codegraph_query`, `codegraph_audit`, `figma_audit`, `figma_scope`) conforming to the $\le 15$ tools ceiling, $\le 25$-word parameter descriptions, automatic project cache resolution, and 32 KB disk spillover safeguards.
 
-### Claude Desktop Configuration
+### MCP Tools & Action Taxonomy
+
+1. **`codegraph_query`**: Polyglot code, Compose stability, and graph querying.
+   - `search`: Full-text BM25 symbol search.
+   - `symbol`: Retrieve declaration coordinates and live source slice.
+   - `callers`: Traverse incoming call hierarchy.
+   - `callees`: Traverse outgoing invocation tree.
+   - `impact`: Compute downstream blast-radius cone.
+   - `god_nodes`: Identify high-centrality architectural bottlenecks.
+   - `shortest_path`: Compute shortest directed path between two symbols.
+   - `status`: Graph summary statistics and node counts.
+   - `compose_summary`: Composable skippability, parameters, and violation summary.
+   - `compose_cascade`: Downstream recomposition cascade blast radius.
+   - `compose_blame`: Upstream root cause trace for unstable types.
+
+2. **`codegraph_audit`**: Architectural compliance, Compose audits, scoping, and maintenance.
+   - `verify_architecture`: Clean Architecture layer verification and `BOOST-003` audit (supports path scoping via `targets`).
+   - `synthesize_3d_scope`: Synthesize 3D Concurrency Scope (`files`, `modules`, `architecture`).
+   - `dead_code`: Detect unreferenced production symbols with 0 callers.
+   - `audit_compose`: 12-rule Compose Gate 1 audit with Strong Skipping Reality Check.
+   - `compose_doctor`: Synthesize write-site safe Compose remediation previews.
+   - `synthesize_compose_scope`: Synthesize Compose 3D Concurrency Scope.
+   - `record_memory`: Store experiential learning outcomes with 30-day exponential decay.
+   - `sync_index`: Incrementally re-index files or directories into graph cache.
+
+3. **`figma_audit`**: Run 12 deterministic SQL design audits over Figma file snapshots.
+4. **`figma_scope`**: Synthesize 2D spatial and design token 3D Concurrency Scopes.
+
+### Configuration
+
+#### Claude Desktop
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
@@ -377,7 +560,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-### JetBrains Air / Antigravity Configuration
+#### JetBrains Air / Antigravity
 Add to `.air/mcp.json` or Antigravity MCP settings:
 
 ```json
@@ -395,7 +578,7 @@ Add to `.air/mcp.json` or Antigravity MCP settings:
 
 ## Project Structure & Architecture Rules
 
-This repository enforces the **Single Declaration Principle (`BOOST-003`)**: every source file contains strictly **one** top-level class, object, or function matching its filename, with clean imports.
+This repository enforces the **Single Declaration Principle (`BOOST-003`)**: every source file contains strictly **one** top-level class, object, or function matching its filename, with clean top-level imports.
 
 ```text
 src/macosArm64Main/kotlin/atlas/
@@ -403,27 +586,36 @@ src/macosArm64Main/kotlin/atlas/
 ├── bridge/
 │   └── VaultPlanBridge.kt             # Obsidian [[Wikilinks]] & plans/ markdown extraction
 ├── cli/
-│   └── CodeGraphCli.kt                # Argument parsing, Figma routing & summary truncation (≤400 bytes)
+│   └── CodeGraphCli.kt                # Argument parsing, Figma & Compose routing, summary truncation (≤400B)
 ├── config/
 │   └── CacheProfileResolver.kt        # Enterprise user cache vs in-repo .atlas/ resolution
 ├── db/
-│   ├── NativeSqliteDatabase.kt        # C-interop SQLite3 connection wrapper
+│   ├── NativeSqliteDatabase.kt        # C-interop SQLite3 connection wrapper & savepoints
 │   ├── NativeSqliteStatement.kt       # Compiled prepared statement wrapper
-│   └── SqliteGraphStore.kt            # Schema, FTS5 BM25, 2D Spatial R*Tree, and iterative FIFO BFS
+│   └── SqliteGraphStore.kt            # Schema, FTS5 BM25, 2D Spatial R*Tree, WITHOUT ROWID Compose tables
 ├── engine/
-│   ├── ArchitectureAuditor.kt         # Clean Architecture & BOOST-003 audit rules
+│   ├── ArchitectureAuditor.kt         # Clean Architecture, BOOST-003 & dead code audit rules
+│   ├── ComposeStabilityEngine.kt      # 12-rule Compose Gate 1 scoring, Reality Check & write-site safe Doctor
 │   ├── FigmaDesignAuditor.kt          # 12 deterministic SQL design audits & Gate 1 maturity scoring
-│   ├── ScopeSynthesizer.kt            # 3D Concurrency Scope synthesizer (Code & Figma)
-│   └── WorkMemoryStore.kt             # 30-day exponential decay work memory
+│   ├── ScopeSynthesizer.kt            # 3D Concurrency Scope synthesizer (Code, Figma, Compose)
+│   ├── WorkMemoryStore.kt             # 30-day exponential decay work memory
+│   └── WorkspaceIndexer.kt            # Incremental indexer with persistent raw edge re-resolution
 ├── extract/
+│   ├── ComposeStabilityExtractor.kt   # Dual-mode Kotlin Compose AST extractor & 4-state stability lattice
 │   ├── FigmaSnapshotExtractor.kt      # Figma AST streaming parser & ~85% vector bloat stripper
 │   ├── ModuleBoundaryDetector.kt      # Gradle type-safe accessors & KMP expect/actual
 │   ├── NameSegmentTokenizer.kt        # CamelCase & snake_case identifier tokenizer
 │   ├── PolyglotAstExtractor.kt        # Kotlin, Swift, Python, TS, Rust, C++ extractors
 │   └── SemioticLayerClassifier.kt     # FOROALFA semiotic & architectural layer classifier
 ├── mcp/
-│   └── CodeGraphMcpServer.kt          # Stdio JSON-RPC 2.0 MCP server with 32KB spillover
-├── model/                             # Data models
+│   └── CodeGraphMcpServer.kt          # 4-tool Stdio JSON-RPC 2.0 MCP server with 32KB spillover & cache resolution
+├── model/                             # Domain data models (BOOST-003 compliant)
+│   ├── Compose3DScope.kt              # Compose 3D Concurrency Scope domain model
+│   ├── ComposeAuditResult.kt          # Compose audit scorecard & violation summaries
+│   ├── ComposeDoctorReport.kt         # Compose Doctor remediation prescriptions
+│   ├── ComposeNodeRecord.kt           # Composable AST node domain model
+│   ├── ComposeParamRecord.kt          # Composable parameter stability record
+│   ├── ComposeQueryResult.kt          # Compose query result model
 │   ├── Figma3DScope.kt                # Figma 3D Concurrency Scope domain model
 │   ├── FigmaAuditResult.kt            # Figma audit scorecard & violation summaries
 │   ├── FigmaDocument.kt               # Figma document metadata
@@ -438,7 +630,7 @@ src/macosArm64Main/kotlin/atlas/
 │   ├── GraphEdge.kt                   # Code AST graph edge
 │   └── ...                            # AuditReport, FileRecord, LiveSourceSlice, etc.
 └── util/
-    ├── PlatformFiles.kt               # Pure POSIX filesystem utilities
+    ├── PlatformFiles.kt               # Pure POSIX filesystem utilities with symlink escape guards
     └── Sha256.kt                      # Pure Kotlin FIPS 180-4 SHA-256 implementation
 ```
 
@@ -446,10 +638,10 @@ src/macosArm64Main/kotlin/atlas/
 
 ## Testing
 
-Atlas is covered by a native unit test suite testing cryptographic primitives, tokenizer logic, semiotic classifiers, Gradle module detectors, polyglot extractors, SQLite WAL/FTS5/R*Tree transactions, cyclic graph BFS pathing, Figma snapshot extraction with vector stripping, DTCG token ingestion, and the 12 deterministic SQL design audits:
+Atlas is covered by an extensive native test suite testing cryptographic primitives, tokenizer logic, semiotic classifiers, Gradle module detectors, polyglot extractors, SQLite WAL/FTS5/R*Tree transactions, cyclic graph BFS pathing, Figma snapshot extraction with vector stripping, DTCG token ingestion, the 12 deterministic SQL design audits, the Compose 4-state stability lattice and 12-rule auditor, and MCP CLI integration:
 
 ```bash
-# Run all native unit tests
+# Run all native unit and integration tests
 ./gradlew macosArm64Test
 ```
 

@@ -466,4 +466,236 @@ class EngineAndMcpTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testUnchangedCallerReResolutionAndStalePlanEdgeCleanup() {
+        val pid = getpid()
+        val wsRoot = "/tmp/test_atlas_bug01_$pid"
+        val dbPath = "/tmp/test_atlas_bug01_$pid.db"
+        PlatformFiles.delete(dbPath)
+        PlatformFiles.mkdirs("$wsRoot/src")
+        PlatformFiles.mkdirs("$wsRoot/plans")
+
+        // Step 1: Index Caller.kt when Callee.kt does NOT exist yet
+        PlatformFiles.writeText(
+            "$wsRoot/src/Caller.kt",
+            """
+            package sample
+            class Caller {
+                fun invokeLater() {
+                    newlyAddedCallee()
+                }
+            }
+            """.trimIndent()
+        )
+        PlatformFiles.writeText(
+            "$wsRoot/src/OldScoped.kt",
+            """
+            package sample
+            class OldScoped {
+                fun unusedHelper() {}
+            }
+            """.trimIndent()
+        )
+        PlatformFiles.writeText(
+            "$wsRoot/plans/active_plan.md",
+            """
+            ---
+            status: active
+            scope:
+              files:
+                - src/OldScoped.kt
+                - src/Callee.kt
+            ---
+            # Active Plan
+            Scopes `OldScoped` and `newlyAddedCallee`.
+            """.trimIndent()
+        )
+
+        val server = CodeGraphMcpServer(workspaceRoot = wsRoot, customDbPath = dbPath)
+        try {
+            server.indexWorkspace("bug01")
+            assertEquals(null, server.store.getNode("bug01", "newlyAddedCallee"))
+
+            // Step 2: Add Callee.kt WITHOUT modifying Caller.kt or active_plan.md, and rename OldScoped -> RenamedScoped
+            PlatformFiles.writeText(
+                "$wsRoot/src/Callee.kt",
+                """
+                package sample
+                fun newlyAddedCallee() {}
+                """.trimIndent()
+            )
+            PlatformFiles.writeText(
+                "$wsRoot/src/OldScoped.kt",
+                """
+                package sample
+                class RenamedScoped
+                """.trimIndent()
+            )
+
+            val incRes = server.indexWorkspace("bug01")
+            // Caller.kt and active_plan.md were unchanged (skipped), Callee.kt and OldScoped.kt were indexed
+            assertEquals(2, incRes["files_indexed"]?.jsonPrimitive?.int)
+            assertEquals(2, incRes["files_skipped"]?.jsonPrimitive?.int)
+
+            // BUG-01: Unchanged Caller#invokeLater must now have a resolved CALLS edge to Callee#newlyAddedCallee!
+            val calleeNode = server.store.getNode("bug01", "newlyAddedCallee")
+            assertNotNull(calleeNode, "newlyAddedCallee should be indexed")
+            val callersOfNew = server.store.getCallers("bug01", calleeNode.nodeId, depth = 1)
+            assertTrue(
+                callersOfNew.any { it.name == "invokeLater" },
+                "Unchanged Caller#invokeLater must resolve CALLS edge to newlyAddedCallee via persisted raw_symbol_edges"
+            )
+
+            // BUG-14: Unchanged active_plan.md must link to RenamedScoped and newlyAddedCallee and NOT retain stale edges to OldScoped
+            val planEdges = server.store.listEdges("bug01", listOf("PLAN_SCOPES_FILE"))
+            assertTrue(planEdges.any { it.targetNodeId.endsWith("#newlyAddedCallee") })
+            assertTrue(planEdges.any { it.targetNodeId.endsWith("#RenamedScoped") })
+            assertTrue(planEdges.none { it.targetNodeId.endsWith("#OldScoped") })
+
+            // Dead code detection: InvokeLater is uncalled, RenamedScoped is uncalled, newlyAddedCallee IS called (inDegree >= 1)
+            val deadNodes = server.auditor.detectDeadCode("bug01")
+            val deadNames = deadNodes.map { it.name }.toSet()
+            assertFalse("newlyAddedCallee" in deadNames, "Called function must not be reported as dead code")
+            assertTrue("invokeLater" in deadNames, "Uncalled function should be reported in dead_code")
+
+            // CLI dead-code command returns 0
+            val deadExit = CodeGraphCli.run(arrayOf("dead-code", "--project", "bug01", "--workspace", wsRoot, "--db", dbPath))
+            assertEquals(0, deadExit)
+        } finally {
+            server.store.close()
+            PlatformFiles.delete("$wsRoot/src/Caller.kt")
+            PlatformFiles.delete("$wsRoot/src/Callee.kt")
+            PlatformFiles.delete("$wsRoot/src/OldScoped.kt")
+            PlatformFiles.delete("$wsRoot/plans/active_plan.md")
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testCliAuditExitCodeAndSymlinkEscapeAndSpilloverUniqueness() {
+        val pid = getpid()
+        val wsRoot = "/tmp/test_atlas_cli_audit_$pid"
+        val outsideDir = "/tmp/test_atlas_outside_$pid"
+        val dbPath = "/tmp/test_atlas_cli_audit_$pid.db"
+        PlatformFiles.delete(dbPath)
+        PlatformFiles.mkdirs("$wsRoot/src")
+        PlatformFiles.mkdirs(outsideDir)
+
+        PlatformFiles.writeText("$outsideDir/SecretOutside.kt", "package outside\nclass SecretOutside")
+        symlink(outsideDir, "$wsRoot/src/escaped_link")
+
+        // Write a file with 2 top-level classes to trigger BOOST-003 violation
+        PlatformFiles.writeText(
+            "$wsRoot/src/ViolatingFile.kt",
+            """
+            package sample
+            class FirstTopLevel
+            class SecondTopLevel
+            """.trimIndent()
+        )
+
+        val server = CodeGraphMcpServer(workspaceRoot = wsRoot, customDbPath = dbPath)
+        try {
+            server.indexWorkspace("audit_proj")
+            // Symlink pointing outside workspaceRoot must NOT be indexed
+            assertEquals(null, server.store.getNode("audit_proj", "SecretOutside"))
+
+            // BUG-03: CLI `audit` must return exit code 1 when violations exist (both summary and --json modes)
+            val exitSummary = CodeGraphCli.run(arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath))
+            assertEquals(1, exitSummary, "atlas audit must return exit code 1 when passed=false in summary mode")
+
+            val exitJson = CodeGraphCli.run(arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath, "--json"))
+            assertEquals(1, exitJson, "atlas audit must return exit code 1 when passed=false in --json mode")
+
+            // Scoped audit on a clean subpath must pass (exit code 0) while scoped audit on src/ViolatingFile.kt fails (exit code 1)
+            PlatformFiles.writeText(
+                "$wsRoot/src/CleanFile.kt",
+                """
+                package sample
+                class CleanSingleDeclaration
+                """.trimIndent()
+            )
+            server.indexWorkspace("audit_proj")
+            val exitScopedPass = CodeGraphCli.run(
+                arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath, "--paths", "src/CleanFile.kt")
+            )
+            assertEquals(0, exitScopedPass, "Scoped atlas audit on clean file must return exit code 0")
+
+            val exitScopedFail = CodeGraphCli.run(
+                arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath, "--paths", "src/ViolatingFile.kt")
+            )
+            assertEquals(1, exitScopedFail, "Scoped atlas audit on violating file must return exit code 1")
+
+            // Verify resolveProjectWorkspace resolves ~/Development/<Project> case-insensitively
+            val resolvedDevWs = CacheProfileResolver.resolveProjectWorkspace("/", "code-atlas")
+            if (PlatformFiles.isDirectory("${PlatformFiles.userHome()}/Development/code-atlas")) {
+                assertTrue(resolvedDevWs.endsWith("/Development/code-atlas"))
+            }
+
+            // Verify figma-shortest-path and figma shortest-path CLI subcommands execute cleanly
+            val figmaShort1 = CodeGraphCli.run(arrayOf("figma-shortest-path", "--db", dbPath, "--from", "n1", "--to", "n2"))
+            assertEquals(0, figmaShort1)
+            val figmaShort2 = CodeGraphCli.run(arrayOf("figma", "shortest-path", "--db", dbPath, "--from", "n1", "--to", "n2"))
+            assertEquals(0, figmaShort2)
+
+            // BUG-16: Verify multiple >32KB tool calls within the same second generate distinct spillover filenames
+            val bulkNodes = (1..450).map { i ->
+                GraphNode(
+                    nodeId = "audit_proj:src/Bulk$i.kt#BulkSymbolNameWithLongIdentifier_$i",
+                    projectId = "audit_proj",
+                    fileId = "audit_proj:src/Bulk$i.kt",
+                    name = "BulkSymbolNameWithLongIdentifier_$i",
+                    qualifiedName = "com.example.very.deep.package.structure.module$i.BulkSymbolNameWithLongIdentifier_$i",
+                    kind = "class",
+                    signature = "class BulkSymbolNameWithLongIdentifier_$i(val parameterOne: String, val parameterTwo: Int)"
+                )
+            }
+            val firstNode = server.store.getNode("audit_proj", "FirstTopLevel")
+            assertNotNull(firstNode)
+            val bulkEdges = (1..450).map { i ->
+                GraphEdge(
+                    edgeId = "audit_proj:bulk_edge_$i",
+                    projectId = "audit_proj",
+                    sourceNodeId = firstNode.nodeId,
+                    targetNodeId = bulkNodes[i - 1].nodeId,
+                    edgeType = "CALLS"
+                )
+            }
+            server.store.upsertNodesAndEdges("audit_proj", bulkNodes, bulkEdges)
+
+            val spill1 = server.callTool(
+                "codegraph_query",
+                buildJsonObject {
+                    put("action", "impact")
+                    put("project", "audit_proj")
+                    put("target", "FirstTopLevel")
+                    put("depth", 2)
+                }
+            )
+            val spill2 = server.callTool(
+                "codegraph_query",
+                buildJsonObject {
+                    put("action", "impact")
+                    put("project", "audit_proj")
+                    put("target", "FirstTopLevel")
+                    put("depth", 2)
+                }
+            )
+            val uri1 = spill1["artifact_uri"]?.jsonPrimitive?.content
+            val uri2 = spill2["artifact_uri"]?.jsonPrimitive?.content
+            assertNotNull(uri1)
+            assertNotNull(uri2)
+            assertTrue(uri1 != uri2, "Multiple >32KB calls in the same second must produce distinct spillover artifact URIs")
+            PlatformFiles.delete(uri1)
+            PlatformFiles.delete(uri2)
+        } finally {
+            server.close()
+            PlatformFiles.delete("$wsRoot/src/escaped_link")
+            PlatformFiles.delete("$wsRoot/src/ViolatingFile.kt")
+            PlatformFiles.delete("$wsRoot/src/CleanFile.kt")
+            PlatformFiles.delete("$outsideDir/SecretOutside.kt")
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }

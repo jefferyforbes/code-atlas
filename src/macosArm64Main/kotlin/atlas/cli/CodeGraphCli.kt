@@ -13,7 +13,7 @@ import kotlinx.serialization.json.*
  */
 class CodeGraphCli {
     companion object {
-        const val VERSION = "0.3.1"
+        const val VERSION = "0.4.0"
         const val SUMMARY_CEILING_BYTES = 400
 
         private val jsonPretty = Json { prettyPrint = true }
@@ -21,7 +21,7 @@ class CodeGraphCli {
 
         fun run(argv: Array<String>): Int {
             if (argv.contains("--version") || argv.contains("-v") || (argv.isNotEmpty() && argv[0] == "version") ||
-                (argv.size >= 2 && argv[0] == "figma" && (argv[1] == "version" || argv[1] == "--version" || argv[1] == "-v"))
+                (argv.size >= 2 && (argv[0] == "figma" || argv[0] == "compose") && (argv[1] == "version" || argv[1] == "--version" || argv[1] == "-v"))
             ) {
                 val isJson = argv.contains("--json")
                 if (isJson) {
@@ -35,7 +35,9 @@ class CodeGraphCli {
                 return 0
             }
 
-            if (argv.isEmpty() || argv.contains("--help") || argv.contains("-h") || (argv.size == 1 && argv[0] == "figma")) {
+            if (argv.isEmpty() || argv.contains("--help") || argv.contains("-h") ||
+                (argv.size == 1 && (argv[0] == "figma" || argv[0] == "compose"))
+            ) {
                 printHelp()
                 return 0
             }
@@ -59,29 +61,61 @@ class CodeGraphCli {
             var isStdin = false
             var boundsArg: String? = null
             val seeds = mutableListOf<String>()
+            var stabilityConfigPath: String? = null
+            var compilerReportsDir: String? = null
+            var traceLogPath: String? = null
+            var strongSkipping = true
+            var limit = 10
+            var isComposeAuditFlag = false
 
             var idx = 0
             while (idx < argv.size) {
                 val arg = argv[idx]
                 when {
                     arg == "figma" -> subsystem = "figma"
-                    (subsystem == "figma" || arg == "figma") && (arg == "index" || arg == "query" || arg == "audit" || arg == "synthesize-scope" || arg == "version") -> {
+                    arg == "compose" -> subsystem = "compose"
+                    (subsystem == "figma" || arg == "figma") && (arg == "index" || arg == "query" || arg == "audit" || arg == "synthesize-scope" || arg == "shortest-path" || arg == "shortest_path" || arg == "version") -> {
+                        if (arg == "shortest-path" || arg == "shortest_path") {
+                            command = "query"
+                            action = "shortest_path"
+                        } else {
+                            command = arg
+                        }
+                    }
+                    (subsystem == "compose" || arg == "compose") && (arg == "index" || arg == "query" || arg == "audit" || arg == "doctor" || arg == "synthesize-scope" || arg == "version") -> {
                         command = arg
                     }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "serve-mcp" || arg == "version" -> {
-                        command = arg
+                    arg == "figma-shortest-path" -> {
+                        subsystem = "figma"
+                        command = "query"
+                        action = "shortest_path"
                     }
+                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "dead-code" || arg == "dead_code" || arg == "serve-mcp" || arg == "version" -> {
+                        command = if (arg == "dead_code") "dead-code" else arg
+                    }
+                    arg == "--compose" -> isComposeAuditFlag = true
                     arg == "--project" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> project = argv[++idx]
                     arg == "--workspace" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> workspace = argv[++idx]
                     arg == "--db" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> customDb = argv[++idx]
                     arg == "--cache-profile" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> cacheProfile = argv[++idx]
-                    arg == "--target" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> target = argv[++idx]
+                    (arg == "--target" || arg == "--from") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> target = argv[++idx]
                     arg == "--action" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> action = argv[++idx]
-                    arg == "--secondary-target" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> secondaryTarget = argv[++idx]
+                    (arg == "--secondary-target" || arg == "--to") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> secondaryTarget = argv[++idx]
                     arg == "--depth" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> depth = argv[++idx].toIntOrNull() ?: 2
+                    arg == "--limit" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> limit = argv[++idx].toIntOrNull() ?: 10
                     arg == "--file" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> fileKey = argv[++idx]
                     arg == "--snapshot" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> snapshotPath = argv[++idx]
                     arg == "--tokens" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> tokensPath = argv[++idx]
+                    arg == "--stability-config" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> stabilityConfigPath = argv[++idx]
+                    arg == "--compiler-reports" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> compilerReportsDir = argv[++idx]
+                    arg == "--trace-log" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> traceLogPath = argv[++idx]
+                    arg == "--strong-skipping" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> {
+                        strongSkipping = argv[++idx].lowercase() != "false"
+                    }
+                    arg.startsWith("--strong-skipping=") -> {
+                        strongSkipping = arg.substringAfter('=').lowercase() != "false"
+                    }
+                    arg == "--no-strong-skipping" -> strongSkipping = false
                     arg == "--stdin" -> isStdin = true
                     arg == "--bounds" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> boundsArg = argv[++idx]
                     arg == "--seeds" -> {
@@ -103,8 +137,8 @@ class CodeGraphCli {
                         }
                         continue
                     }
-                    !arg.startsWith("--") && command.isEmpty() && arg != "figma" -> command = arg
-                    !arg.startsWith("--") && target.isEmpty() && arg != "figma" -> target = arg
+                    !arg.startsWith("--") && command.isEmpty() && arg != "figma" && arg != "compose" -> command = arg
+                    !arg.startsWith("--") && target.isEmpty() && arg != "figma" && arg != "compose" -> target = arg
                 }
                 idx++
             }
@@ -136,6 +170,26 @@ class CodeGraphCli {
                         depth = depth,
                         boundsArg = boundsArg,
                         seeds = seeds,
+                        isJson = isJson
+                    )
+                }
+
+                if (subsystem == "compose" || (command == "audit" && isComposeAuditFlag) || command == "doctor") {
+                    val effCmd = if (command == "audit" && isComposeAuditFlag) "audit" else command
+                    return runComposeCommand(
+                        server = server,
+                        command = effCmd,
+                        project = project,
+                        action = if (action == "search") "summary" else action,
+                        target = target,
+                        paths = paths,
+                        seeds = seeds,
+                        depth = depth,
+                        limit = limit,
+                        stabilityConfigPath = stabilityConfigPath,
+                        compilerReportsDir = compilerReportsDir,
+                        traceLogPath = traceLogPath,
+                        strongSkipping = strongSkipping,
                         isJson = isJson
                     )
                 }
@@ -182,20 +236,45 @@ class CodeGraphCli {
                         return 0
                     }
                     "audit" -> {
+                        val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
                         val toolArgs = buildJsonObject {
                             put("action", "verify_architecture")
                             put("project", project)
+                            if (filterPaths.isNotEmpty()) {
+                                putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                            }
                         }
                         val res = server.callTool("codegraph_audit", toolArgs)
                         val data = loadSpilledData(res)
+                        val bViolations = (data["single_declaration_violations"] ?: data["singleDeclarationViolations"])?.jsonArray?.size ?: 0
+                        val lInversions = (data["layer_inversions"] ?: data["layerInversions"])?.jsonArray?.size ?: 0
+                        val pCollisions = (data["plan_3d_collisions"] ?: data["plan3dCollisions"])?.jsonArray?.size ?: 0
+                        val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: (bViolations == 0 && lInversions == 0 && pCollisions == 0)
                         val text = if (isJson) {
                             jsonPretty.encodeToString(data)
                         } else {
-                            val bViolations = (data["single_declaration_violations"] ?: data["singleDeclarationViolations"])?.jsonArray?.size ?: 0
-                            val lInversions = (data["layer_inversions"] ?: data["layerInversions"])?.jsonArray?.size ?: 0
-                            val pCollisions = (data["plan_3d_collisions"] ?: data["plan3dCollisions"])?.jsonArray?.size ?: 0
-                            val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: (bViolations == 0 && lInversions == 0 && pCollisions == 0)
                             "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions"
+                        }
+                        println(truncateSummary(text, isJson))
+                        return if (passed) 0 else 1
+                    }
+                    "dead-code" -> {
+                        val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
+                        val toolArgs = buildJsonObject {
+                            put("action", "dead_code")
+                            put("project", project)
+                            if (filterPaths.isNotEmpty()) {
+                                putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                            }
+                        }
+                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val data = loadSpilledData(res)
+                        val count = data["dead_code_count"]?.jsonPrimitive?.intOrNull ?: 0
+                        val names = data["dead_nodes"]?.jsonArray?.mapNotNull { it.jsonObject["name"]?.jsonPrimitive?.content } ?: emptyList()
+                        val text = if (isJson) {
+                            jsonPretty.encodeToString(data)
+                        } else {
+                            "[Dead Code] project=$project dead_symbols=$count top=[${names.take(5).joinToString(", ")}]"
                         }
                         println(truncateSummary(text, isJson))
                         return 0
@@ -237,7 +316,7 @@ class CodeGraphCli {
                     }
                 }
             } finally {
-                server.store.close()
+                server.close()
             }
         }
 
@@ -456,6 +535,161 @@ class CodeGraphCli {
             }
         }
 
+        private fun runComposeCommand(
+            server: CodeGraphMcpServer,
+            command: String,
+            project: String,
+            action: String,
+            target: String,
+            paths: List<String>,
+            seeds: List<String>,
+            depth: Int,
+            limit: Int,
+            stabilityConfigPath: String?,
+            compilerReportsDir: String?,
+            traceLogPath: String?,
+            strongSkipping: Boolean,
+            isJson: Boolean
+        ): Int {
+            when (command) {
+                "index" -> {
+                    val res = server.indexComposeArtifacts(
+                        projectId = project,
+                        subpaths = if (paths.isNotEmpty()) paths else null,
+                        stabilityConfigPath = stabilityConfigPath,
+                        compilerReportsDir = compilerReportsDir,
+                        traceLogPath = traceLogPath
+                    )
+                    if (isJson) {
+                        println(jsonPretty.encodeToString(res))
+                    } else {
+                        val cTotal = res["compose_nodes"]?.jsonPrimitive?.intOrNull ?: 0
+                        val cSkip = res["skippable_composables"]?.jsonPrimitive?.intOrNull ?: 0
+                        val compUp = res["compiler_upgraded"]?.jsonPrimitive?.intOrNull ?: 0
+                        val trCnt = res["trace_records_ingested"]?.jsonPrimitive?.intOrNull ?: 0
+                        val text = "[Atlas Compose] project=$project composables=$cTotal skippable=$cSkip compiler_upgraded=$compUp traces=$trCnt"
+                        println(truncateSummary(text, false))
+                    }
+                    return 0
+                }
+                "query" -> {
+                    val mappedAction = when (action.lowercase()) {
+                        "cascade", "compose_cascade" -> "compose_cascade"
+                        "blame", "compose_blame" -> "compose_blame"
+                        else -> "compose_summary"
+                    }
+                    val toolArgs = buildJsonObject {
+                        put("action", mappedAction)
+                        put("project", project)
+                        if (target.isNotEmpty()) put("target", target)
+                        put("depth", if (depth <= 2) 5 else depth)
+                        put("strong_skipping", strongSkipping)
+                    }
+                    val res = server.callTool("codegraph_query", toolArgs)
+                    val data = loadSpilledData(res)
+                    if (isJson) {
+                        println(jsonPretty.encodeToString(data))
+                    } else {
+                        val total = data["total_composables"]?.jsonPrimitive?.intOrNull ?: 0
+                        val skipCnt = data["skippable_count"]?.jsonPrimitive?.intOrNull ?: 0
+                        val skipPct = data["skippable_pct"]?.jsonPrimitive?.doubleOrNull ?: 100.0
+                        val unstable = data["unstable_param_total"]?.jsonPrimitive?.intOrNull ?: 0
+                        val cascadeSize = data["cascade"]?.jsonArray?.size ?: 0
+                        val blameSize = data["blame"]?.jsonArray?.size ?: 0
+                        val text = "[Compose Query: ${mappedAction.removePrefix("compose_")}] project=$project composables=$total skippable=$skipCnt ($skipPct%) unstable_params=$unstable cascade=$cascadeSize blame=$blameSize"
+                        println(truncateSummary(text, false))
+                    }
+                    return 0
+                }
+                "audit" -> {
+                    val toolArgs = buildJsonObject {
+                        put("action", "audit_compose")
+                        put("project", project)
+                        put("strong_skipping", strongSkipping)
+                        if (paths.isNotEmpty()) putJsonArray("targets") { paths.forEach { add(it) } }
+                        if (!stabilityConfigPath.isNullOrBlank()) put("stability_config_path", stabilityConfigPath)
+                        if (!compilerReportsDir.isNullOrBlank()) put("compiler_reports_dir", compilerReportsDir)
+                        if (!traceLogPath.isNullOrBlank()) put("trace_log_path", traceLogPath)
+                    }
+                    val res = server.callTool("codegraph_audit", toolArgs)
+                    val data = loadSpilledData(res)
+                    val score = data["overall_score"]?.jsonPrimitive?.doubleOrNull ?: 95.0
+                    val status = data["status"]?.jsonPrimitive?.content ?: (if (score >= 80.0) "PASS" else "FAIL")
+                    val vCount = data["violations"]?.jsonArray?.size ?: 0
+                    val totalComp = data["total_composables"]?.jsonPrimitive?.intOrNull ?: 0
+                    if (isJson) {
+                        println(jsonPretty.encodeToString(data))
+                    } else {
+                        val text = "[Compose Audit] project=$project status=$status score=$score/100 (Gate1<=95.0) composables=$totalComp violations=$vCount strong_skipping=$strongSkipping"
+                        println(truncateSummary(text, false))
+                    }
+                    return if (score >= 80.0) 0 else 1
+                }
+                "doctor" -> {
+                    val toolArgs = buildJsonObject {
+                        put("action", "compose_doctor")
+                        put("project", project)
+                        put("limit", limit)
+                        if (target.isNotEmpty()) putJsonArray("targets") { add(target) }
+                    }
+                    val res = server.callTool("codegraph_audit", toolArgs)
+                    val data = loadSpilledData(res)
+                    if (isJson) {
+                        println(jsonPretty.encodeToString(data))
+                    } else {
+                        val mode = data["scoring_mode"]?.jsonPrimitive?.content ?: "ESTIMATED"
+                        val pCount = data["total_prescriptions"]?.jsonPrimitive?.intOrNull ?: 0
+                        val topRule = data["prescriptions"]?.jsonArray?.firstOrNull()?.jsonObject?.get("rule_id")?.jsonPrimitive?.content ?: "NONE"
+                        val text = "[Compose Doctor] project=$project mode=$mode prescriptions=$pCount top_rule=$topRule"
+                        println(truncateSummary(text, false))
+                    }
+                    return 0
+                }
+                "synthesize-scope" -> {
+                    val seedList = when {
+                        seeds.isNotEmpty() -> seeds
+                        paths.isNotEmpty() -> paths
+                        target.isNotEmpty() -> listOf(target)
+                        else -> emptyList()
+                    }
+                    val toolArgs = buildJsonObject {
+                        put("action", "synthesize_compose_scope")
+                        put("project", project)
+                        putJsonArray("targets") { seedList.forEach { add(it) } }
+                    }
+                    val res = server.callTool("codegraph_audit", toolArgs)
+                    val data = loadSpilledData(res)
+                    if (isJson) {
+                        println(jsonPretty.encodeToString(data))
+                    } else {
+                        val fCnt = data["target_files"]?.jsonArray?.size ?: 0
+                        val sModels = data["shared_stable_models"]?.jsonArray?.size ?: 0
+                        val cLocals = data["composition_locals"]?.jsonArray?.size ?: 0
+                        val safe = data["safe_for_parallel_dispatch"]?.jsonPrimitive?.booleanOrNull ?: true
+                        val text = "[Compose 3D Scope] project=$project files=$fCnt shared_models=$sModels locals=$cLocals parallel_safe=$safe"
+                        println(truncateSummary(text, false))
+                    }
+                    return 0
+                }
+                "version" -> {
+                    if (isJson) {
+                        println(jsonPretty.encodeToString(buildJsonObject {
+                            put("name", "atlas")
+                            put("version", VERSION)
+                        }))
+                    } else {
+                        println("atlas $VERSION")
+                    }
+                    return 0
+                }
+                else -> {
+                    println("Unknown compose command: $command")
+                    printHelp()
+                    return 1
+                }
+            }
+        }
+
         private fun readStdin(): String {
             val sb = StringBuilder()
             while (true) {
@@ -496,6 +730,7 @@ class CodeGraphCli {
 
                 Usage: atlas <command> [options]
                        atlas figma <command> [options]
+                       atlas compose <command> [options]
 
                 Code Commands:
                   index              Incrementally index workspace AST symbols and markdown notes
@@ -504,6 +739,13 @@ class CodeGraphCli {
                   audit              Verify Clean Architecture layers and Single Declaration Principle
                   serve-mcp          Run JSON-RPC 2.0 MCP server over stdio
                   version            Print version information
+
+                Compose Commands:
+                  compose index              Index Kotlin @Composable functions, stability_config.conf, compiler reports, and traces
+                  compose query              Query Compose stability (summary, cascade, blame)
+                  compose audit              Run 12-rule Compose Gate 1 compliance & stability audit (exit code 0/1)
+                  compose doctor             Synthesize prioritized write-site verified Compose remediation previews
+                  compose synthesize-scope   Synthesize Compose-aware 3D Concurrency Scope (shared models, CompositionLocals)
 
                 Figma Commands:
                   figma index              Index Figma document snapshot and DTCG design tokens
@@ -521,13 +763,19 @@ class CodeGraphCli {
                   --json                   Emit full formatted JSON output
                   --summary                Emit compact summary <= 400 bytes (default)
 
-                Query Options:
+                Query & Compose Options:
                   --target <sym>           Symbol name, node name, or ID
                   --secondary-target <sym> Target for shortest_path
-                  --action <action>        Query action (symbol, callers, callees, impact, spatial, god_nodes, shortest_path)
+                  --action <action>        Query action (symbol, callers, callees, impact, summary, cascade, blame)
                   --depth <int>            Traversal depth (default: 2)
+                  --limit <int>            Max prescriptions for compose doctor (default: 10)
                   --paths <p1> [p2...]     Subpaths to index or seed targets for scoping
                   --include-source         Include live disk source lines in query
+                  --compose                Run Compose Gate 1 audit when passed to 'atlas audit --compose'
+                  --stability-config <p>   Path to Compose stability_config.conf
+                  --compiler-reports <d>   Path to Compose Compiler metrics directory or report file
+                  --trace-log <p>          Path to @TraceRecomposition JSONL/Logcat telemetry log
+                  --strong-skipping <bool> Evaluate under Kotlin 2.0+ Strong Skipping mode (default: true)
 
                 Figma Options:
                   --file <key>             Figma file key

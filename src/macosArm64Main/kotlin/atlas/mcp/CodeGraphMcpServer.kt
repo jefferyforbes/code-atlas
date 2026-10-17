@@ -1,21 +1,14 @@
 package atlas.mcp
 
-import atlas.bridge.VaultPlanBridge
 import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
+import atlas.engine.ComposeStabilityEngine
 import atlas.engine.FigmaDesignAuditor
 import atlas.engine.ScopeSynthesizer
 import atlas.engine.WorkMemoryStore
-import atlas.extract.ModuleBoundaryDetector
-import atlas.extract.PolyglotAstExtractor
-import atlas.extract.SemioticLayerClassifier
-import atlas.model.Figma3DScope
-import atlas.model.FigmaAuditResult
-import atlas.model.GraphEdge
-import atlas.model.GraphNode
+import atlas.engine.WorkspaceIndexer
 import atlas.util.PlatformFiles
-import atlas.util.Sha256
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
@@ -24,7 +17,7 @@ import platform.posix.stdout
 import platform.posix.time
 
 /**
- * Standards-compliant 2-tool MCP Server and incremental workspace indexer with 32KB disk spillover.
+ * Standards-compliant 4-tool MCP Server and incremental workspace indexer with 32KB disk spillover.
  */
 @OptIn(ExperimentalForeignApi::class)
 class CodeGraphMcpServer(
@@ -34,12 +27,7 @@ class CodeGraphMcpServer(
 ) {
     companion object {
         const val SPILLOVER_THRESHOLD_BYTES = 32768
-
-        private val SKIP_DIRS = setOf(
-            ".git", ".gradle", ".idea", ".venv", "venv", "node_modules",
-            "build", "dist", "__pycache__", ".pytest_cache", ".artifacts",
-            ".agents", ".agent", ".atlas"
-        )
+        private var spilloverSeq = 0L
     }
 
     val dbPath: String
@@ -49,6 +37,8 @@ class CodeGraphMcpServer(
     val auditor: ArchitectureAuditor
     val memory: WorkMemoryStore
     val figmaAuditor: FigmaDesignAuditor
+    val composeEngine: ComposeStabilityEngine
+    val indexer: WorkspaceIndexer
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -69,6 +59,8 @@ class CodeGraphMcpServer(
         auditor = ArchitectureAuditor(store)
         memory = WorkMemoryStore(store)
         figmaAuditor = FigmaDesignAuditor(store)
+        composeEngine = ComposeStabilityEngine(store)
+        indexer = WorkspaceIndexer(workspaceRoot, store)
     }
 
     fun toolDefinitions(): List<JsonObject> {
@@ -86,8 +78,11 @@ class CodeGraphMcpServer(
                         add("god_nodes")
                         add("shortest_path")
                         add("status")
+                        add("compose_summary")
+                        add("compose_cascade")
+                        add("compose_blame")
                     }
-                    put("description", "Query operation to execute against the indexed polyglot code and vault graph.")
+                    put("description", "Query operation to execute against the indexed polyglot code, Compose stability, and vault graph.")
                 }
                 putJsonObject("project") {
                     put("type", "string")
@@ -103,11 +98,15 @@ class CodeGraphMcpServer(
                 }
                 putJsonObject("depth") {
                     put("type", "integer")
-                    put("description", "Maximum traversal hops for callers, callees, or blast-radius impact (default: 2).")
+                    put("description", "Maximum traversal hops for callers, callees, cascade, or blast-radius impact (default: 2).")
                 }
                 putJsonObject("include_source") {
                     put("type", "boolean")
                     put("description", "Include live SHA-256 verified source lines sliced from disk (default: false).")
+                }
+                putJsonObject("strong_skipping") {
+                    put("type", "boolean")
+                    put("description", "Evaluate Compose stability under Kotlin 2.0+ Strong Skipping rules (default: true).")
                 }
             }
             putJsonArray("required") {
@@ -126,10 +125,14 @@ class CodeGraphMcpServer(
                         add("synthesize_3d_scope")
                         add("record_memory")
                         add("sync_index")
+                        add("dead_code")
                         add("figma_audit")
                         add("figma_scope")
+                        add("audit_compose")
+                        add("compose_doctor")
+                        add("synthesize_compose_scope")
                     }
-                    put("description", "Audit, synthesis, learning, or indexing action to execute.")
+                    put("description", "Audit, synthesis, Compose compliance, learning, or indexing action to execute.")
                 }
                 putJsonObject("project") {
                     put("type", "string")
@@ -142,7 +145,7 @@ class CodeGraphMcpServer(
                 putJsonObject("targets") {
                     put("type", "array")
                     putJsonObject("items") { put("type", "string") }
-                    put("description", "Seed symbols, file paths, plan names, or Figma nodes to scope, audit, or record outcomes against.")
+                    put("description", "Seed symbols, file paths, plan names, or Figma nodes to scope, audit, or record outcomes.")
                 }
                 putJsonObject("outcome") {
                     put("type", "string")
@@ -156,6 +159,22 @@ class CodeGraphMcpServer(
                 putJsonObject("note") {
                     put("type", "string")
                     put("description", "Short rationale or learning note explaining why this path was useful or a dead end.")
+                }
+                putJsonObject("stability_config_path") {
+                    put("type", "string")
+                    put("description", "Optional path to a Compose stability_config.conf file for wildcard type matching.")
+                }
+                putJsonObject("compiler_reports_dir") {
+                    put("type", "string")
+                    put("description", "Optional directory or file path for Compose Compiler metrics reports.")
+                }
+                putJsonObject("trace_log_path") {
+                    put("type", "string")
+                    put("description", "Optional file path for bounded @TraceRecomposition JSONL or Logcat runtime telemetry.")
+                }
+                putJsonObject("strong_skipping") {
+                    put("type", "boolean")
+                    put("description", "Evaluate Compose audit rules under Kotlin 2.0+ Strong Skipping mode (default: true).")
                 }
             }
             putJsonArray("required") {
@@ -206,12 +225,12 @@ class CodeGraphMcpServer(
         return listOf(
             buildJsonObject {
                 put("name", "codegraph_query")
-                put("description", "Query indexed polyglot AST symbols, callers, callees, blast radius, God nodes, or live source slices.")
+                put("description", "Query indexed polyglot AST symbols, callers, callees, blast radius, Compose stability, or live source slices.")
                 put("inputSchema", querySchema)
             },
             buildJsonObject {
                 put("name", "codegraph_audit")
-                put("description", "Audit architectural layers, verify single-declaration rules, record outcomes, or synthesize 3D scopes.")
+                put("description", "Audit architectural layers, Compose Gate 1 compliance, Doctor fixes, or synthesize 3D scopes.")
                 put("inputSchema", auditSchema)
             },
             buildJsonObject {
@@ -227,202 +246,62 @@ class CodeGraphMcpServer(
         )
     }
 
-    private fun normalizeSubpath(raw: String, canonicalRoot: String): String {
-        var s = raw.trim().replace('\\', '/')
-        if (s.startsWith("$canonicalRoot/")) {
-            s = s.removePrefix("$canonicalRoot/")
-        } else if (s == canonicalRoot) {
-            s = ""
-        }
-        while (s.startsWith("./")) {
-            s = s.removePrefix("./")
-        }
-        return s.trim('/')
-    }
+    private val projectServers = mutableMapOf<String, CodeGraphMcpServer>()
 
     fun indexWorkspace(
         projectId: String,
         subpaths: List<String>? = null
-    ): JsonObject {
-        val root = PlatformFiles.canonicalPath(workspaceRoot)
-        val normalizedSubpaths = subpaths
-            ?.map { normalizeSubpath(it, root) }
-            ?.filter { it.isNotEmpty() }
+    ): JsonObject = resolveServerForProject(projectId).indexer.indexWorkspace(projectId, subpaths)
 
-        val (modNodes, modEdges, knownModules) = ModuleBoundaryDetector.extractModuleGraph(root, projectId)
+    fun indexComposeArtifacts(
+        projectId: String,
+        subpaths: List<String>? = null,
+        stabilityConfigPath: String? = null,
+        compilerReportsDir: String? = null,
+        traceLogPath: String? = null
+    ): JsonObject = resolveServerForProject(projectId).indexer.indexComposeArtifacts(
+        projectId = projectId,
+        subpaths = subpaths,
+        stabilityConfigPath = stabilityConfigPath,
+        compilerReportsDir = compilerReportsDir,
+        traceLogPath = traceLogPath
+    )
 
-        val allNodes = modNodes.toMutableList()
-        val rawEdges = modEdges.toMutableList()
-        val markdownQueue = mutableListOf<Pair<String, String>>()
-        val unchangedPlanQueue = mutableListOf<Pair<String, String>>()
-        var codeFilesIndexed = 0
-        var filesIndexed = 0
-        var filesSkipped = 0
+    private fun resolveServerForProject(projectId: String): CodeGraphMcpServer {
+        if (customDbPath != null || projectId.isEmpty()) return this
+        val localStats = store.getStats(projectId)
+        if (localStats.files > 0) return this
 
-        val allFiles = PlatformFiles.listFilesRecursively(root)
-        val validDiskFiles = mutableSetOf<String>()
-        for (filePath in allFiles) {
-            val relStr = filePath.removePrefix(root).removePrefix("/").replace('\\', '/')
-            val parts = relStr.split('/')
-            if (parts.any { it in SKIP_DIRS || it.startsWith(".venv") }) continue
+        val candidateWs = CacheProfileResolver.resolveProjectWorkspace(workspaceRoot, projectId)
+        val canonCurrent = PlatformFiles.canonicalPath(workspaceRoot).replace('\\', '/').trimEnd('/')
+        val canonCandidate = PlatformFiles.canonicalPath(candidateWs).replace('\\', '/').trimEnd('/')
+        if (canonCandidate == canonCurrent) return this
 
-            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
-                val matchesSubpath = normalizedSubpaths.any { cleanSp ->
-                    relStr == cleanSp || relStr.startsWith("$cleanSp/")
-                }
-                if (!matchesSubpath) continue
-            }
-
-            val ext = if (relStr.contains('.')) "." + relStr.substringAfterLast('.') else ""
-            val lang = PolyglotAstExtractor.supportedLanguage(ext)
-
-            if (lang.isEmpty() && ext != ".md") continue
-
-            validDiskFiles.add(relStr)
-
-            val rawBytes = PlatformFiles.readBytes(filePath)
-            val sha256 = Sha256.digest(rawBytes)
-            val mtime = PlatformFiles.mtime(filePath)
-            val sourceText = rawBytes.decodeToString()
-
-            if (ext == ".md") {
-                if (store.needsReindex(projectId, relStr, sha256, mtime)) {
-                    markdownQueue.add(Pair(relStr, sourceText))
-                    store.upsertFileRecord(
-                        projectId = projectId,
-                        relPath = relStr,
-                        language = "markdown",
-                        moduleId = if (relStr.startsWith("plans/")) "plans" else "vault",
-                        sourceSet = "docs",
-                        semioticLayer = if (relStr.startsWith("plans/")) "syntactic" else "semantic",
-                        archLayer = "infrastructure",
-                        sha256 = sha256,
-                        mtime = mtime,
-                        loc = sourceText.lines().size,
-                        topLevelDeclCount = 1
-                    )
-                    filesIndexed++
-                } else {
-                    if (relStr.startsWith("plans/")) {
-                        unchangedPlanQueue.add(Pair(relStr, sourceText))
-                    }
-                    filesSkipped++
-                }
-                continue
-            }
-
-            if (!store.needsReindex(projectId, relStr, sha256, mtime)) {
-                filesSkipped++
-                continue
-            }
-
-            val (fNodes, fEdges, topDeclCount) = PolyglotAstExtractor.extractFile(
-                projectId, relStr, sourceText, knownModules
+        return projectServers.getOrPut(canonCandidate) {
+            CodeGraphMcpServer(
+                workspaceRoot = canonCandidate,
+                customDbPath = null,
+                cacheProfile = cacheProfile
             )
-            val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
-            val modId = ModuleBoundaryDetector.resolveModuleId(relStr, knownModules)
-            val srcSet = SemioticLayerClassifier.detectSourceSet(relStr)
-
-            store.upsertFileRecord(
-                projectId = projectId,
-                relPath = relStr,
-                language = lang,
-                moduleId = modId,
-                sourceSet = srcSet,
-                semioticLayer = semLayer,
-                archLayer = archLayer,
-                sha256 = sha256,
-                mtime = mtime,
-                loc = sourceText.lines().size,
-                topLevelDeclCount = topDeclCount
-            )
-            allNodes.addAll(fNodes)
-            rawEdges.addAll(fEdges)
-            codeFilesIndexed++
-            filesIndexed++
-        }
-
-        val indexedFiles = store.listIndexedFiles(projectId)
-        var filesDeleted = 0
-        for (indexedRel in indexedFiles) {
-            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
-                val matchesSubpath = normalizedSubpaths.any { cleanSp ->
-                    indexedRel == cleanSp || indexedRel.startsWith("$cleanSp/")
-                }
-                if (!matchesSubpath) continue
-            }
-            if (indexedRel !in validDiskFiles) {
-                store.deleteFileRecord(projectId, indexedRel)
-                filesDeleted++
-            }
-        }
-
-        val existingNodes = store.listNodes(projectId)
-        val mergedNodeMap = existingNodes.associateBy { it.nodeId }.toMutableMap()
-        for (n in allNodes) {
-            mergedNodeMap[n.nodeId] = n
-        }
-        val combinedNodes = mergedNodeMap.values.toList()
-
-        val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(
-            projectId, combinedNodes, rawEdges
-        )
-        val kmpEdges = ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(
-            projectId, combinedNodes
-        )
-
-        // When code files were incrementally re-indexed or deleted, also re-evaluate plans/*.md
-        // so PLAN_SCOPES_FILE edges link against newly added or updated code symbols.
-        if (codeFilesIndexed > 0 || filesDeleted > 0) {
-            val queuedRels = markdownQueue.map { it.first }.toSet()
-            for ((relPlan, planText) in unchangedPlanQueue) {
-                if (relPlan !in queuedRels) {
-                    markdownQueue.add(Pair(relPlan, planText))
-                }
-            }
-            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
-                for (indexedRel in indexedFiles) {
-                    if (indexedRel.startsWith("plans/") && indexedRel.endsWith(".md") && indexedRel !in markdownQueue.map { it.first }) {
-                        val fullPlanPath = "$root/$indexedRel"
-                        if (PlatformFiles.exists(fullPlanPath)) {
-                            markdownQueue.add(Pair(indexedRel, PlatformFiles.readText(fullPlanPath)))
-                        }
-                    }
-                }
-            }
-        }
-
-        val docNodes = mutableListOf<GraphNode>()
-        val docEdges = mutableListOf<GraphEdge>()
-        for ((relMd, mdText) in markdownQueue) {
-            val (dNodes, dEdges) = VaultPlanBridge.extractMarkdownAndPlans(
-                projectId, relMd, mdText, combinedNodes
-            )
-            docNodes.addAll(dNodes)
-            docEdges.addAll(dEdges)
-        }
-
-        store.upsertNodesAndEdges(
-            projectId = projectId,
-            nodes = allNodes + docNodes,
-            edges = modEdges + resolvedEdges + kmpEdges + docEdges
-        )
-
-        val stats = store.getStats(projectId)
-        return buildJsonObject {
-            put("project_id", stats.projectId)
-            put("files", stats.files)
-            put("nodes", stats.nodes)
-            put("edges", stats.edges)
-            put("files_indexed", filesIndexed)
-            put("files_skipped", filesSkipped)
-            putJsonObject("provenance_breakdown") {
-                stats.provenanceBreakdown.forEach { (k, v) -> put(k, v) }
-            }
         }
     }
 
+    fun close() {
+        projectServers.values.forEach { it.store.close() }
+        projectServers.clear()
+        store.close()
+    }
+
     fun callTool(name: String, arguments: JsonObject): JsonObject {
+        val project = arguments["project"]?.jsonPrimitive?.content ?: "organisation"
+        val activeServer = resolveServerForProject(project)
+        if (activeServer !== this) {
+            return activeServer.callToolDirect(name, arguments)
+        }
+        return callToolDirect(name, arguments)
+    }
+
+    private fun callToolDirect(name: String, arguments: JsonObject): JsonObject {
         val project = arguments["project"]?.jsonPrimitive?.content ?: "organisation"
         val payload = when (name) {
             "codegraph_query", "atlas_query" -> handleQuery(arguments)
@@ -440,6 +319,7 @@ class CodeGraphMcpServer(
         val target = args["target"]?.jsonPrimitive?.content ?: ""
         val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 2
         val includeSource = args["include_source"]?.jsonPrimitive?.booleanOrNull ?: false
+        val strongSkipping = args["strong_skipping"]?.jsonPrimitive?.booleanOrNull ?: true
 
         when (action) {
             "status" -> {
@@ -460,6 +340,17 @@ class CodeGraphMcpServer(
                     put("query", target)
                     put("results", json.encodeToJsonElement(matches))
                 }
+            }
+            "compose_summary", "compose_cascade", "compose_blame" -> {
+                val mappedAction = action.removePrefix("compose_")
+                val res = composeEngine.queryCompose(
+                    projectSlug = project,
+                    action = mappedAction,
+                    target = target.ifEmpty { null },
+                    maxDepth = if (args.containsKey("depth")) depth else 5,
+                    strongSkipping = strongSkipping
+                )
+                return json.encodeToJsonElement(res).jsonObject
             }
         }
 
@@ -527,9 +418,26 @@ class CodeGraphMcpServer(
         val action = args["action"]?.jsonPrimitive?.content ?: "verify_architecture"
         val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
         val targets = args["targets"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+        val stabilityConfigPath = args["stability_config_path"]?.jsonPrimitive?.contentOrNull
+        val compilerReportsDir = args["compiler_reports_dir"]?.jsonPrimitive?.contentOrNull
+        val traceLogPath = args["trace_log_path"]?.jsonPrimitive?.contentOrNull
+        val strongSkipping = args["strong_skipping"]?.jsonPrimitive?.booleanOrNull ?: true
+        val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 10
 
         return when (action) {
-            "sync_index" -> indexWorkspace(project, subpaths = if (targets.isNotEmpty()) targets else null)
+            "sync_index" -> {
+                if (stabilityConfigPath != null || compilerReportsDir != null || traceLogPath != null) {
+                    indexComposeArtifacts(
+                        projectId = project,
+                        subpaths = if (targets.isNotEmpty()) targets else null,
+                        stabilityConfigPath = stabilityConfigPath,
+                        compilerReportsDir = compilerReportsDir,
+                        traceLogPath = traceLogPath
+                    )
+                } else {
+                    indexWorkspace(project, subpaths = if (targets.isNotEmpty()) targets else null)
+                }
+            }
             "synthesize_3d_scope" -> {
                 val rec = synthesizer.synthesizeScope(project, targets)
                 val baseObj = json.encodeToJsonElement(rec).jsonObject
@@ -539,8 +447,38 @@ class CodeGraphMcpServer(
                 }
             }
             "verify_architecture" -> {
-                val report = auditor.runFullAudit(project)
+                val report = auditor.runFullAudit(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
                 json.encodeToJsonElement(report).jsonObject
+            }
+            "audit_compose" -> {
+                if (stabilityConfigPath != null || compilerReportsDir != null || traceLogPath != null) {
+                    indexComposeArtifacts(
+                        projectId = project,
+                        subpaths = if (targets.isNotEmpty()) targets else null,
+                        stabilityConfigPath = stabilityConfigPath,
+                        compilerReportsDir = compilerReportsDir,
+                        traceLogPath = traceLogPath
+                    )
+                }
+                val report = auditor.runComposeAudit(project, strongSkipping = strongSkipping)
+                json.encodeToJsonElement(report).jsonObject
+            }
+            "compose_doctor" -> {
+                val targetSym = targets.firstOrNull() ?: args["target"]?.jsonPrimitive?.contentOrNull
+                val report = composeEngine.runDoctor(project, target = targetSym, limit = limit)
+                json.encodeToJsonElement(report).jsonObject
+            }
+            "synthesize_compose_scope" -> {
+                val scope = synthesizer.synthesizeComposeScope(project, targets)
+                json.encodeToJsonElement(scope).jsonObject
+            }
+            "dead_code" -> {
+                val deadNodes = auditor.detectDeadCode(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
+                buildJsonObject {
+                    put("project", project)
+                    put("dead_code_count", deadNodes.size)
+                    put("dead_nodes", json.encodeToJsonElement(deadNodes))
+                }
             }
             "record_memory" -> {
                 val targetStr = if (targets.isNotEmpty()) targets[0] else ""
@@ -603,7 +541,8 @@ class CodeGraphMcpServer(
         }
 
         val ts = (time(null) * 1000).toLong()
-        val spillFile = "$artifactsDir/spillover_${projectId}_$ts.json"
+        val seq = ++spilloverSeq
+        val spillFile = "$artifactsDir/spillover_${projectId}_${ts}_$seq.json"
         PlatformFiles.writeText(spillFile, rawJson)
 
         val gods = store.getGodNodes(projectId, topN = 5).map { it.name }
@@ -642,7 +581,7 @@ class CodeGraphMcpServer(
                     }
                     putJsonObject("serverInfo") {
                         put("name", "atlas")
-                        put("version", "0.3.1")
+                        put("version", "0.4.0")
                     }
                 }
             }

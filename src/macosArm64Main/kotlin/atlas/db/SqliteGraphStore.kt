@@ -211,9 +211,95 @@ class SqliteGraphStore(val dbPath: String) {
             CREATE INDEX IF NOT EXISTS idx_fedges_file ON figma_edges(file_key);
             CREATE INDEX IF NOT EXISTS idx_fedges_src ON figma_edges(file_key, source_node_id);
             CREATE INDEX IF NOT EXISTS idx_fedges_tgt ON figma_edges(file_key, target_node_id);
+
+            CREATE TABLE IF NOT EXISTS compose_nodes (
+                node_id TEXT NOT NULL PRIMARY KEY,
+                project_slug TEXT NOT NULL,
+                fqname TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                source_set TEXT NOT NULL DEFAULT 'commonMain',
+                is_restartable INTEGER NOT NULL DEFAULT 1,
+                is_skippable INTEGER NOT NULL DEFAULT 1,
+                is_readonly INTEGER NOT NULL DEFAULT 0,
+                is_inline INTEGER NOT NULL DEFAULT 0,
+                returns_unit INTEGER NOT NULL DEFAULT 1,
+                has_modifier_param INTEGER NOT NULL DEFAULT 0,
+                modifier_is_first_optional INTEGER NOT NULL DEFAULT 1,
+                modifier_has_default INTEGER NOT NULL DEFAULT 1,
+                unstable_param_count INTEGER NOT NULL DEFAULT 0,
+                runtime_param_count INTEGER NOT NULL DEFAULT 0,
+                receiver_stability TEXT NOT NULL DEFAULT 'STABLE',
+                provenance TEXT NOT NULL DEFAULT 'STATIC_INFERRED',
+                violation_mask INTEGER NOT NULL DEFAULT 0
+            ) WITHOUT ROWID;
+
+            CREATE INDEX IF NOT EXISTS idx_compose_nodes_project_skippable
+                ON compose_nodes(project_slug, is_skippable, unstable_param_count DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_compose_nodes_violations
+                ON compose_nodes(project_slug, violation_mask)
+                WHERE violation_mask != 0;
+
+            CREATE INDEX IF NOT EXISTS idx_compose_nodes_file
+                ON compose_nodes(project_slug, file_path);
+
+            CREATE TABLE IF NOT EXISTS compose_params (
+                node_id TEXT NOT NULL,
+                param_index INTEGER NOT NULL,
+                param_name TEXT NOT NULL,
+                type_signature TEXT NOT NULL,
+                stability TEXT NOT NULL,
+                stability_reason TEXT NOT NULL,
+                has_default INTEGER NOT NULL DEFAULT 0,
+                is_used_in_body INTEGER NOT NULL DEFAULT 1,
+                provenance TEXT NOT NULL DEFAULT 'STATIC_INFERRED',
+                PRIMARY KEY(node_id, param_index)
+            ) WITHOUT ROWID;
+
+            CREATE INDEX IF NOT EXISTS idx_compose_params_unstable
+                ON compose_params(stability, type_signature)
+                WHERE stability IN ('UNSTABLE', 'RUNTIME', 'UNCERTAIN');
+
+            CREATE TABLE IF NOT EXISTS compose_trace_metrics (
+                node_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                recomposition_count INTEGER NOT NULL DEFAULT 0,
+                skip_count INTEGER NOT NULL DEFAULT 0,
+                dirty_params_json TEXT NOT NULL DEFAULT '[]',
+                recorded_at INTEGER NOT NULL,
+                PRIMARY KEY(node_id, session_id)
+            ) WITHOUT ROWID;
             """.trimIndent()
         )
+        migrateComposeSchema()
     }
+
+    fun migrateComposeSchema() {
+        try {
+            val cols = mutableSetOf<String>()
+            val stmt = db.prepare("PRAGMA table_info(compose_nodes);")
+            try {
+                while (stmt.step()) {
+                    cols.add(stmt.columnString(1))
+                }
+            } finally {
+                stmt.close()
+            }
+            if (cols.isNotEmpty()) {
+                if ("source_set" !in cols) {
+                    db.exec("ALTER TABLE compose_nodes ADD COLUMN source_set TEXT NOT NULL DEFAULT 'commonMain';")
+                }
+                if ("violation_mask" !in cols) {
+                    db.exec("ALTER TABLE compose_nodes ADD COLUMN violation_mask INTEGER NOT NULL DEFAULT 0;")
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    fun <T> withSavepoint(name: String, block: () -> T): T = db.withSavepoint(name, block)
+
 
     fun close() {
         db.close()
@@ -330,6 +416,7 @@ class SqliteGraphStore(val dbPath: String) {
                 delStmt.bindString(2, normalizedFileId)
                 delStmt.step()
 
+                var insertedCount = 0
                 for (edge in edges) {
                     if (edge.edgeType == "CONTAINS") continue
                     val targetSym = if (edge.targetNodeId.startsWith("sym:")) {
@@ -351,6 +438,21 @@ class SqliteGraphStore(val dbPath: String) {
                     insStmt.bindInt(8, edge.lineNumber)
                     insStmt.bindString(9, edge.edgeId)
                     insStmt.step()
+                    insertedCount++
+                }
+                if (insertedCount == 0) {
+                    insStmt.reset()
+                    insStmt.clearBindings()
+                    insStmt.bindString(1, projectId)
+                    insStmt.bindString(2, normalizedFileId)
+                    insStmt.bindString(3, "")
+                    insStmt.bindString(4, "")
+                    insStmt.bindString(5, "INDEXED_MARKER")
+                    insStmt.bindDouble(6, 1.0)
+                    insStmt.bindString(7, "EXTRACTED_AST")
+                    insStmt.bindInt(8, 0)
+                    insStmt.bindString(9, "")
+                    insStmt.step()
                 }
             } finally {
                 delStmt.close()
@@ -369,7 +471,7 @@ class SqliteGraphStore(val dbPath: String) {
             SELECT edge_id, project_id, source_node_id, target_symbol, edge_type,
                    confidence, provenance, line_number
             FROM raw_symbol_edges
-            WHERE project_id = ?
+            WHERE project_id = ? AND edge_type != 'INDEXED_MARKER'
             ORDER BY rowid ASC;
             """.trimIndent()
         )
@@ -408,6 +510,20 @@ class SqliteGraphStore(val dbPath: String) {
         return results
     }
 
+    fun filesWithRawSymbolEdges(projectId: String): Set<String> {
+        val stmt = db.prepare("SELECT DISTINCT file_id FROM raw_symbol_edges WHERE project_id = ?;")
+        val result = mutableSetOf<String>()
+        try {
+            stmt.bindString(1, projectId)
+            while (stmt.step()) {
+                result.add(stmt.columnString(0))
+            }
+        } finally {
+            stmt.close()
+        }
+        return result
+    }
+
     fun deleteFileRawSymbolEdges(projectId: String, fileId: String) {
         val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
         val stmt = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
@@ -432,6 +548,22 @@ class SqliteGraphStore(val dbPath: String) {
         try {
             stmt.bindString(1, projectId)
             stmt.bindString(2, fileId)
+            stmt.step()
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun deleteAllResolvedCodeEdges(projectId: String) {
+        val stmt = db.prepare(
+            """
+            DELETE FROM edges
+            WHERE project_id = ?
+              AND edge_type NOT IN ('PLAN_SCOPES_FILE', 'WIKILINK_REFS', 'CODE_SPAN_REFS');
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, projectId)
             stmt.step()
         } finally {
             stmt.close()
@@ -2865,5 +2997,523 @@ class SqliteGraphStore(val dbPath: String) {
             propertySlot = stmt.columnString(5)
         )
     }
+
+    // =========================================================================
+    // Jetpack Compose & KMP Stability & Compliance DAO Operations
+    // =========================================================================
+
+    fun provenanceRank(provenance: String): Int = when (provenance.uppercase()) {
+        "RUNTIME_TRACED" -> 4
+        "COMPILER_VERIFIED" -> 3
+        "STABILITY_CONFIG" -> 2
+        else -> 1 // STATIC_INFERRED
+    }
+
+    fun upsertComposeNodesAndParams(
+        nodes: List<ComposeNodeRecord>,
+        params: List<ComposeParamRecord>,
+        preserveHigherProvenance: Boolean = true
+    ) {
+        if (nodes.isEmpty() && params.isEmpty()) return
+        db.withSavepoint("sp_compose_upsert") {
+            val existingProv = mutableMapOf<String, Int>()
+            if (preserveHigherProvenance && nodes.isNotEmpty()) {
+                val pSlug = nodes.first().projectSlug
+                val qStmt = db.prepare("SELECT node_id, provenance FROM compose_nodes WHERE project_slug = ?;")
+                try {
+                    qStmt.bindString(1, pSlug)
+                    while (qStmt.step()) {
+                        existingProv[qStmt.columnString(0)] = provenanceRank(qStmt.columnString(1))
+                    }
+                } finally {
+                    qStmt.close()
+                }
+            }
+
+            val nodeStmt = db.prepare(
+                """
+                INSERT OR REPLACE INTO compose_nodes (
+                    node_id, project_slug, fqname, file_path, start_line, end_line,
+                    source_set, is_restartable, is_skippable, is_readonly, is_inline,
+                    returns_unit, has_modifier_param, modifier_is_first_optional,
+                    modifier_has_default, unstable_param_count, runtime_param_count,
+                    receiver_stability, provenance, violation_mask
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """.trimIndent()
+            )
+            try {
+                for (n in nodes) {
+                    val prevRank = existingProv[n.nodeId] ?: 0
+                    val newRank = provenanceRank(n.provenance)
+                    if (preserveHigherProvenance && prevRank > newRank) {
+                        val updStmt = db.prepare(
+                            """
+                            UPDATE compose_nodes
+                            SET start_line = ?, end_line = ?, violation_mask = ?
+                            WHERE node_id = ?;
+                            """.trimIndent()
+                        )
+                        try {
+                            updStmt.bindInt(1, n.startLine)
+                            updStmt.bindInt(2, n.endLine)
+                            updStmt.bindInt(3, n.violationMask)
+                            updStmt.bindString(4, n.nodeId)
+                            updStmt.step()
+                        } finally {
+                            updStmt.close()
+                        }
+                        continue
+                    }
+                    nodeStmt.reset()
+                    nodeStmt.bindString(1, n.nodeId)
+                    nodeStmt.bindString(2, n.projectSlug)
+                    nodeStmt.bindString(3, n.fqName)
+                    nodeStmt.bindString(4, n.filePath)
+                    nodeStmt.bindInt(5, n.startLine)
+                    nodeStmt.bindInt(6, n.endLine)
+                    nodeStmt.bindString(7, n.sourceSet)
+                    nodeStmt.bindInt(8, if (n.isRestartable) 1 else 0)
+                    nodeStmt.bindInt(9, if (n.isSkippable) 1 else 0)
+                    nodeStmt.bindInt(10, if (n.isReadonly) 1 else 0)
+                    nodeStmt.bindInt(11, if (n.isInline) 1 else 0)
+                    nodeStmt.bindInt(12, if (n.returnsUnit) 1 else 0)
+                    nodeStmt.bindInt(13, if (n.hasModifierParam) 1 else 0)
+                    nodeStmt.bindInt(14, if (n.modifierIsFirstOptional) 1 else 0)
+                    nodeStmt.bindInt(15, if (n.modifierHasDefault) 1 else 0)
+                    nodeStmt.bindInt(16, n.unstableParamCount)
+                    nodeStmt.bindInt(17, n.runtimeParamCount)
+                    nodeStmt.bindString(18, n.receiverStability)
+                    nodeStmt.bindString(19, n.provenance)
+                    nodeStmt.bindInt(20, n.violationMask)
+                    nodeStmt.step()
+                }
+            } finally {
+                nodeStmt.close()
+            }
+
+            val paramStmt = db.prepare(
+                """
+                INSERT OR REPLACE INTO compose_params (
+                    node_id, param_index, param_name, type_signature,
+                    stability, stability_reason, has_default, is_used_in_body, provenance
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """.trimIndent()
+            )
+            try {
+                for (p in params) {
+                    val prevRank = existingProv[p.nodeId] ?: 0
+                    val newRank = provenanceRank(p.provenance)
+                    if (preserveHigherProvenance && prevRank > newRank) continue
+                    paramStmt.reset()
+                    paramStmt.bindString(1, p.nodeId)
+                    paramStmt.bindInt(2, p.paramIndex)
+                    paramStmt.bindString(3, p.paramName)
+                    paramStmt.bindString(4, p.typeSignature)
+                    paramStmt.bindString(5, p.stability)
+                    paramStmt.bindString(6, p.stabilityReason)
+                    paramStmt.bindInt(7, if (p.hasDefault) 1 else 0)
+                    paramStmt.bindInt(8, if (p.isUsedInBody) 1 else 0)
+                    paramStmt.bindString(9, p.provenance)
+                    paramStmt.step()
+                }
+            } finally {
+                paramStmt.close()
+            }
+        }
+    }
+
+    fun deleteComposeNodesForFile(projectSlug: String, filePath: String) {
+        db.withSavepoint("sp_compose_del_file") {
+            val delParams = db.prepare(
+                """
+                DELETE FROM compose_params
+                WHERE node_id IN (
+                    SELECT node_id FROM compose_nodes WHERE project_slug = ? AND file_path = ?
+                );
+                """.trimIndent()
+            )
+            try {
+                delParams.bindString(1, projectSlug)
+                delParams.bindString(2, filePath)
+                delParams.step()
+            } finally {
+                delParams.close()
+            }
+
+            val delNodes = db.prepare("DELETE FROM compose_nodes WHERE project_slug = ? AND file_path = ?;")
+            try {
+                delNodes.bindString(1, projectSlug)
+                delNodes.bindString(2, filePath)
+                delNodes.step()
+            } finally {
+                delNodes.close()
+            }
+        }
+    }
+
+    fun upsertComposeTraceMetric(
+        nodeId: String,
+        sessionId: String,
+        recompositionCount: Int,
+        skipCount: Int,
+        dirtyParamsJson: String,
+        recordedAt: Long
+    ) {
+        db.withSavepoint("sp_compose_trace") {
+            val stmt = db.prepare(
+                """
+                INSERT OR REPLACE INTO compose_trace_metrics (
+                    node_id, session_id, recomposition_count, skip_count, dirty_params_json, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?);
+                """.trimIndent()
+            )
+            try {
+                stmt.bindString(1, nodeId)
+                stmt.bindString(2, sessionId)
+                stmt.bindInt(3, recompositionCount)
+                stmt.bindInt(4, skipCount)
+                stmt.bindString(5, dirtyParamsJson)
+                stmt.bindLong(6, recordedAt)
+                stmt.step()
+            } finally {
+                stmt.close()
+            }
+
+            val upd = db.prepare("UPDATE compose_nodes SET provenance = 'RUNTIME_TRACED' WHERE node_id = ?;")
+            try {
+                upd.bindString(1, nodeId)
+                upd.step()
+            } finally {
+                upd.close()
+            }
+        }
+    }
+
+    fun listComposeNodes(projectSlug: String, onlyViolating: Boolean = false): List<ComposeNodeRecord> {
+        val sql = if (onlyViolating) {
+            """
+            SELECT node_id, project_slug, fqname, file_path, start_line, end_line,
+                   source_set, is_restartable, is_skippable, is_readonly, is_inline,
+                   returns_unit, has_modifier_param, modifier_is_first_optional,
+                   modifier_has_default, unstable_param_count, runtime_param_count,
+                   receiver_stability, provenance, violation_mask
+            FROM compose_nodes
+            WHERE project_slug = ? AND violation_mask != 0
+            ORDER BY file_path ASC, start_line ASC;
+            """.trimIndent()
+        } else {
+            """
+            SELECT node_id, project_slug, fqname, file_path, start_line, end_line,
+                   source_set, is_restartable, is_skippable, is_readonly, is_inline,
+                   returns_unit, has_modifier_param, modifier_is_first_optional,
+                   modifier_has_default, unstable_param_count, runtime_param_count,
+                   receiver_stability, provenance, violation_mask
+            FROM compose_nodes
+            WHERE project_slug = ?
+            ORDER BY file_path ASC, start_line ASC;
+            """.trimIndent()
+        }
+        val stmt = db.prepare(sql)
+        val out = mutableListOf<ComposeNodeRecord>()
+        try {
+            stmt.bindString(1, projectSlug)
+            while (stmt.step()) {
+                out.add(rowToComposeNode(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return out
+    }
+
+    fun getComposeNode(projectSlug: String, target: String): ComposeNodeRecord? {
+        val stmt = db.prepare(
+            """
+            SELECT node_id, project_slug, fqname, file_path, start_line, end_line,
+                   source_set, is_restartable, is_skippable, is_readonly, is_inline,
+                   returns_unit, has_modifier_param, modifier_is_first_optional,
+                   modifier_has_default, unstable_param_count, runtime_param_count,
+                   receiver_stability, provenance, violation_mask
+            FROM compose_nodes
+            WHERE project_slug = ?
+              AND (node_id = ? OR fqname = ? OR fqname LIKE ?)
+            ORDER BY CASE WHEN node_id = ? THEN 0 WHEN fqname = ? THEN 1 ELSE 2 END
+            LIMIT 1;
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, projectSlug)
+            stmt.bindString(2, target)
+            stmt.bindString(3, target)
+            stmt.bindString(4, "%.$target")
+            stmt.bindString(5, target)
+            stmt.bindString(6, target)
+            if (stmt.step()) {
+                return rowToComposeNode(stmt)
+            }
+        } finally {
+            stmt.close()
+        }
+        return null
+    }
+
+    fun listComposeParams(nodeId: String): List<ComposeParamRecord> {
+        val stmt = db.prepare(
+            """
+            SELECT node_id, param_index, param_name, type_signature,
+                   stability, stability_reason, has_default, is_used_in_body, provenance
+            FROM compose_params
+            WHERE node_id = ?
+            ORDER BY param_index ASC;
+            """.trimIndent()
+        )
+        val out = mutableListOf<ComposeParamRecord>()
+        try {
+            stmt.bindString(1, nodeId)
+            while (stmt.step()) {
+                out.add(rowToComposeParam(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return out
+    }
+
+    fun listComposeParamsForProject(projectSlug: String): Map<String, List<ComposeParamRecord>> {
+        val stmt = db.prepare(
+            """
+            SELECT p.node_id, p.param_index, p.param_name, p.type_signature,
+                   p.stability, p.stability_reason, p.has_default, p.is_used_in_body, p.provenance
+            FROM compose_params p
+            JOIN compose_nodes n ON n.node_id = p.node_id
+            WHERE n.project_slug = ?
+            ORDER BY p.node_id ASC, p.param_index ASC;
+            """.trimIndent()
+        )
+        val out = mutableMapOf<String, MutableList<ComposeParamRecord>>()
+        try {
+            stmt.bindString(1, projectSlug)
+            while (stmt.step()) {
+                val rec = rowToComposeParam(stmt)
+                out.getOrPut(rec.nodeId) { mutableListOf() }.add(rec)
+            }
+        } finally {
+            stmt.close()
+        }
+        return out
+    }
+
+    fun listComposeTraceMetrics(projectSlug: String): Map<String, Triple<Int, Int, String>> {
+        val stmt = db.prepare(
+            """
+            SELECT m.node_id, SUM(m.recomposition_count), SUM(m.skip_count), MAX(m.dirty_params_json)
+            FROM compose_trace_metrics m
+            JOIN compose_nodes n ON n.node_id = m.node_id
+            WHERE n.project_slug = ?
+            GROUP BY m.node_id;
+            """.trimIndent()
+        )
+        val out = mutableMapOf<String, Triple<Int, Int, String>>()
+        try {
+            stmt.bindString(1, projectSlug)
+            while (stmt.step()) {
+                out[stmt.columnString(0)] = Triple(
+                    stmt.columnInt(1),
+                    stmt.columnInt(2),
+                    stmt.columnString(3)
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return out
+    }
+
+    fun queryComposeCascade(
+        projectSlug: String,
+        rootNodeId: String,
+        maxDepth: Int = 5
+    ): List<ComposeQueryResult.CascadeHop> {
+        val boundedDepth = maxDepth.coerceIn(1, 8)
+        val stmt = db.prepare(
+            """
+            WITH RECURSIVE cascade_cte(caller_id, callee_id, depth, edge_kind, path) AS (
+                SELECT e.source_node_id, e.target_node_id, 1, e.edge_type,
+                       '|' || e.source_node_id || '|' || e.target_node_id || '|'
+                FROM edges e
+                WHERE e.project_id = ?
+                  AND e.source_node_id = ?
+                  AND e.edge_type IN ('CALLS_COMPOSABLE', 'CALLS', 'EXPECT_ACTUAL')
+                UNION ALL
+                SELECT e.source_node_id, e.target_node_id, c.depth + 1, e.edge_type,
+                       c.path || e.target_node_id || '|'
+                FROM edges e
+                JOIN cascade_cte c ON e.source_node_id = c.callee_id
+                WHERE e.project_id = ?
+                  AND e.edge_type IN ('CALLS_COMPOSABLE', 'CALLS', 'EXPECT_ACTUAL')
+                  AND c.depth < ?
+                  AND INSTR(c.path, '|' || e.target_node_id || '|') = 0
+            )
+            SELECT c.caller_id, c.callee_id, cn.fqname, cn.file_path, cn.start_line,
+                   c.depth, cn.is_skippable, c.edge_kind,
+                   COALESCE(
+                       (SELECT p.param_name FROM compose_params p
+                        WHERE p.node_id = c.callee_id
+                          AND p.stability IN ('UNSTABLE', 'RUNTIME', 'UNCERTAIN')
+                        ORDER BY p.param_index ASC LIMIT 1),
+                       ''
+                   ) AS forwarded_param
+            FROM cascade_cte c
+            JOIN compose_nodes cn ON cn.node_id = c.callee_id
+            ORDER BY c.depth ASC, cn.unstable_param_count DESC;
+            """.trimIndent()
+        )
+        val hops = mutableListOf<ComposeQueryResult.CascadeHop>()
+        val seen = mutableSetOf<String>()
+        try {
+            stmt.bindString(1, projectSlug)
+            stmt.bindString(2, rootNodeId)
+            stmt.bindString(3, projectSlug)
+            stmt.bindInt(4, boundedDepth)
+            while (stmt.step()) {
+                val callerId = stmt.columnString(0)
+                val calleeId = stmt.columnString(1)
+                val key = "$callerId->$calleeId"
+                if (seen.add(key)) {
+                    hops.add(
+                        ComposeQueryResult.CascadeHop(
+                            callerId = callerId,
+                            calleeId = calleeId,
+                            calleeFqName = stmt.columnString(2),
+                            filePath = stmt.columnString(3),
+                            line = stmt.columnInt(4),
+                            depth = stmt.columnInt(5),
+                            forwardedParam = stmt.columnString(8),
+                            calleeSkippable = stmt.columnInt(6) != 0,
+                            viaEdgeKind = stmt.columnString(7)
+                        )
+                    )
+                }
+            }
+        } finally {
+            stmt.close()
+        }
+        return hops
+    }
+
+    fun queryComposeBlame(
+        projectSlug: String,
+        composableId: String
+    ): List<ComposeQueryResult.BlameHop> {
+        val params = listComposeParams(composableId)
+            .filter { it.stability in setOf("UNSTABLE", "RUNTIME", "UNCERTAIN") }
+        if (params.isEmpty()) return emptyList()
+
+        val hops = mutableListOf<ComposeQueryResult.BlameHop>()
+        for (p in params) {
+            val cleanType = p.typeSignature
+                .substringBefore('<')
+                .substringAfterLast('.')
+                .removeSuffix("?")
+                .trim()
+            val nodeStmt = db.prepare(
+                """
+                SELECT node_id, file_id, start_line, signature
+                FROM nodes
+                WHERE project_id = ? AND name = ? AND kind IN ('class', 'interface')
+                LIMIT 1;
+                """.trimIndent()
+            )
+            var rootNodeId: String? = null
+            var rootFile: String? = null
+            var rootLine: Int? = null
+            try {
+                nodeStmt.bindString(1, projectSlug)
+                nodeStmt.bindString(2, cleanType)
+                if (nodeStmt.step()) {
+                    rootNodeId = nodeStmt.columnString(0)
+                    rootFile = nodeStmt.columnString(1).substringAfter(':')
+                    rootLine = nodeStmt.columnInt(2)
+                }
+            } finally {
+                nodeStmt.close()
+            }
+            hops.add(
+                ComposeQueryResult.BlameHop(
+                    composableId = composableId,
+                    paramName = p.paramName,
+                    typeSignature = p.typeSignature,
+                    stability = p.stability,
+                    rootCauseNodeId = rootNodeId,
+                    rootCauseFile = rootFile,
+                    rootCauseLine = rootLine,
+                    blameReason = p.stabilityReason
+                )
+            )
+        }
+        return hops
+    }
+
+    fun countPropertyMutations(projectSlug: String, targetSymbolOrNodeId: String): Int {
+        val stmt = db.prepare(
+            """
+            SELECT COUNT(*) FROM edges
+            WHERE project_id = ?
+              AND (target_node_id = ? OR target_node_id LIKE ?)
+              AND edge_type = 'MUTATES_PROPERTY';
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, projectSlug)
+            stmt.bindString(2, targetSymbolOrNodeId)
+            stmt.bindString(3, "%#$targetSymbolOrNodeId")
+            if (stmt.step()) {
+                return stmt.columnInt(0)
+            }
+        } finally {
+            stmt.close()
+        }
+        return 0
+    }
+
+    private fun rowToComposeNode(stmt: NativeSqliteStatement): ComposeNodeRecord {
+        return ComposeNodeRecord(
+            nodeId = stmt.columnString(0),
+            projectSlug = stmt.columnString(1),
+            fqName = stmt.columnString(2),
+            filePath = stmt.columnString(3),
+            startLine = stmt.columnInt(4),
+            endLine = stmt.columnInt(5),
+            sourceSet = stmt.columnString(6),
+            isRestartable = stmt.columnInt(7) != 0,
+            isSkippable = stmt.columnInt(8) != 0,
+            isReadonly = stmt.columnInt(9) != 0,
+            isInline = stmt.columnInt(10) != 0,
+            returnsUnit = stmt.columnInt(11) != 0,
+            hasModifierParam = stmt.columnInt(12) != 0,
+            modifierIsFirstOptional = stmt.columnInt(13) != 0,
+            modifierHasDefault = stmt.columnInt(14) != 0,
+            unstableParamCount = stmt.columnInt(15),
+            runtimeParamCount = stmt.columnInt(16),
+            receiverStability = stmt.columnString(17),
+            provenance = stmt.columnString(18),
+            violationMask = stmt.columnInt(19)
+        )
+    }
+
+    private fun rowToComposeParam(stmt: NativeSqliteStatement): ComposeParamRecord {
+        return ComposeParamRecord(
+            nodeId = stmt.columnString(0),
+            paramIndex = stmt.columnInt(1),
+            paramName = stmt.columnString(2),
+            typeSignature = stmt.columnString(3),
+            stability = stmt.columnString(4),
+            stabilityReason = stmt.columnString(5),
+            hasDefault = stmt.columnInt(6) != 0,
+            isUsedInBody = stmt.columnInt(7) != 0,
+            provenance = stmt.columnString(8)
+        )
+    }
 }
+
 
