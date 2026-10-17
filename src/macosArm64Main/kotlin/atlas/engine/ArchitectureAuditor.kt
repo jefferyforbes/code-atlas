@@ -74,6 +74,17 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
                         message = "Domain symbol '${src.name}' (${src.archLayer}) illegally references $layerDesc symbol '${tgt.name}' (${tgt.archLayer})."
                     )
                 )
+            } else if (src.archLayer in setOf("application", "data", "infrastructure") && tgt.archLayer == "presentation") {
+                inversions.add(
+                    LayerInversionViolation(
+                        rule = "ARCH-LAYER-INVERSION",
+                        source = src.qualifiedName,
+                        target = tgt.qualifiedName,
+                        edgeType = edge.edgeType,
+                        lineNumber = edge.lineNumber,
+                        message = "Symbol '${src.name}' (${src.archLayer}) illegally references Presentation/Pragmatic symbol '${tgt.name}' (${tgt.archLayer})."
+                    )
+                )
             }
         }
         return inversions

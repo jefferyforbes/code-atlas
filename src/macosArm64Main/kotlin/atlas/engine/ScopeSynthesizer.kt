@@ -64,7 +64,10 @@ class ScopeSynthesizer(private val store: SqliteGraphStore) {
         for (edge in planEdges) {
             if (edge.targetNodeId in impactedNodeIds) {
                 val planNode = store.getNode(projectId, edge.sourceNodeId)
-                val planName = planNode?.name ?: edge.sourceNodeId
+                if (planNode == null || planNode.signature.contains("(merged)") || planNode.signature.contains("(completed)")) {
+                    continue
+                }
+                val planName = planNode.name
                 if (planName !in collidingPlans) {
                     collidingPlans.add(planName)
                 }
