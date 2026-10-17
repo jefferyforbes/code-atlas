@@ -2,6 +2,7 @@ package atlas.engine
 
 import atlas.db.SqliteGraphStore
 import atlas.model.AuditReport
+import atlas.model.ComposeAuditResult
 import atlas.model.GraphNode
 import atlas.model.LayerInversionViolation
 import atlas.model.PlanCollision
@@ -11,6 +12,12 @@ import atlas.model.SingleDeclarationViolation
  * AST-backed Architecture Auditor enforcing Clean Architecture layers, BOOST-003, and 3D collision safety.
  */
 class ArchitectureAuditor(private val store: SqliteGraphStore) {
+
+    private val composeEngine = ComposeStabilityEngine(store)
+
+    fun runComposeAudit(projectId: String, strongSkipping: Boolean = true): ComposeAuditResult {
+        return composeEngine.auditCompose(projectId, strongSkipping = strongSkipping)
+    }
 
     fun runFullAudit(projectId: String, pathPrefixes: List<String>? = null): AuditReport {
         val normalizedPrefixes = normalizePathPrefixes(pathPrefixes)
