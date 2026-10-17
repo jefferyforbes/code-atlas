@@ -13,7 +13,7 @@ import kotlinx.serialization.json.*
  */
 class CodeGraphCli {
     companion object {
-        const val VERSION = "0.3.0"
+        const val VERSION = "0.3.1"
         const val SUMMARY_CEILING_BYTES = 400
 
         private val jsonPretty = Json { prettyPrint = true }
@@ -71,19 +71,19 @@ class CodeGraphCli {
                     arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "serve-mcp" || arg == "version" -> {
                         command = arg
                     }
-                    arg == "--project" && idx + 1 < argv.size -> project = argv[++idx]
-                    arg == "--workspace" && idx + 1 < argv.size -> workspace = argv[++idx]
-                    arg == "--db" && idx + 1 < argv.size -> customDb = argv[++idx]
-                    arg == "--cache-profile" && idx + 1 < argv.size -> cacheProfile = argv[++idx]
-                    arg == "--target" && idx + 1 < argv.size -> target = argv[++idx]
-                    arg == "--action" && idx + 1 < argv.size -> action = argv[++idx]
-                    arg == "--secondary-target" && idx + 1 < argv.size -> secondaryTarget = argv[++idx]
-                    arg == "--depth" && idx + 1 < argv.size -> depth = argv[++idx].toIntOrNull() ?: 2
-                    arg == "--file" && idx + 1 < argv.size -> fileKey = argv[++idx]
-                    arg == "--snapshot" && idx + 1 < argv.size -> snapshotPath = argv[++idx]
-                    arg == "--tokens" && idx + 1 < argv.size -> tokensPath = argv[++idx]
+                    arg == "--project" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> project = argv[++idx]
+                    arg == "--workspace" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> workspace = argv[++idx]
+                    arg == "--db" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> customDb = argv[++idx]
+                    arg == "--cache-profile" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> cacheProfile = argv[++idx]
+                    arg == "--target" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> target = argv[++idx]
+                    arg == "--action" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> action = argv[++idx]
+                    arg == "--secondary-target" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> secondaryTarget = argv[++idx]
+                    arg == "--depth" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> depth = argv[++idx].toIntOrNull() ?: 2
+                    arg == "--file" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> fileKey = argv[++idx]
+                    arg == "--snapshot" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> snapshotPath = argv[++idx]
+                    arg == "--tokens" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> tokensPath = argv[++idx]
                     arg == "--stdin" -> isStdin = true
-                    arg == "--bounds" && idx + 1 < argv.size -> boundsArg = argv[++idx]
+                    arg == "--bounds" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> boundsArg = argv[++idx]
                     arg == "--seeds" -> {
                         idx++
                         while (idx < argv.size && !argv[idx].startsWith("--")) {
@@ -477,11 +477,15 @@ class CodeGraphCli {
             return payload
         }
 
-        private fun truncateSummary(text: String, isJson: Boolean): String {
+        fun truncateSummary(text: String, isJson: Boolean): String {
             if (isJson) return text
             val bytes = text.encodeToByteArray()
             if (bytes.size <= SUMMARY_CEILING_BYTES) return text
-            val truncatedBytes = bytes.copyOfRange(0, SUMMARY_CEILING_BYTES - 3)
+            var end = SUMMARY_CEILING_BYTES - 3
+            while (end > 0 && (bytes[end].toInt() and 0xC0) == 0x80) {
+                end--
+            }
+            val truncatedBytes = bytes.copyOfRange(0, end)
             return truncatedBytes.decodeToString() + "..."
         }
 
