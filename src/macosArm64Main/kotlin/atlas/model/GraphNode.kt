@@ -21,5 +21,9 @@ data class GraphNode(
     val inDegree: Int = 0,
     val outDegree: Int = 0,
     val description: String? = null,
-    val isTopLevel: Boolean = true
+    val isTopLevel: Boolean = true,
+    val cyclomaticComplexity: Int = 1,
+    val cognitiveComplexity: Int = 0,
+    val maxNestingDepth: Int = 0,
+    val complexityScore: Double = 100.0
 )
