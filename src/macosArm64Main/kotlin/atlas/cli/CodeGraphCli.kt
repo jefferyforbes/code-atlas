@@ -5,6 +5,7 @@ import atlas.extract.FigmaSnapshotExtractor
 import atlas.mcp.CodeGraphMcpServer
 import atlas.model.FigmaSpatialBounds
 import atlas.util.PlatformFiles
+import kotlin.math.roundToInt
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -84,6 +85,9 @@ class CodeGraphCli {
             var strongSkipping = true
             var limit = 10
             var isComposeAuditFlag = false
+            var isComplexityFlag = false
+            var thresholdArg: Int? = null
+            var maxCyclomaticArg: Int? = null
             var outcome: String? = null
             var note: String? = null
             var beforeSnippet: String? = null
@@ -103,6 +107,10 @@ class CodeGraphCli {
                 when {
                     arg == "figma" -> subsystem = "figma"
                     arg == "compose" -> subsystem = "compose"
+                    arg == "complexity" -> {
+                        subsystem = "complexity"
+                        isComplexityFlag = true
+                    }
                     (subsystem == "figma" || arg == "figma") && (arg == "index" || arg == "query" || arg == "audit" || arg == "synthesize-scope" || arg == "shortest-path" || arg == "shortest_path" || arg == "version") -> {
                         if (arg == "shortest-path" || arg == "shortest_path") {
                             command = "query"
@@ -113,6 +121,10 @@ class CodeGraphCli {
                     }
                     (subsystem == "compose" || arg == "compose") && (arg == "index" || arg == "query" || arg == "audit" || arg == "doctor" || arg == "synthesize-scope" || arg == "version") -> {
                         command = arg
+                    }
+                    (subsystem == "complexity" || arg == "complexity") && (arg == "query" || arg == "audit" || arg == "doctor") -> {
+                        command = arg
+                        isComplexityFlag = true
                     }
                     arg == "figma-shortest-path" -> {
                         subsystem = "figma"
@@ -129,6 +141,12 @@ class CodeGraphCli {
                         }
                     }
                     arg == "--compose" -> isComposeAuditFlag = true
+                    arg == "--complexity" -> isComplexityFlag = true
+                    (arg == "--threshold" || arg == "--max-cognitive") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> thresholdArg = argv[++idx].toIntOrNull()
+                    arg.startsWith("--threshold=") -> thresholdArg = arg.substringAfter('=').toIntOrNull()
+                    arg.startsWith("--max-cognitive=") -> thresholdArg = arg.substringAfter('=').toIntOrNull()
+                    arg == "--max-cyclomatic" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> maxCyclomaticArg = argv[++idx].toIntOrNull()
+                    arg.startsWith("--max-cyclomatic=") -> maxCyclomaticArg = arg.substringAfter('=').toIntOrNull()
                     arg == "--outcome" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> outcome = argv[++idx]
                     arg == "--note" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> note = argv[++idx]
                     arg == "--project" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> project = argv[++idx]
@@ -137,6 +155,7 @@ class CodeGraphCli {
                     arg == "--cache-profile" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> cacheProfile = argv[++idx]
                     (arg == "--target" || arg == "--from") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> target = argv[++idx]
                     arg == "--action" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> action = argv[++idx]
+                    arg.startsWith("--action=") -> action = arg.substringAfter('=')
                     (arg == "--secondary-target" || arg == "--to") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> secondaryTarget = argv[++idx]
                     arg == "--depth" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> depth = argv[++idx].toIntOrNull() ?: 2
                     arg == "--limit" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> limit = argv[++idx].toIntOrNull() ?: 10
@@ -223,6 +242,42 @@ class CodeGraphCli {
                         depth = depth,
                         boundsArg = boundsArg,
                         seeds = seeds,
+                        isJson = isJson
+                    )
+                }
+
+                if ((command == "doctor" && isComplexityFlag) || (subsystem == "complexity" && command == "doctor")) {
+                    return runComplexityDoctorCommand(
+                        server = server,
+                        project = project,
+                        target = target,
+                        limit = limit,
+                        apply = applyRemediation,
+                        testCmd = testCmdArg,
+                        threshold = thresholdArg,
+                        isJson = isJson
+                    )
+                }
+
+                if ((command == "audit" && isComplexityFlag) || (subsystem == "complexity" && command == "audit")) {
+                    return runComplexityAuditCommand(
+                        server = server,
+                        project = project,
+                        paths = paths,
+                        target = target,
+                        threshold = thresholdArg,
+                        maxCyclomatic = maxCyclomaticArg,
+                        isJson = isJson
+                    )
+                }
+
+                if (command == "query" && (action == "complexity" || isComplexityFlag || subsystem == "complexity")) {
+                    return runComplexityQueryCommand(
+                        server = server,
+                        project = project,
+                        target = target,
+                        threshold = thresholdArg,
+                        limit = limit,
                         isJson = isJson
                     )
                 }
@@ -978,6 +1033,143 @@ class CodeGraphCli {
             return truncatedBytes.decodeToString() + "..."
         }
 
+        private fun runComplexityDoctorCommand(
+            server: CodeGraphMcpServer,
+            project: String,
+            target: String,
+            limit: Int,
+            apply: Boolean,
+            testCmd: String?,
+            threshold: Int?,
+            isJson: Boolean
+        ): Int {
+            val toolArgs = buildJsonObject {
+                put("action", "complexity_doctor")
+                put("project", project)
+                if (target.isNotEmpty()) put("target", target)
+                put("limit", limit)
+                put("apply", apply)
+                if (threshold != null) put("threshold", threshold)
+                if (!testCmd.isNullOrBlank()) put("test_command", testCmd)
+            }
+            val res = server.callTool("codegraph_audit", toolArgs)
+            val data = loadSpilledData(res)
+            val total = data["total_prescriptions"]?.jsonPrimitive?.intOrNull ?: 0
+            val verified = data["verified_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val rolledBack = data["rolled_back_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val prescriptions = data["prescriptions"]?.jsonArray ?: JsonArray(emptyList())
+
+            if (isJson) {
+                println(jsonPretty.encodeToString(data))
+            } else {
+                println("[Complexity Doctor] project=$project prescriptions=$total applied=$verified rolled_back=$rolledBack")
+                for (elem in prescriptions.take(limit)) {
+                    val p = elem.jsonObject
+                    val rank = p["rank"]?.jsonPrimitive?.intOrNull ?: 1
+                    val strat = p["fix_strategy"]?.jsonPrimitive?.content ?: "UNKNOWN"
+                    val file = p["file_path"]?.jsonPrimitive?.content ?: ""
+                    val line = p["line"]?.jsonPrimitive?.intOrNull ?: 0
+                    val cogB = p["cognitive_before"]?.jsonPrimitive?.intOrNull ?: 0
+                    val cogA = p["cognitive_after"]?.jsonPrimitive?.intOrNull ?: 0
+                    val red = p["reduction_percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    println("  #$rank $strat at $file:$line (Cognitive: $cogB -> $cogA, reduction: ${red}%)")
+                }
+            }
+            return 0
+        }
+
+        private fun runComplexityAuditCommand(
+            server: CodeGraphMcpServer,
+            project: String,
+            paths: List<String>,
+            target: String,
+            threshold: Int?,
+            maxCyclomatic: Int? = null,
+            isJson: Boolean
+        ): Int {
+            val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
+            val toolArgs = buildJsonObject {
+                put("action", "audit_complexity")
+                put("project", project)
+                if (filterPaths.isNotEmpty()) {
+                    putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                }
+                if (threshold != null) put("threshold", threshold)
+                if (maxCyclomatic != null) put("max_cyclomatic", maxCyclomatic)
+            }
+            val res = server.callTool("codegraph_audit", toolArgs)
+            val data = loadSpilledData(res)
+            val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: true
+            val total = data["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
+            val high = data["high_severity_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val warn = data["warning_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val thresh = data["threshold"]?.jsonPrimitive?.intOrNull ?: (threshold ?: 10)
+
+            val text = if (isJson) {
+                jsonPretty.encodeToString(data)
+            } else {
+                "[Complexity Audit] project=$project passed=$passed threshold=$thresh violations=$total (HIGH=$high, WARNING=$warn)"
+            }
+            println(truncateSummary(text, isJson))
+            return if (passed) 0 else 1
+        }
+
+        private fun runComplexityQueryCommand(
+            server: CodeGraphMcpServer,
+            project: String,
+            target: String,
+            threshold: Int?,
+            limit: Int,
+            isJson: Boolean
+        ): Int {
+            val toolArgs = buildJsonObject {
+                put("action", "complexity")
+                put("project", project)
+                if (target.isNotEmpty()) put("target", target)
+                if (threshold != null) put("threshold", threshold)
+                put("limit", limit)
+            }
+            val res = server.callTool("codegraph_query", toolArgs)
+            val data = loadSpilledData(res)
+            val results = data["results"]?.jsonArray ?: JsonArray(emptyList())
+
+            if (isJson) {
+                println(jsonPretty.encodeToString(data))
+            } else {
+                val header = "SYMBOL".padEnd(30) + " " +
+                    "LOCATION".padEnd(25) + " " +
+                    "COGNITIVE".padStart(9) + " " +
+                    "CYCLO".padStart(7) + " " +
+                    "NESTING".padStart(7) + " " +
+                    "RISK_INDEX".padStart(10) + " " +
+                    "GRADE".padStart(5)
+                println(header)
+                println("-".repeat(98))
+                for (elem in results) {
+                    val r = elem.jsonObject
+                    val name = (r["name"]?.jsonPrimitive?.content ?: "").take(30)
+                    val file = r["file_path"]?.jsonPrimitive?.content ?: ""
+                    val line = r["line"]?.jsonPrimitive?.intOrNull ?: 0
+                    val loc = ("$file:$line").take(25)
+                    val cog = r["cognitive"]?.jsonPrimitive?.intOrNull ?: 0
+                    val cyclo = r["cyclomatic"]?.jsonPrimitive?.intOrNull ?: 0
+                    val nest = r["max_nesting"]?.jsonPrimitive?.intOrNull ?: 0
+                    val risk = r["risk_index"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    val roundedRisk = ((risk * 10.0).roundToInt() / 10.0).toString()
+                    val grade = r["grade"]?.jsonPrimitive?.content ?: "A"
+                    val row = name.padEnd(30) + " " +
+                        loc.padEnd(25) + " " +
+                        cog.toString().padStart(9) + " " +
+                        cyclo.toString().padStart(7) + " " +
+                        nest.toString().padStart(7) + " " +
+                        roundedRisk.padStart(10) + " " +
+                        grade.padStart(5)
+                    println(row)
+                }
+            }
+            return 0
+        }
+
         private fun printHelp() {
             println(
                 """
@@ -991,8 +1183,9 @@ class CodeGraphCli {
                   index              Incrementally index workspace AST symbols and markdown notes
                   query              Query AST symbols, callers, callees, blast radius, or status
                   synthesize-scope   Synthesize 3D Concurrency Scope (files, modules, architecture)
-                  audit              Verify Clean Architecture layers and Single Declaration Principle
+                  audit              Verify Clean Architecture layers, Single Declaration Principle, or complexity
                   fix                Remediate architecture violations (BOOST-003 AST split & layer inversions)
+                  doctor             Synthesize and apply autonomous remediation prescriptions
                   dead-code          Detect dead code unreferenced across indexed modules
                   record-memory      Record execution outcome annotation for a node into work memory
                   verify-remediation Verify and optionally apply autonomous remediation with pre-flight & post-verification checks
@@ -1005,6 +1198,11 @@ class CodeGraphCli {
                   compose audit              Run 12-rule Compose Gate 1 compliance & stability audit (exit code 0/1)
                   compose doctor             Synthesize prioritized write-site verified Compose remediation previews
                   compose synthesize-scope   Synthesize Compose-aware 3D Concurrency Scope (shared models, CompositionLocals)
+
+                Complexity Commands:
+                  atlas query --action complexity [--target <symbol>] [--threshold <int>]
+                  atlas audit --complexity [--threshold <int>]
+                  atlas doctor --complexity [--target <symbol>] [--apply] [--test-cmd <cmd>]
 
                 Figma Commands:
                   figma index              Index Figma document snapshot and DTCG design tokens
@@ -1025,15 +1223,17 @@ class CodeGraphCli {
                   --note <text>            Descriptive note or rationale for memory recording
 
                 Audit Options:
+                  --complexity             Run Gate 1 function complexity audit rule (exit code 0/1)
+                  --threshold <int>        Cognitive complexity threshold for audit or query (default: 10)
                   --description-mode <m>   Filter mode for description suggestions (domain-only, all, off; default: domain-only)
                   --no-description-check   Disable top-level description suggestions check
 
                 Query & Compose Options:
                   --target <sym>           Symbol name, node name, or ID
                   --secondary-target <sym> Target for shortest_path
-                  --action <action>        Query action (symbol, callers, callees, impact, summary, cascade, blame)
+                  --action <action>        Query action (symbol, callers, callees, impact, complexity, summary, cascade, blame)
                   --depth <int>            Traversal depth (default: 2)
-                  --limit <int>            Max prescriptions for compose doctor (default: 10)
+                  --limit <int>            Max prescriptions for doctor (default: 10)
                   --paths <p1> [p2...]     Subpaths to index or seed targets for scoping
                   --include-source         Include live disk source lines in query
                   --compose                Run Compose Gate 1 audit when passed to 'atlas audit --compose'
@@ -1043,6 +1243,7 @@ class CodeGraphCli {
                   --strong-skipping <bool> Evaluate under Kotlin 2.0+ Strong Skipping mode (default: true)
 
                 Remediation Options:
+                  --complexity             Run complexity doctor mode
                   --split                  Enable automated AST file-splitting for BOOST-003 (default: true)
                   --no-split               Disable AST file-splitting
                   --make-private           Convert unreferenced secondary declarations to private
