@@ -1,21 +1,13 @@
 package atlas.mcp
 
-import atlas.bridge.VaultPlanBridge
 import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
 import atlas.engine.FigmaDesignAuditor
 import atlas.engine.ScopeSynthesizer
 import atlas.engine.WorkMemoryStore
-import atlas.extract.ModuleBoundaryDetector
-import atlas.extract.PolyglotAstExtractor
-import atlas.extract.SemioticLayerClassifier
-import atlas.model.Figma3DScope
-import atlas.model.FigmaAuditResult
-import atlas.model.GraphEdge
-import atlas.model.GraphNode
+import atlas.engine.WorkspaceIndexer
 import atlas.util.PlatformFiles
-import atlas.util.Sha256
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
@@ -34,12 +26,7 @@ class CodeGraphMcpServer(
 ) {
     companion object {
         const val SPILLOVER_THRESHOLD_BYTES = 32768
-
-        private val SKIP_DIRS = setOf(
-            ".git", ".gradle", ".idea", ".venv", "venv", "node_modules",
-            "build", "dist", "__pycache__", ".pytest_cache", ".artifacts",
-            ".agents", ".agent", ".atlas"
-        )
+        private var spilloverSeq = 0L
     }
 
     val dbPath: String
@@ -49,6 +36,7 @@ class CodeGraphMcpServer(
     val auditor: ArchitectureAuditor
     val memory: WorkMemoryStore
     val figmaAuditor: FigmaDesignAuditor
+    val indexer: WorkspaceIndexer
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -69,6 +57,7 @@ class CodeGraphMcpServer(
         auditor = ArchitectureAuditor(store)
         memory = WorkMemoryStore(store)
         figmaAuditor = FigmaDesignAuditor(store)
+        indexer = WorkspaceIndexer(workspaceRoot, store)
     }
 
     fun toolDefinitions(): List<JsonObject> {
@@ -126,6 +115,7 @@ class CodeGraphMcpServer(
                         add("synthesize_3d_scope")
                         add("record_memory")
                         add("sync_index")
+                        add("dead_code")
                         add("figma_audit")
                         add("figma_scope")
                     }
@@ -227,200 +217,10 @@ class CodeGraphMcpServer(
         )
     }
 
-    private fun normalizeSubpath(raw: String, canonicalRoot: String): String {
-        var s = raw.trim().replace('\\', '/')
-        if (s.startsWith("$canonicalRoot/")) {
-            s = s.removePrefix("$canonicalRoot/")
-        } else if (s == canonicalRoot) {
-            s = ""
-        }
-        while (s.startsWith("./")) {
-            s = s.removePrefix("./")
-        }
-        return s.trim('/')
-    }
-
     fun indexWorkspace(
         projectId: String,
         subpaths: List<String>? = null
-    ): JsonObject {
-        val root = PlatformFiles.canonicalPath(workspaceRoot)
-        val normalizedSubpaths = subpaths
-            ?.map { normalizeSubpath(it, root) }
-            ?.filter { it.isNotEmpty() }
-
-        val (modNodes, modEdges, knownModules) = ModuleBoundaryDetector.extractModuleGraph(root, projectId)
-
-        val allNodes = modNodes.toMutableList()
-        val rawEdges = modEdges.toMutableList()
-        val markdownQueue = mutableListOf<Pair<String, String>>()
-        val unchangedPlanQueue = mutableListOf<Pair<String, String>>()
-        var codeFilesIndexed = 0
-        var filesIndexed = 0
-        var filesSkipped = 0
-
-        val allFiles = PlatformFiles.listFilesRecursively(root)
-        val validDiskFiles = mutableSetOf<String>()
-        for (filePath in allFiles) {
-            val relStr = filePath.removePrefix(root).removePrefix("/").replace('\\', '/')
-            val parts = relStr.split('/')
-            if (parts.any { it in SKIP_DIRS || it.startsWith(".venv") }) continue
-
-            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
-                val matchesSubpath = normalizedSubpaths.any { cleanSp ->
-                    relStr == cleanSp || relStr.startsWith("$cleanSp/")
-                }
-                if (!matchesSubpath) continue
-            }
-
-            val ext = if (relStr.contains('.')) "." + relStr.substringAfterLast('.') else ""
-            val lang = PolyglotAstExtractor.supportedLanguage(ext)
-
-            if (lang.isEmpty() && ext != ".md") continue
-
-            validDiskFiles.add(relStr)
-
-            val rawBytes = PlatformFiles.readBytes(filePath)
-            val sha256 = Sha256.digest(rawBytes)
-            val mtime = PlatformFiles.mtime(filePath)
-            val sourceText = rawBytes.decodeToString()
-
-            if (ext == ".md") {
-                if (store.needsReindex(projectId, relStr, sha256, mtime)) {
-                    markdownQueue.add(Pair(relStr, sourceText))
-                    store.upsertFileRecord(
-                        projectId = projectId,
-                        relPath = relStr,
-                        language = "markdown",
-                        moduleId = if (relStr.startsWith("plans/")) "plans" else "vault",
-                        sourceSet = "docs",
-                        semioticLayer = if (relStr.startsWith("plans/")) "syntactic" else "semantic",
-                        archLayer = "infrastructure",
-                        sha256 = sha256,
-                        mtime = mtime,
-                        loc = sourceText.lines().size,
-                        topLevelDeclCount = 1
-                    )
-                    filesIndexed++
-                } else {
-                    if (relStr.startsWith("plans/")) {
-                        unchangedPlanQueue.add(Pair(relStr, sourceText))
-                    }
-                    filesSkipped++
-                }
-                continue
-            }
-
-            if (!store.needsReindex(projectId, relStr, sha256, mtime)) {
-                filesSkipped++
-                continue
-            }
-
-            val (fNodes, fEdges, topDeclCount) = PolyglotAstExtractor.extractFile(
-                projectId, relStr, sourceText, knownModules
-            )
-            val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
-            val modId = ModuleBoundaryDetector.resolveModuleId(relStr, knownModules)
-            val srcSet = SemioticLayerClassifier.detectSourceSet(relStr)
-
-            store.upsertFileRecord(
-                projectId = projectId,
-                relPath = relStr,
-                language = lang,
-                moduleId = modId,
-                sourceSet = srcSet,
-                semioticLayer = semLayer,
-                archLayer = archLayer,
-                sha256 = sha256,
-                mtime = mtime,
-                loc = sourceText.lines().size,
-                topLevelDeclCount = topDeclCount
-            )
-            allNodes.addAll(fNodes)
-            rawEdges.addAll(fEdges)
-            codeFilesIndexed++
-            filesIndexed++
-        }
-
-        val indexedFiles = store.listIndexedFiles(projectId)
-        var filesDeleted = 0
-        for (indexedRel in indexedFiles) {
-            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
-                val matchesSubpath = normalizedSubpaths.any { cleanSp ->
-                    indexedRel == cleanSp || indexedRel.startsWith("$cleanSp/")
-                }
-                if (!matchesSubpath) continue
-            }
-            if (indexedRel !in validDiskFiles) {
-                store.deleteFileRecord(projectId, indexedRel)
-                filesDeleted++
-            }
-        }
-
-        val existingNodes = store.listNodes(projectId)
-        val mergedNodeMap = existingNodes.associateBy { it.nodeId }.toMutableMap()
-        for (n in allNodes) {
-            mergedNodeMap[n.nodeId] = n
-        }
-        val combinedNodes = mergedNodeMap.values.toList()
-
-        val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(
-            projectId, combinedNodes, rawEdges
-        )
-        val kmpEdges = ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(
-            projectId, combinedNodes
-        )
-
-        // When code files were incrementally re-indexed or deleted, also re-evaluate plans/*.md
-        // so PLAN_SCOPES_FILE edges link against newly added or updated code symbols.
-        if (codeFilesIndexed > 0 || filesDeleted > 0) {
-            val queuedRels = markdownQueue.map { it.first }.toSet()
-            for ((relPlan, planText) in unchangedPlanQueue) {
-                if (relPlan !in queuedRels) {
-                    markdownQueue.add(Pair(relPlan, planText))
-                }
-            }
-            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
-                for (indexedRel in indexedFiles) {
-                    if (indexedRel.startsWith("plans/") && indexedRel.endsWith(".md") && indexedRel !in markdownQueue.map { it.first }) {
-                        val fullPlanPath = "$root/$indexedRel"
-                        if (PlatformFiles.exists(fullPlanPath)) {
-                            markdownQueue.add(Pair(indexedRel, PlatformFiles.readText(fullPlanPath)))
-                        }
-                    }
-                }
-            }
-        }
-
-        val docNodes = mutableListOf<GraphNode>()
-        val docEdges = mutableListOf<GraphEdge>()
-        for ((relMd, mdText) in markdownQueue) {
-            val (dNodes, dEdges) = VaultPlanBridge.extractMarkdownAndPlans(
-                projectId, relMd, mdText, combinedNodes
-            )
-            docNodes.addAll(dNodes)
-            docEdges.addAll(dEdges)
-        }
-
-        store.upsertNodesAndEdges(
-            projectId = projectId,
-            nodes = allNodes + docNodes,
-            edges = modEdges + resolvedEdges + kmpEdges + docEdges
-        )
-
-        val stats = store.getStats(projectId)
-        return buildJsonObject {
-            put("project_id", stats.projectId)
-            put("files", stats.files)
-            put("nodes", stats.nodes)
-            put("edges", stats.edges)
-            put("files_indexed", filesIndexed)
-            put("files_skipped", filesSkipped)
-            putJsonObject("provenance_breakdown") {
-                stats.provenanceBreakdown.forEach { (k, v) -> put(k, v) }
-            }
-        }
-    }
+    ): JsonObject = indexer.indexWorkspace(projectId, subpaths)
 
     fun callTool(name: String, arguments: JsonObject): JsonObject {
         val project = arguments["project"]?.jsonPrimitive?.content ?: "organisation"
@@ -542,6 +342,14 @@ class CodeGraphMcpServer(
                 val report = auditor.runFullAudit(project)
                 json.encodeToJsonElement(report).jsonObject
             }
+            "dead_code" -> {
+                val deadNodes = auditor.detectDeadCode(project)
+                buildJsonObject {
+                    put("project", project)
+                    put("dead_code_count", deadNodes.size)
+                    put("dead_nodes", json.encodeToJsonElement(deadNodes))
+                }
+            }
             "record_memory" -> {
                 val targetStr = if (targets.isNotEmpty()) targets[0] else ""
                 val node = store.getNode(project, targetStr)
@@ -603,7 +411,8 @@ class CodeGraphMcpServer(
         }
 
         val ts = (time(null) * 1000).toLong()
-        val spillFile = "$artifactsDir/spillover_${projectId}_$ts.json"
+        val seq = ++spilloverSeq
+        val spillFile = "$artifactsDir/spillover_${projectId}_${ts}_$seq.json"
         PlatformFiles.writeText(spillFile, rawJson)
 
         val gods = store.getGodNodes(projectId, topN = 5).map { it.name }
@@ -642,7 +451,7 @@ class CodeGraphMcpServer(
                     }
                     putJsonObject("serverInfo") {
                         put("name", "atlas")
-                        put("version", "0.3.1")
+                        put("version", "0.4.0")
                     }
                 }
             }

@@ -13,7 +13,7 @@ import kotlinx.serialization.json.*
  */
 class CodeGraphCli {
     companion object {
-        const val VERSION = "0.3.1"
+        const val VERSION = "0.4.0"
         const val SUMMARY_CEILING_BYTES = 400
 
         private val jsonPretty = Json { prettyPrint = true }
@@ -65,19 +65,29 @@ class CodeGraphCli {
                 val arg = argv[idx]
                 when {
                     arg == "figma" -> subsystem = "figma"
-                    (subsystem == "figma" || arg == "figma") && (arg == "index" || arg == "query" || arg == "audit" || arg == "synthesize-scope" || arg == "version") -> {
-                        command = arg
+                    (subsystem == "figma" || arg == "figma") && (arg == "index" || arg == "query" || arg == "audit" || arg == "synthesize-scope" || arg == "shortest-path" || arg == "shortest_path" || arg == "version") -> {
+                        if (arg == "shortest-path" || arg == "shortest_path") {
+                            command = "query"
+                            action = "shortest_path"
+                        } else {
+                            command = arg
+                        }
                     }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "serve-mcp" || arg == "version" -> {
-                        command = arg
+                    arg == "figma-shortest-path" -> {
+                        subsystem = "figma"
+                        command = "query"
+                        action = "shortest_path"
+                    }
+                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "dead-code" || arg == "dead_code" || arg == "serve-mcp" || arg == "version" -> {
+                        command = if (arg == "dead_code") "dead-code" else arg
                     }
                     arg == "--project" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> project = argv[++idx]
                     arg == "--workspace" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> workspace = argv[++idx]
                     arg == "--db" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> customDb = argv[++idx]
                     arg == "--cache-profile" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> cacheProfile = argv[++idx]
-                    arg == "--target" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> target = argv[++idx]
+                    (arg == "--target" || arg == "--from") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> target = argv[++idx]
                     arg == "--action" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> action = argv[++idx]
-                    arg == "--secondary-target" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> secondaryTarget = argv[++idx]
+                    (arg == "--secondary-target" || arg == "--to") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> secondaryTarget = argv[++idx]
                     arg == "--depth" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> depth = argv[++idx].toIntOrNull() ?: 2
                     arg == "--file" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> fileKey = argv[++idx]
                     arg == "--snapshot" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> snapshotPath = argv[++idx]
@@ -188,14 +198,31 @@ class CodeGraphCli {
                         }
                         val res = server.callTool("codegraph_audit", toolArgs)
                         val data = loadSpilledData(res)
+                        val bViolations = (data["single_declaration_violations"] ?: data["singleDeclarationViolations"])?.jsonArray?.size ?: 0
+                        val lInversions = (data["layer_inversions"] ?: data["layerInversions"])?.jsonArray?.size ?: 0
+                        val pCollisions = (data["plan_3d_collisions"] ?: data["plan3dCollisions"])?.jsonArray?.size ?: 0
+                        val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: (bViolations == 0 && lInversions == 0 && pCollisions == 0)
                         val text = if (isJson) {
                             jsonPretty.encodeToString(data)
                         } else {
-                            val bViolations = (data["single_declaration_violations"] ?: data["singleDeclarationViolations"])?.jsonArray?.size ?: 0
-                            val lInversions = (data["layer_inversions"] ?: data["layerInversions"])?.jsonArray?.size ?: 0
-                            val pCollisions = (data["plan_3d_collisions"] ?: data["plan3dCollisions"])?.jsonArray?.size ?: 0
-                            val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: (bViolations == 0 && lInversions == 0 && pCollisions == 0)
                             "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions"
+                        }
+                        println(truncateSummary(text, isJson))
+                        return if (passed) 0 else 1
+                    }
+                    "dead-code" -> {
+                        val toolArgs = buildJsonObject {
+                            put("action", "dead_code")
+                            put("project", project)
+                        }
+                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val data = loadSpilledData(res)
+                        val count = data["dead_code_count"]?.jsonPrimitive?.intOrNull ?: 0
+                        val names = data["dead_nodes"]?.jsonArray?.mapNotNull { it.jsonObject["name"]?.jsonPrimitive?.content } ?: emptyList()
+                        val text = if (isJson) {
+                            jsonPretty.encodeToString(data)
+                        } else {
+                            "[Dead Code] project=$project dead_symbols=$count top=[${names.take(5).joinToString(", ")}]"
                         }
                         println(truncateSummary(text, isJson))
                         return 0
