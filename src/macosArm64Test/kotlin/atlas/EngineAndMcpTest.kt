@@ -11,18 +11,21 @@ import atlas.mcp.CodeGraphMcpServer
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import platform.posix.getpid
 import platform.posix.symlink
+import platform.posix.time
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+@OptIn(ExperimentalForeignApi::class)
 class EngineAndMcpTest {
 
     @Test
@@ -713,6 +716,90 @@ class EngineAndMcpTest {
             assertEquals(null, notif)
         } finally {
             server.close()
+        }
+    }
+
+    @Test
+    fun testMcpPingReturnsEmptyResult() {
+        val server = CodeGraphMcpServer(workspaceRoot = ".")
+        try {
+            val response = server.processJsonRpcMessage("""{"jsonrpc":"2.0","id":42,"method":"ping"}""")
+            assertNotNull(response)
+            assertTrue(response.contains(""""id":42"""))
+            assertTrue(response.contains(""""result":{}"""))
+
+            // Standard MCP initialized notification returns null
+            val notif = server.processJsonRpcMessage("""{"jsonrpc":"2.0","method":"notifications/initialized"}""")
+            assertEquals(null, notif)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun testMcpToolErrorReturnsResultWithIsErrorTrue() {
+        val server = CodeGraphMcpServer(workspaceRoot = ".")
+        try {
+            val response = server.processJsonRpcMessage("""{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"unknown_tool","arguments":{}}}""")
+            assertNotNull(response)
+            assertTrue(response.contains(""""id":99"""))
+            assertTrue(response.contains(""""isError":true"""), "Tool error must return isError: true under MCP 2024-11-05")
+            assertFalse(response.contains(""""code":-32000"""), "Tool failure must not return protocol-level JSON-RPC error")
+            assertTrue(response.contains("Unknown MCP tool: unknown_tool"))
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun testMcpWorkMemoryAnnotationsIn3dScopeAndImpact() {
+        val pid = getpid()
+        val dbPath = "/tmp/test_mcp_wm_$pid.db"
+        PlatformFiles.delete(dbPath)
+        val server = CodeGraphMcpServer(workspaceRoot = ".", customDbPath = dbPath)
+        try {
+            val node = GraphNode(
+                nodeId = "test_wm:src/Service.kt#PaymentService",
+                projectId = "test_wm",
+                fileId = "test_wm:src/Service.kt",
+                name = "PaymentService",
+                qualifiedName = "com.PaymentService",
+                kind = "class",
+                signature = "class PaymentService",
+                startLine = 1,
+                endLine = 20,
+                moduleId = ":service",
+                sourceSet = "main",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                isTestDouble = false
+            )
+            server.store.upsertNodesAndEdges("test_wm", listOf(node), emptyList())
+            server.store.insertNodeAnnotation(
+                annotationId = "ann_1",
+                projectId = "test_wm",
+                nodeId = node.nodeId,
+                outcome = "WARNING",
+                note = "Requires exclusive lock on payment ledger table",
+                createdAtEpoch = time(null).toDouble()
+            )
+
+            // 1. codegraph_query with action=impact
+            val queryCall = server.processJsonRpcMessage(
+                """{"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"codegraph_query","arguments":{"project":"test_wm","action":"impact","target":"test_wm:src/Service.kt#PaymentService"}}}"""
+            )
+            assertNotNull(queryCall)
+            assertTrue(queryCall.contains("exclusive lock on payment ledger table"), "Impact response must include active WorkMemory annotations")
+
+            // 2. codegraph_audit with action=synthesize_3d_scope
+            val scopeCall = server.processJsonRpcMessage(
+                """{"jsonrpc":"2.0","id":102,"method":"tools/call","params":{"name":"codegraph_audit","arguments":{"project":"test_wm","action":"synthesize_3d_scope","targets":["test_wm:src/Service.kt#PaymentService"]}}}"""
+            )
+            assertNotNull(scopeCall)
+            assertTrue(scopeCall.contains("exclusive lock on payment ledger table"), "3D scope synthesis response must include active WorkMemory annotations")
+        } finally {
+            server.close()
+            PlatformFiles.delete(dbPath)
         }
     }
 

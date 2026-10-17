@@ -12,7 +12,26 @@ import atlas.engine.WorkspaceIndexer
 import atlas.util.PlatformFiles
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import platform.posix.fflush
 import platform.posix.stdout
 import platform.posix.time
@@ -430,7 +449,12 @@ class CodeGraphMcpServer(
             }
             "impact" -> {
                 val impact = store.getImpactRadius(project, node.nodeId, depth = depth)
-                json.encodeToJsonElement(impact).jsonObject
+                val baseObj = json.encodeToJsonElement(impact).jsonObject
+                val annotations = memory.getActiveAnnotations(project, node.nodeId)
+                buildJsonObject {
+                    baseObj.forEach { (k, v) -> put(k, v) }
+                    put("annotations", json.encodeToJsonElement(annotations))
+                }
             }
             "shortest_path" -> {
                 val sec = args["secondary_target"]?.jsonPrimitive?.content ?: ""
@@ -477,9 +501,15 @@ class CodeGraphMcpServer(
             "synthesize_3d_scope" -> {
                 val rec = synthesizer.synthesizeScope(project, targets)
                 val baseObj = json.encodeToJsonElement(rec).jsonObject
+                val scopeAnnotations = rec.seedTargets.flatMap { target ->
+                    val node = store.getNode(project, target)
+                    if (node != null) memory.getActiveAnnotations(project, node.nodeId)
+                    else emptyList()
+                }
                 buildJsonObject {
                     baseObj.forEach { (k, v) -> put(k, v) }
                     put("yaml_block", rec.toYamlBlock())
+                    put("annotations", json.encodeToJsonElement(scopeAnnotations))
                 }
             }
             "verify_architecture" -> {
@@ -506,7 +536,14 @@ class CodeGraphMcpServer(
             }
             "synthesize_compose_scope" -> {
                 val scope = synthesizer.synthesizeComposeScope(project, targets)
-                json.encodeToJsonElement(scope).jsonObject
+                val baseObj = json.encodeToJsonElement(scope).jsonObject
+                val scopeAnnotations = scope.sharedStableModels.flatMap { modelId ->
+                    memory.getActiveAnnotations(project, modelId)
+                }
+                buildJsonObject {
+                    baseObj.forEach { (k, v) -> put(k, v) }
+                    put("annotations", json.encodeToJsonElement(scopeAnnotations))
+                }
             }
             "verify_remediation" -> {
                 val filePath = args["file_path"]?.jsonPrimitive?.contentOrNull
@@ -644,6 +681,12 @@ class CodeGraphMcpServer(
                     }
                 }
             }
+            "ping" -> buildJsonObject {
+                put("jsonrpc", "2.0")
+                if (reqId != null) put("id", reqId)
+                putJsonObject("result") {}
+            }
+            "notifications/initialized", "notifications/cancelled" -> null
             "tools/list" -> buildJsonObject {
                 put("jsonrpc", "2.0")
                 if (reqId != null) put("id", reqId)
@@ -652,10 +695,11 @@ class CodeGraphMcpServer(
                 }
             }
             "tools/call" -> {
+                val tName = params["name"]?.jsonPrimitive?.content ?: ""
+                val tArgs = params["arguments"]?.jsonObject ?: buildJsonObject {}
                 try {
-                    val tName = params["name"]?.jsonPrimitive?.content ?: ""
-                    val tArgs = params["arguments"]?.jsonObject ?: buildJsonObject {}
                     val out = callTool(tName, tArgs)
+                    val isToolErr = out.containsKey("error")
                     buildJsonObject {
                         put("jsonrpc", "2.0")
                         if (reqId != null) put("id", reqId)
@@ -666,15 +710,25 @@ class CodeGraphMcpServer(
                                     put("text", json.encodeToString(out))
                                 }
                             }
+                            if (isToolErr) {
+                                put("isError", true)
+                            }
                         }
                     }
                 } catch (e: Throwable) {
                     buildJsonObject {
                         put("jsonrpc", "2.0")
                         if (reqId != null) put("id", reqId)
-                        putJsonObject("error") {
-                            put("code", -32000)
-                            put("message", e.message ?: "Unknown error")
+                        putJsonObject("result") {
+                            putJsonArray("content") {
+                                addJsonObject {
+                                    put("type", "text")
+                                    put("text", json.encodeToString(buildJsonObject {
+                                        put("error", e.message ?: "Unknown error")
+                                    }))
+                                }
+                            }
+                            put("isError", true)
                         }
                     }
                 }
@@ -692,6 +746,7 @@ class CodeGraphMcpServer(
             }
         }
 
+        if (resp == null) return null
         return json.encodeToString(resp)
     }
 
