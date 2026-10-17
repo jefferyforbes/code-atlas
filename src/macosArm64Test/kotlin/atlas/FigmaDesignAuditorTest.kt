@@ -1156,4 +1156,39 @@ class FigmaDesignAuditorTest {
         assertTrue(scope.tokenLayers.contains("token/alpha"))
         assertTrue(scope.tokenLayers.contains("token/beta"))
     }
+
+    @Test
+    fun testGate1UnboundTokensContinuousDeductionNoCliff() = withTempStore { store ->
+        val fileKey = "unbound_continuous_test"
+        insertBasicDocument(store, fileKey)
+
+        // 100 nodes total, 6 unbound = 6.0% unbound (just above 5.0% threshold)
+        // Previously 6 * 8.0 = 48.0 points deducted (or 51/1000 -> 408 points -> 0.0 score).
+        // Now continuous deduction: 2.0 + (6.0 - 5.0) = 3.0 points deducted -> 92.0 score.
+        val nodes = (1..100).map { i ->
+            FigmaNode(
+                nodeId = "n_$i",
+                fileKey = fileKey,
+                pageName = "Page 1",
+                parentId = if (i == 1) null else "n_1",
+                name = if (i == 1) "01 · Flow" else "Child_$i",
+                nodeType = if (i == 1) "CANVAS_SECTION" else "RECTANGLE",
+                canvasX = 0.0,
+                canvasY = 0.0,
+                width = 100.0,
+                height = 48.0,
+                unboundFill = i <= 6
+            )
+        }
+        store.insertFigmaNodes(fileKey, nodes)
+
+        val auditor = FigmaDesignAuditor(store)
+        val violations = auditor.checkUnboundTokens(fileKey)
+        assertEquals(6, violations.size)
+
+        val (score, finalViolations) = auditor.evaluateGate1Maturity(fileKey, violations)
+        assertTrue(score > 90.0, "Crossing 5% unbound tokens (6%) must not cliff-drop score; got $score")
+        assertEquals(92.0, score, 0.01)
+        assertFalse(finalViolations.any { it.rule == "GATE_1_MATURITY_SCORE" })
+    }
 }

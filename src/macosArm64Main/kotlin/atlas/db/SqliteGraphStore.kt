@@ -95,6 +95,21 @@ class SqliteGraphStore(val dbPath: String) {
                 project_id TEXT NOT NULL,
                 PRIMARY KEY (segment, node_id)
             ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_vocab_node ON name_segment_vocab(node_id);
+
+            CREATE TABLE IF NOT EXISTS raw_symbol_edges (
+                project_id TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                source_node_id TEXT NOT NULL,
+                target_symbol TEXT NOT NULL,
+                edge_type TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                provenance TEXT NOT NULL DEFAULT 'EXTRACTED_AST',
+                line_number INTEGER NOT NULL DEFAULT 1,
+                edge_id TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_raw_edges_proj ON raw_symbol_edges(project_id);
+            CREATE INDEX IF NOT EXISTS idx_raw_edges_file ON raw_symbol_edges(file_id);
 
             CREATE TABLE IF NOT EXISTS node_annotations (
                 annotation_id TEXT PRIMARY KEY,
@@ -263,6 +278,23 @@ class SqliteGraphStore(val dbPath: String) {
         return results
     }
 
+    fun getFileRecordsMap(projectId: String): Map<String, Pair<String, Double>> {
+        val stmt = db.prepare("SELECT rel_path, sha256, mtime FROM files WHERE project_id = ?;")
+        stmt.bindString(1, projectId)
+        val result = mutableMapOf<String, Pair<String, Double>>()
+        try {
+            while (stmt.step()) {
+                val relPath = stmt.columnString(0)
+                val sha256 = stmt.columnString(1)
+                val mtime = stmt.columnDouble(2)
+                result[relPath] = Pair(sha256, mtime)
+            }
+        } finally {
+            stmt.close()
+        }
+        return result
+    }
+
     fun needsReindex(projectId: String, relPath: String, sha256: String, mtime: Double): Boolean {
         val fileId = "$projectId:$relPath"
         val stmt = db.prepare("SELECT sha256, mtime FROM files WHERE file_id = ?;")
@@ -275,6 +307,132 @@ class SqliteGraphStore(val dbPath: String) {
                 return false
             }
             return rowSha != sha256
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun replaceFileRawSymbolEdges(projectId: String, fileId: String, edges: List<GraphEdge>) {
+        val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
+        db.exec("BEGIN TRANSACTION;")
+        try {
+            val delStmt = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
+            val insStmt = db.prepare(
+                """
+                INSERT INTO raw_symbol_edges (
+                    project_id, file_id, source_node_id, target_symbol,
+                    edge_type, confidence, provenance, line_number, edge_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """.trimIndent()
+            )
+            try {
+                delStmt.bindString(1, projectId)
+                delStmt.bindString(2, normalizedFileId)
+                delStmt.step()
+
+                for (edge in edges) {
+                    if (edge.edgeType == "CONTAINS") continue
+                    val targetSym = if (edge.targetNodeId.startsWith("sym:")) {
+                        edge.targetNodeId
+                    } else if (!edge.targetNodeId.startsWith("$projectId:")) {
+                        "sym:${edge.targetNodeId}"
+                    } else {
+                        continue
+                    }
+                    insStmt.reset()
+                    insStmt.clearBindings()
+                    insStmt.bindString(1, projectId)
+                    insStmt.bindString(2, normalizedFileId)
+                    insStmt.bindString(3, edge.sourceNodeId)
+                    insStmt.bindString(4, targetSym)
+                    insStmt.bindString(5, edge.edgeType)
+                    insStmt.bindDouble(6, edge.confidence)
+                    insStmt.bindString(7, edge.provenance)
+                    insStmt.bindInt(8, edge.lineNumber)
+                    insStmt.bindString(9, edge.edgeId)
+                    insStmt.step()
+                }
+            } finally {
+                delStmt.close()
+                insStmt.close()
+            }
+            db.exec("COMMIT;")
+        } catch (e: Throwable) {
+            db.exec("ROLLBACK;")
+            throw e
+        }
+    }
+
+    fun listRawSymbolEdges(projectId: String): List<GraphEdge> {
+        val stmt = db.prepare(
+            """
+            SELECT edge_id, project_id, source_node_id, target_symbol, edge_type,
+                   confidence, provenance, line_number
+            FROM raw_symbol_edges
+            WHERE project_id = ?
+            ORDER BY rowid ASC;
+            """.trimIndent()
+        )
+        stmt.bindString(1, projectId)
+        val results = mutableListOf<GraphEdge>()
+        try {
+            while (stmt.step()) {
+                val rawEdgeId = stmt.columnString(0)
+                val projId = stmt.columnString(1)
+                val sourceNodeId = stmt.columnString(2)
+                val targetSym = stmt.columnString(3)
+                val edgeType = stmt.columnString(4)
+                val confidence = stmt.columnDouble(5)
+                val provenance = stmt.columnString(6)
+                val lineNumber = stmt.columnInt(7)
+                val normalizedTarget = if (targetSym.startsWith("sym:")) targetSym else "sym:$targetSym"
+                val finalEdgeId = rawEdgeId.ifEmpty {
+                    "$sourceNodeId:${edgeType.lowercase()}:${normalizedTarget.removePrefix("sym:")}:$lineNumber"
+                }
+                results.add(
+                    GraphEdge(
+                        edgeId = finalEdgeId,
+                        projectId = projId,
+                        sourceNodeId = sourceNodeId,
+                        targetNodeId = normalizedTarget,
+                        edgeType = edgeType,
+                        provenance = provenance,
+                        confidence = confidence,
+                        lineNumber = lineNumber
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun deleteFileRawSymbolEdges(projectId: String, fileId: String) {
+        val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
+        val stmt = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindString(2, normalizedFileId)
+            stmt.step()
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun deleteOutgoingEdgesForFile(projectId: String, relPath: String) {
+        val fileId = if (relPath.startsWith("$projectId:")) relPath else "$projectId:$relPath"
+        val stmt = db.prepare(
+            """
+            DELETE FROM edges
+            WHERE project_id = ?
+              AND source_node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindString(2, fileId)
+            stmt.step()
         } finally {
             stmt.close()
         }
@@ -341,6 +499,15 @@ class SqliteGraphStore(val dbPath: String) {
                 }
             }
 
+            val delRawEdges = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
+            try {
+                delRawEdges.bindString(1, projectId)
+                delRawEdges.bindString(2, fileId)
+                delRawEdges.step()
+            } finally {
+                delRawEdges.close()
+            }
+
             val upsertStmt = db.prepare(
                 """
                 INSERT INTO files (
@@ -398,7 +565,40 @@ class SqliteGraphStore(val dbPath: String) {
         return res
     }
 
-    fun deleteFileRecord(projectId: String, relPath: String) {
+    fun recomputeDegrees(projectId: String) {
+        val updateDeg = db.prepare(
+            """
+            UPDATE nodes SET
+                in_degree = COALESCE((
+                    SELECT inc.cnt FROM (
+                        SELECT target_node_id, COUNT(*) AS cnt
+                        FROM edges
+                        WHERE project_id = ?
+                        GROUP BY target_node_id
+                    ) inc WHERE inc.target_node_id = nodes.node_id
+                ), 0),
+                out_degree = COALESCE((
+                    SELECT outc.cnt FROM (
+                        SELECT source_node_id, COUNT(*) AS cnt
+                        FROM edges
+                        WHERE project_id = ?
+                        GROUP BY source_node_id
+                    ) outc WHERE outc.source_node_id = nodes.node_id
+                ), 0)
+            WHERE project_id = ?;
+            """.trimIndent()
+        )
+        try {
+            updateDeg.bindString(1, projectId)
+            updateDeg.bindString(2, projectId)
+            updateDeg.bindString(3, projectId)
+            updateDeg.step()
+        } finally {
+            updateDeg.close()
+        }
+    }
+
+    fun deleteFileRecord(projectId: String, relPath: String, recomputeDegrees: Boolean = true) {
         val fileId = "$projectId:$relPath"
         db.exec("BEGIN TRANSACTION;")
         try {
@@ -446,6 +646,15 @@ class SqliteGraphStore(val dbPath: String) {
                 }
             }
 
+            val delRawEdges = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
+            try {
+                delRawEdges.bindString(1, projectId)
+                delRawEdges.bindString(2, fileId)
+                delRawEdges.step()
+            } finally {
+                delRawEdges.close()
+            }
+
             val delFile = db.prepare("DELETE FROM files WHERE file_id = ?;")
             try {
                 delFile.bindString(1, fileId)
@@ -454,27 +663,8 @@ class SqliteGraphStore(val dbPath: String) {
                 delFile.close()
             }
 
-            if (oldNodes.isNotEmpty()) {
-                val updateDeg = db.prepare(
-                    """
-                    UPDATE nodes SET
-                        in_degree = (
-                            SELECT COUNT(*) FROM edges e
-                            WHERE e.project_id = nodes.project_id AND e.target_node_id = nodes.node_id
-                        ),
-                        out_degree = (
-                            SELECT COUNT(*) FROM edges e
-                            WHERE e.project_id = nodes.project_id AND e.source_node_id = nodes.node_id
-                        )
-                    WHERE project_id = ?;
-                    """.trimIndent()
-                )
-                try {
-                    updateDeg.bindString(1, projectId)
-                    updateDeg.step()
-                } finally {
-                    updateDeg.close()
-                }
+            if (recomputeDegrees && oldNodes.isNotEmpty()) {
+                recomputeDegrees(projectId)
             }
             db.exec("COMMIT;")
         } catch (e: Throwable) {
@@ -488,6 +678,7 @@ class SqliteGraphStore(val dbPath: String) {
         nodes: List<GraphNode>,
         edges: List<GraphEdge>
     ) {
+        if (nodes.isEmpty() && edges.isEmpty()) return
         db.exec("BEGIN TRANSACTION;")
         try {
             val delFts = db.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
@@ -551,20 +742,6 @@ class SqliteGraphStore(val dbPath: String) {
                       AND target_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
                     )
                   );
-                """.trimIndent()
-            )
-            val updateDeg = db.prepare(
-                """
-                UPDATE nodes SET
-                    in_degree = (
-                        SELECT COUNT(*) FROM edges e
-                        WHERE e.project_id = nodes.project_id AND e.target_node_id = nodes.node_id
-                    ),
-                    out_degree = (
-                        SELECT COUNT(*) FROM edges e
-                        WHERE e.project_id = nodes.project_id AND e.source_node_id = nodes.node_id
-                    )
-                WHERE project_id = ?;
                 """.trimIndent()
             )
 
@@ -639,8 +816,7 @@ class SqliteGraphStore(val dbPath: String) {
                 sweepOrphanEdges.bindString(3, projectId)
                 sweepOrphanEdges.step()
 
-                updateDeg.bindString(1, projectId)
-                updateDeg.step()
+                recomputeDegrees(projectId)
             } finally {
                 delFts.close()
                 delVocab.close()
@@ -649,7 +825,6 @@ class SqliteGraphStore(val dbPath: String) {
                 insVocab.close()
                 insEdge.close()
                 sweepOrphanEdges.close()
-                updateDeg.close()
             }
 
             db.exec("COMMIT;")
@@ -681,6 +856,10 @@ class SqliteGraphStore(val dbPath: String) {
     }
 
     fun getNode(projectId: String, target: String): GraphNode? {
+        val escapedTarget = target
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
         val stmt = db.prepare(
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
@@ -688,9 +867,17 @@ class SqliteGraphStore(val dbPath: String) {
                    is_test_double, in_degree, out_degree
             FROM nodes
             WHERE project_id = ? AND (
-                node_id = ? OR name = ? OR qualified_name = ? OR file_id LIKE ?
+                node_id = ?
+                OR qualified_name = ?
+                OR name = ?
+                OR file_id = ?
+                OR file_id LIKE ? ESCAPE '\'
+                OR file_id LIKE ? ESCAPE '\'
             )
-            ORDER BY (node_id = ?) DESC, (name = ?) DESC, in_degree DESC
+            ORDER BY (node_id = ?) DESC,
+                     (qualified_name = ?) DESC,
+                     (name = ?) DESC,
+                     in_degree DESC
             LIMIT 1;
             """.trimIndent()
         )
@@ -699,9 +886,12 @@ class SqliteGraphStore(val dbPath: String) {
             stmt.bindString(2, target)
             stmt.bindString(3, target)
             stmt.bindString(4, target)
-            stmt.bindString(5, "%$target")
-            stmt.bindString(6, target)
-            stmt.bindString(7, target)
+            stmt.bindString(5, target)
+            stmt.bindString(6, "%:$escapedTarget")
+            stmt.bindString(7, "%/$escapedTarget")
+            stmt.bindString(8, target)
+            stmt.bindString(9, target)
+            stmt.bindString(10, target)
             if (stmt.step()) {
                 return rowToNode(stmt)
             }
@@ -728,13 +918,14 @@ class SqliteGraphStore(val dbPath: String) {
                     SELECT node_id, bm25(nodes_fts) AS rank
                     FROM nodes_fts
                     WHERE project_id = ? AND nodes_fts MATCH ?
+                    ORDER BY rank
                     LIMIT ?;
                     """.trimIndent()
                 )
                 try {
                     ftsStmt.bindString(1, projectId)
                     ftsStmt.bindString(2, ftsExpr)
-                    ftsStmt.bindInt(3, limit * 3)
+                    ftsStmt.bindInt(3, (limit * 10).coerceAtLeast(100))
                     while (ftsStmt.step()) {
                         val nid = ftsStmt.columnString(0)
                         val rank = ftsStmt.columnDouble(1)
@@ -769,22 +960,39 @@ class SqliteGraphStore(val dbPath: String) {
             }
         }
 
+        val escapedQuery = query
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+
         val likeStmt = db.prepare(
             """
-            SELECT node_id, name FROM nodes
-            WHERE project_id = ? AND (name LIKE ? OR qualified_name LIKE ?)
+            SELECT node_id, name, in_degree FROM nodes
+            WHERE project_id = ?
+              AND (name LIKE ? ESCAPE '\' OR qualified_name LIKE ? ESCAPE '\')
+            ORDER BY (LOWER(name) = LOWER(?)) DESC,
+                     (LOWER(name) LIKE LOWER(?) ESCAPE '\') DESC,
+                     in_degree DESC,
+                     name ASC
             LIMIT ?;
             """.trimIndent()
         )
         try {
             likeStmt.bindString(1, projectId)
-            likeStmt.bindString(2, "%$query%")
-            likeStmt.bindString(3, "%$query%")
-            likeStmt.bindInt(4, limit * 2)
+            likeStmt.bindString(2, "%$escapedQuery%")
+            likeStmt.bindString(3, "%$escapedQuery%")
+            likeStmt.bindString(4, query)
+            likeStmt.bindString(5, "$escapedQuery%")
+            likeStmt.bindInt(6, (limit * 5).coerceAtLeast(50))
             while (likeStmt.step()) {
                 val nid = likeStmt.columnString(0)
                 val name = likeStmt.columnString(1)
-                val bonus = if (name.equals(query, ignoreCase = true)) 25.0 else 12.0
+                val inDeg = likeStmt.columnInt(2)
+                val bonus = when {
+                    name.equals(query, ignoreCase = true) -> 25.0
+                    name.startsWith(query, ignoreCase = true) -> 16.0
+                    else -> 12.0
+                } + minOf(10.0, inDeg.coerceAtLeast(0).toDouble() * 0.5)
                 val current = scores.getOrElse(nid) { 0.0 }
                 scores[nid] = current + bonus
             }
@@ -797,7 +1005,7 @@ class SqliteGraphStore(val dbPath: String) {
         val rankedIds = scores.entries.sortedByDescending { it.value }.map { it.key }
         val nodeMap = mutableMapOf<String, GraphNode>()
 
-        val batchIds = rankedIds.take(limit * 2)
+        val batchIds = rankedIds.take((limit * 5).coerceAtLeast(50))
         val placeholders = batchIds.joinToString(",") { "?" }
         val nodesStmt = db.prepare(
             """
@@ -817,30 +1025,36 @@ class SqliteGraphStore(val dbPath: String) {
             nodesStmt.close()
         }
 
-        val results = mutableListOf<GraphNode>()
-        for (nid in rankedIds) {
+        val candidates = rankedIds.mapNotNull { nid ->
             val node = nodeMap[nid]
-            if (node != null && (kind == null || node.kind == kind)) {
-                results.add(node)
-                if (results.size >= limit) break
-            }
-        }
-        return results
+            if (node != null && (kind == null || node.kind == kind)) node else null
+        }.sortedWith(
+            compareByDescending<GraphNode> { scores[it.nodeId] ?: 0.0 }
+                .thenByDescending { it.name.equals(query, ignoreCase = true) }
+                .thenByDescending { it.name.startsWith(query, ignoreCase = true) }
+                .thenByDescending { it.inDegree }
+                .thenBy { it.name }
+        )
+
+        return candidates.take(limit)
     }
 
     fun getCallers(projectId: String, nodeId: String, depth: Int = 2): List<GraphHop> {
         val maxDepth = if (depth < 1) 1 else depth
         val stmt = db.prepare(
             """
-            WITH RECURSIVE caller_chain(source_id, target_id, edge_type, provenance, hop) AS (
-                SELECT source_node_id, target_node_id, edge_type, provenance, 1
+            WITH RECURSIVE caller_chain(source_id, target_id, edge_type, provenance, hop, path) AS (
+                SELECT source_node_id, target_node_id, edge_type, provenance, 1,
+                       ',' || source_node_id || ',' || target_node_id || ','
                 FROM edges
                 WHERE project_id = ? AND target_node_id = ?
-                UNION
-                SELECT e.source_node_id, e.target_node_id, e.edge_type, e.provenance, c.hop + 1
+                UNION ALL
+                SELECT e.source_node_id, e.target_node_id, e.edge_type, e.provenance, c.hop + 1,
+                       c.path || e.source_node_id || ','
                 FROM edges e
                 JOIN caller_chain c ON e.target_node_id = c.source_id
                 WHERE e.project_id = ? AND c.hop < ?
+                  AND instr(c.path, ',' || e.source_node_id || ',') = 0
             )
             SELECT DISTINCT c.source_id, c.target_id, c.edge_type, c.provenance, MIN(c.hop) AS hop,
                             COALESCE(n.name, ''), COALESCE(n.file_id, ''), COALESCE(n.start_line, 1),
@@ -883,15 +1097,18 @@ class SqliteGraphStore(val dbPath: String) {
         val maxDepth = if (depth < 1) 1 else depth
         val stmt = db.prepare(
             """
-            WITH RECURSIVE callee_chain(source_id, target_id, edge_type, provenance, hop) AS (
-                SELECT source_node_id, target_node_id, edge_type, provenance, 1
+            WITH RECURSIVE callee_chain(source_id, target_id, edge_type, provenance, hop, path) AS (
+                SELECT source_node_id, target_node_id, edge_type, provenance, 1,
+                       ',' || source_node_id || ',' || target_node_id || ','
                 FROM edges
                 WHERE project_id = ? AND source_node_id = ?
-                UNION
-                SELECT e.source_node_id, e.target_node_id, e.edge_type, e.provenance, c.hop + 1
+                UNION ALL
+                SELECT e.source_node_id, e.target_node_id, e.edge_type, e.provenance, c.hop + 1,
+                       c.path || e.target_node_id || ','
                 FROM edges e
                 JOIN callee_chain c ON e.source_node_id = c.target_id
                 WHERE e.project_id = ? AND c.hop < ?
+                  AND instr(c.path, ',' || e.target_node_id || ',') = 0
             )
             SELECT DISTINCT c.source_id, c.target_id, c.edge_type, c.provenance, MIN(c.hop) AS hop,
                             COALESCE(n.name, ''), COALESCE(n.file_id, ''), COALESCE(n.start_line, 1),
@@ -1036,6 +1253,7 @@ class SqliteGraphStore(val dbPath: String) {
                 if (path.size > maxHops) break
 
                 edgeStmt.reset()
+                edgeStmt.clearBindings()
                 edgeStmt.bindString(1, projectId)
                 edgeStmt.bindString(2, curr)
 
@@ -2037,6 +2255,35 @@ class SqliteGraphStore(val dbPath: String) {
         return results
     }
 
+    fun queryFigmaNodesByIds(fileKey: String, nodeIds: List<String>): List<FigmaNode> {
+        if (nodeIds.isEmpty()) return emptyList()
+        val placeholders = nodeIds.joinToString(",") { "?" }
+        val stmt = db.prepare(
+            """
+            SELECT rowid_pk, node_id, file_key, page_name, section_id, parent_id,
+                   name, node_type, layout_mode, sizing_horizontal, sizing_vertical,
+                   text_auto_resize, padding_left, padding_right, padding_top, padding_bottom,
+                   item_spacing, local_x, local_y, canvas_x, canvas_y, width, height,
+                   is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
+                   semiotic_layer
+            FROM figma_nodes
+            WHERE file_key = ? AND node_id IN ($placeholders);
+            """.trimIndent()
+        )
+        val byId = mutableMapOf<String, FigmaNode>()
+        try {
+            stmt.bindString(1, fileKey)
+            nodeIds.forEachIndexed { idx, id -> stmt.bindString(2 + idx, id) }
+            while (stmt.step()) {
+                val node = rowToFigmaNode(stmt)
+                byId[node.nodeId] = node
+            }
+        } finally {
+            stmt.close()
+        }
+        return nodeIds.mapNotNull { byId[it] }
+    }
+
     fun findFigmaShortestPath(
         fileKey: String,
         sourceTarget: String,
@@ -2072,6 +2319,7 @@ class SqliteGraphStore(val dbPath: String) {
                 if (path.size > depth) break
 
                 edgeStmt.reset()
+                edgeStmt.clearBindings()
                 edgeStmt.bindString(1, fileKey)
                 edgeStmt.bindString(2, curr)
                 edgeStmt.bindString(3, fileKey)
@@ -2081,7 +2329,7 @@ class SqliteGraphStore(val dbPath: String) {
                     val nextId = edgeStmt.columnString(0)
                     if (nextId == dstNode.nodeId) {
                         val fullPathIds = path + nextId
-                        return fullPathIds.mapNotNull { queryFigmaNodeById(fileKey, it) }
+                        return queryFigmaNodesByIds(fileKey, fullPathIds)
                     }
                     if (visited.add(nextId)) {
                         queue.add(Pair(nextId, path + nextId))
@@ -2105,18 +2353,34 @@ class SqliteGraphStore(val dbPath: String) {
     }
 
     fun queryFigmaNodesByNameLike(fileKey: String, substring: String): List<FigmaNode> {
-        val stmt = db.prepare("SELECT node_id FROM figma_nodes WHERE file_key = ? AND name LIKE ?;")
-        val ids = mutableListOf<String>()
+        val escaped = substring
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        val stmt = db.prepare(
+            """
+            SELECT rowid_pk, node_id, file_key, page_name, section_id, parent_id,
+                   name, node_type, layout_mode, sizing_horizontal, sizing_vertical,
+                   text_auto_resize, padding_left, padding_right, padding_top, padding_bottom,
+                   item_spacing, local_x, local_y, canvas_x, canvas_y, width, height,
+                   is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast,
+                   semiotic_layer
+            FROM figma_nodes
+            WHERE file_key = ? AND name LIKE ? ESCAPE '\'
+            ORDER BY name ASC;
+            """.trimIndent()
+        )
+        val results = mutableListOf<FigmaNode>()
         try {
             stmt.bindString(1, fileKey)
-            stmt.bindString(2, "%$substring%")
+            stmt.bindString(2, "%$escaped%")
             while (stmt.step()) {
-                ids.add(stmt.columnString(0))
+                results.add(rowToFigmaNode(stmt))
             }
         } finally {
             stmt.close()
         }
-        return ids.mapNotNull { queryFigmaNodeById(fileKey, it) }
+        return results
     }
 
     fun queryDistinctInstantiatedTargets(fileKey: String): Set<String> {

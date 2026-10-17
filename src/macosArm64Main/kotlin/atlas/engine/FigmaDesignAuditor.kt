@@ -158,7 +158,12 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
         violations: List<FigmaViolation>
     ): Pair<Double, List<FigmaViolation>> {
         var deductions = 0.0
+        var unboundViolationCount = 0
         for (v in violations) {
+            if (v.rule == "UNBOUND_TOKENS") {
+                unboundViolationCount++
+                continue
+            }
             deductions += when (v.rule) {
                 "CIRCULAR_V_FILL_IN_HUG", "CIRCULAR_H_FILL_IN_HUG" -> 10.0
                 "STATIC_CONTAINER_FRAME" -> 8.0
@@ -167,12 +172,23 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
                 "NEGATIVE_COORDINATES" -> 5.0
                 "CHILD_AMPUTATION_WIDTH" -> 7.0
                 "NO_EMOJI" -> 5.0
-                "UNBOUND_TOKENS" -> 8.0
                 "AD_HOC_DETACHED_SPECIMEN" -> 8.0
                 "CANVAS_SPATIAL_TOPOLOGY" -> 5.0
                 "WCAG_CONTRAST" -> 6.0
                 else -> 5.0
             }
+        }
+
+        if (unboundViolationCount > 0) {
+            val totalNodes = store.countFigmaNodes(fileKey)
+            val unboundDeduction = if (totalNodes > 0) {
+                val ratio = unboundViolationCount.toDouble() / totalNodes.toDouble()
+                val excessPct = ((ratio - 0.05).coerceAtLeast(0.0)) * 100.0
+                min(25.0, 2.0 + excessPct)
+            } else {
+                min(25.0, unboundViolationCount * 2.0)
+            }
+            deductions += unboundDeduction
         }
 
         val rawScore = 95.0 - deductions
