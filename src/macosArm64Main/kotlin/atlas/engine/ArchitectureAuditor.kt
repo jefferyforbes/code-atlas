@@ -2,12 +2,15 @@ package atlas.engine
 
 import atlas.db.SqliteGraphStore
 import atlas.model.AuditReport
+import atlas.model.ComplexityViolation
 import atlas.model.ComposeAuditResult
 import atlas.model.DescriptionSuggestion
 import atlas.model.GraphNode
 import atlas.model.LayerInversionViolation
 import atlas.model.PlanCollision
 import atlas.model.SingleDeclarationViolation
+import kotlin.math.ln
+import kotlin.math.roundToInt
 
 /**
  * AST-backed Architecture Auditor enforcing Clean Architecture layers, BOOST-003, and 3D collision safety.
@@ -30,6 +33,7 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         val layerInversions = checkLayerInversions(projectId, normalizedPrefixes)
         val planCollisions = checkPlan3dCollisions(projectId, normalizedPrefixes)
         val descriptionSuggestions = checkTopLevelDescriptions(projectId, normalizedPrefixes, descriptionMode)
+        val complexityViolations = checkComplexityViolations(projectId, pathPrefixes = normalizedPrefixes)
 
         val passed = singleDeclViolations.isEmpty() && layerInversions.isEmpty() && planCollisions.isEmpty()
         return AuditReport(
@@ -38,7 +42,64 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
             singleDeclarationViolations = singleDeclViolations,
             layerInversions = layerInversions,
             plan3dCollisions = planCollisions,
-            descriptionSuggestions = descriptionSuggestions
+            descriptionSuggestions = descriptionSuggestions,
+            complexityViolations = complexityViolations
+        )
+    }
+
+    /**
+     * Evaluates function complexity thresholds and reports violating functions with severity
+     * (WARNING for cognitive 11-15, HIGH for cognitive > 15).
+     * Computes the Topological Architectural Risk Index incorporating afferent coupling:
+     * Risk Index = Cognitive Complexity * (1 + ln(1 + inDegree))
+     */
+    fun checkComplexityViolations(
+        projectId: String,
+        maxCognitive: Int = 10,
+        maxCyclomatic: Int = 15,
+        pathPrefixes: List<String>? = null
+    ): List<ComplexityViolation> {
+        val prefixes = normalizePathPrefixes(pathPrefixes)
+        val candidateKinds = setOf("function", "method", "composable")
+        val violations = mutableListOf<ComplexityViolation>()
+
+        for (node in store.listNodes(projectId)) {
+            if (node.kind !in candidateKinds) continue
+            if (node.semioticLayer == "test" || node.archLayer == "test" || node.isTestDouble) continue
+            val relPath = node.fileId.substringAfter(':')
+            if (relPath.endsWith("__init__.py") || relPath.endsWith(".md")) continue
+            if (!matchesAnyPrefix(relPath, prefixes)) continue
+
+            if (node.cognitiveComplexity > maxCognitive || node.cyclomaticComplexity > maxCyclomatic) {
+                val severity = if (node.cognitiveComplexity > 15) "HIGH" else "WARNING"
+                val lineSpan = if (node.endLine > node.startLine) {
+                    "L${node.startLine}-L${node.endLine}"
+                } else {
+                    "L${node.startLine}"
+                }
+                val inDeg = node.inDegree.toDouble()
+                val riskIndex = node.cognitiveComplexity.toDouble() * (1.0 + ln(1.0 + inDeg))
+                val roundedRisk = (riskIndex * 10.0).roundToInt() / 10.0
+                val message = "Function '${node.name}' exceeds complexity thresholds (Cognitive: ${node.cognitiveComplexity}/$maxCognitive, Cyclomatic: ${node.cyclomaticComplexity}/$maxCyclomatic, Risk: $roundedRisk)."
+                violations.add(
+                    ComplexityViolation(
+                        ruleId = "COMPLEXITY-001",
+                        severity = severity,
+                        message = message,
+                        nodeId = node.nodeId,
+                        lineSpan = lineSpan,
+                        riskIndex = roundedRisk,
+                        cognitiveComplexity = node.cognitiveComplexity,
+                        cyclomaticComplexity = node.cyclomaticComplexity
+                    )
+                )
+            }
+        }
+
+        return violations.sortedWith(
+            compareByDescending<ComplexityViolation> { it.riskIndex }
+                .thenByDescending { it.cognitiveComplexity }
+                .thenBy { it.nodeId }
         )
     }
 
