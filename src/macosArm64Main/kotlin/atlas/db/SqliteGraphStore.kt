@@ -5,6 +5,7 @@ import atlas.model.*
 import atlas.util.PlatformFiles
 import atlas.util.Sha256
 import kotlin.math.abs
+import kotlin.math.ln
 
 /**
  * Persistent SQLite WAL knowledge graph store with FTS5, segment vocabulary, and freshness slicing.
@@ -73,7 +74,11 @@ class SqliteGraphStore(val dbPath: String) {
                 in_degree INTEGER NOT NULL DEFAULT 0,
                 out_degree INTEGER NOT NULL DEFAULT 0,
                 description TEXT DEFAULT NULL,
-                is_top_level INTEGER NOT NULL DEFAULT 1
+                is_top_level INTEGER NOT NULL DEFAULT 1,
+                cyclomatic_complexity INTEGER NOT NULL DEFAULT 1,
+                cognitive_complexity INTEGER NOT NULL DEFAULT 0,
+                max_nesting_depth INTEGER NOT NULL DEFAULT 0,
+                complexity_score REAL NOT NULL DEFAULT 100.0
             );
             CREATE INDEX IF NOT EXISTS idx_nodes_project_name ON nodes(project_id, name);
             CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_id);
@@ -358,6 +363,19 @@ class SqliteGraphStore(val dbPath: String) {
                 if ("is_top_level" !in cols) {
                     db.exec("ALTER TABLE nodes ADD COLUMN is_top_level INTEGER NOT NULL DEFAULT 1;")
                 }
+                if ("cyclomatic_complexity" !in cols) {
+                    db.exec("ALTER TABLE nodes ADD COLUMN cyclomatic_complexity INTEGER NOT NULL DEFAULT 1;")
+                }
+                if ("cognitive_complexity" !in cols) {
+                    db.exec("ALTER TABLE nodes ADD COLUMN cognitive_complexity INTEGER NOT NULL DEFAULT 0;")
+                }
+                if ("max_nesting_depth" !in cols) {
+                    db.exec("ALTER TABLE nodes ADD COLUMN max_nesting_depth INTEGER NOT NULL DEFAULT 0;")
+                }
+                if ("complexity_score" !in cols) {
+                    db.exec("ALTER TABLE nodes ADD COLUMN complexity_score REAL NOT NULL DEFAULT 100.0;")
+                }
+                db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_complexity ON nodes(project_id, cognitive_complexity) WHERE cognitive_complexity >= 10;")
             }
         } catch (_: Throwable) {}
     }
@@ -869,8 +887,9 @@ class SqliteGraphStore(val dbPath: String) {
                     INSERT INTO nodes (
                         node_id, project_id, file_id, name, qualified_name, kind, signature,
                         start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                        is_test_double, in_degree, out_degree, description, is_top_level
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        is_test_double, in_degree, out_degree, description, is_top_level,
+                        cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(node_id) DO UPDATE SET
                         file_id = excluded.file_id,
                         name = excluded.name,
@@ -885,7 +904,11 @@ class SqliteGraphStore(val dbPath: String) {
                         arch_layer = excluded.arch_layer,
                         is_test_double = excluded.is_test_double,
                         description = excluded.description,
-                        is_top_level = excluded.is_top_level;
+                        is_top_level = excluded.is_top_level,
+                        cyclomatic_complexity = excluded.cyclomatic_complexity,
+                        cognitive_complexity = excluded.cognitive_complexity,
+                        max_nesting_depth = excluded.max_nesting_depth,
+                        complexity_score = excluded.complexity_score;
                     """.trimIndent()
                 )
                 val insFts = scope.prepare(
@@ -963,6 +986,10 @@ class SqliteGraphStore(val dbPath: String) {
                         insNode.bindNull(17)
                     }
                     insNode.bindInt(18, if (node.isTopLevel) 1 else 0)
+                    insNode.bindInt(19, node.cyclomaticComplexity)
+                    insNode.bindInt(20, node.cognitiveComplexity)
+                    insNode.bindInt(21, node.maxNestingDepth)
+                    insNode.bindDouble(22, node.complexityScore)
                     insNode.step()
 
                     insFts.reset()
@@ -1030,7 +1057,11 @@ class SqliteGraphStore(val dbPath: String) {
             inDegree = stmt.columnInt(14),
             outDegree = stmt.columnInt(15),
             description = stmt.columnStringNullable(16),
-            isTopLevel = stmt.columnInt(17) != 0
+            isTopLevel = stmt.columnInt(17) != 0,
+            cyclomaticComplexity = stmt.columnInt(18),
+            cognitiveComplexity = stmt.columnInt(19),
+            maxNestingDepth = stmt.columnInt(20),
+            complexityScore = stmt.columnDouble(21)
         )
     }
 
@@ -1043,7 +1074,8 @@ class SqliteGraphStore(val dbPath: String) {
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                    start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level
+                   is_test_double, in_degree, out_degree, description, is_top_level,
+                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
             FROM nodes
             WHERE project_id = ? AND (
                 node_id = ?
@@ -1087,7 +1119,8 @@ class SqliteGraphStore(val dbPath: String) {
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                    start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level
+                   is_test_double, in_degree, out_degree, description, is_top_level,
+                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
             FROM nodes
             WHERE project_id = ? AND (
                 file_id = ?
@@ -1123,7 +1156,8 @@ class SqliteGraphStore(val dbPath: String) {
                 """
                 SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                        start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree, description, is_top_level
+                       is_test_double, in_degree, out_degree, description, is_top_level,
+                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
                 FROM nodes
                 WHERE project_id = ? AND file_id IN ($placeholders)
                 ORDER BY in_degree DESC;
@@ -1255,7 +1289,8 @@ class SqliteGraphStore(val dbPath: String) {
                 """
                 SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                        start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree, description, is_top_level
+                       is_test_double, in_degree, out_degree, description, is_top_level,
+                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
                 FROM nodes WHERE node_id IN ($placeholders);
                 """.trimIndent()
             )
@@ -1410,7 +1445,8 @@ class SqliteGraphStore(val dbPath: String) {
                 """
                 SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                        start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree, description, is_top_level
+                       is_test_double, in_degree, out_degree, description, is_top_level,
+                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
                 FROM nodes WHERE project_id = ? AND node_id IN ($placeholders);
                 """.trimIndent()
             )
@@ -1452,7 +1488,8 @@ class SqliteGraphStore(val dbPath: String) {
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                    start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level
+                   is_test_double, in_degree, out_degree, description, is_top_level,
+                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
             FROM nodes
             WHERE project_id = ? AND kind NOT IN ('file', 'module', 'plan_contract', 'obsidian_note')
             ORDER BY (in_degree * 2 + out_degree) DESC, in_degree DESC
@@ -1613,7 +1650,8 @@ class SqliteGraphStore(val dbPath: String) {
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                    start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level
+                   is_test_double, in_degree, out_degree, description, is_top_level,
+                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
             FROM nodes WHERE project_id = ? ORDER BY node_id ASC;
             """.trimIndent()
         )
@@ -3628,6 +3666,168 @@ class SqliteGraphStore(val dbPath: String) {
             isUsedInBody = stmt.columnInt(7) != 0,
             provenance = stmt.columnString(8)
         )
+    }
+
+    fun upsertNodeComplexity(
+        nodeId: String,
+        cyclomatic: Int,
+        cognitive: Int,
+        maxNesting: Int,
+        score: Double
+    ) {
+        val stmt = db.prepare(
+            """
+            UPDATE nodes
+            SET cyclomatic_complexity = ?,
+                cognitive_complexity = ?,
+                max_nesting_depth = ?,
+                complexity_score = ?
+            WHERE node_id = ?;
+            """.trimIndent()
+        )
+        try {
+            stmt.bindInt(1, cyclomatic)
+            stmt.bindInt(2, cognitive)
+            stmt.bindInt(3, maxNesting)
+            stmt.bindDouble(4, score)
+            stmt.bindString(5, nodeId)
+            stmt.step()
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun queryComplexNodes(
+        projectId: String,
+        minCognitive: Int = 10,
+        limit: Int = 50
+    ): List<ComplexityScoreRecord> {
+        val stmt = db.prepare(
+            """
+            SELECT node_id, project_id, name, qualified_name, file_id, start_line,
+               cyclomatic_complexity, cognitive_complexity, max_nesting_depth, in_degree,
+               complexity_score
+            FROM nodes
+            WHERE project_id = ? AND cognitive_complexity >= ? AND kind IN ('function', 'method', 'composable')
+            ORDER BY cognitive_complexity DESC, in_degree DESC
+            LIMIT ?;
+            """.trimIndent()
+        )
+        val results = mutableListOf<ComplexityScoreRecord>()
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindInt(2, minCognitive)
+            stmt.bindInt(3, limit)
+            while (stmt.step()) {
+                val nid = stmt.columnString(0)
+                val pid = stmt.columnString(1)
+                val name = stmt.columnString(2)
+                val qname = stmt.columnString(3)
+                val fileId = stmt.columnString(4)
+                val startLine = stmt.columnInt(5)
+                val cyclo = stmt.columnInt(6)
+                val cog = stmt.columnInt(7)
+                val nest = stmt.columnInt(8)
+                val inDeg = stmt.columnInt(9)
+                val score = stmt.columnDouble(10)
+                val filePath = if (fileId.contains(':')) fileId.substringAfter(':') else fileId
+                val grade = when {
+                    score >= 90.0 -> "A"
+                    score >= 80.0 -> "B"
+                    score >= 70.0 -> "C"
+                    score >= 60.0 -> "D"
+                    else -> "F"
+                }
+                val riskIndex = cog.toDouble() * (1.0 + ln(1.0 + inDeg.toDouble()))
+                results.add(
+                    ComplexityScoreRecord(
+                        nodeId = nid,
+                        projectId = pid,
+                        name = name,
+                        qualifiedName = qname,
+                        filePath = filePath,
+                        line = startLine,
+                        cyclomatic = cyclo,
+                        cognitive = cog,
+                        maxNesting = nest,
+                        inDegree = inDeg,
+                        overallScore = score,
+                        grade = grade,
+                        riskIndex = riskIndex
+                    )
+                )
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun queryArchitecturalRiskNodes(
+        projectId: String,
+        minRisk: Double = 0.0,
+        limit: Int = 50
+    ): List<ComplexityScoreRecord> {
+        val stmt = db.prepare(
+            """
+            SELECT node_id, project_id, name, qualified_name, file_id, start_line,
+               cyclomatic_complexity, cognitive_complexity, max_nesting_depth, in_degree,
+               complexity_score
+            FROM nodes
+            WHERE project_id = ? AND kind IN ('function', 'method', 'composable') AND cognitive_complexity > 0
+            ORDER BY (cognitive_complexity * (1.0 + in_degree)) DESC
+            LIMIT ?;
+            """.trimIndent()
+        )
+        val results = mutableListOf<ComplexityScoreRecord>()
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindInt(2, (limit * 2).coerceAtLeast(100))
+            while (stmt.step()) {
+                val nid = stmt.columnString(0)
+                val pid = stmt.columnString(1)
+                val name = stmt.columnString(2)
+                val qname = stmt.columnString(3)
+                val fileId = stmt.columnString(4)
+                val startLine = stmt.columnInt(5)
+                val cyclo = stmt.columnInt(6)
+                val cog = stmt.columnInt(7)
+                val nest = stmt.columnInt(8)
+                val inDeg = stmt.columnInt(9)
+                val score = stmt.columnDouble(10)
+                val filePath = if (fileId.contains(':')) fileId.substringAfter(':') else fileId
+                val grade = when {
+                    score >= 90.0 -> "A"
+                    score >= 80.0 -> "B"
+                    score >= 70.0 -> "C"
+                    score >= 60.0 -> "D"
+                    else -> "F"
+                }
+                val riskIndex = cog.toDouble() * (1.0 + ln(1.0 + inDeg.toDouble()))
+                if (riskIndex >= minRisk) {
+                    results.add(
+                        ComplexityScoreRecord(
+                            nodeId = nid,
+                            projectId = pid,
+                            name = name,
+                            qualifiedName = qname,
+                            filePath = filePath,
+                            line = startLine,
+                            cyclomatic = cyclo,
+                            cognitive = cog,
+                            maxNesting = nest,
+                            inDegree = inDeg,
+                            overallScore = score,
+                            grade = grade,
+                            riskIndex = riskIndex
+                        )
+                    )
+                }
+            }
+        } finally {
+            stmt.close()
+        }
+        return results.sortedByDescending { it.riskIndex }.take(limit)
     }
 }
 
