@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.orion"
-version = "0.3.0"
+version = "0.3.1"
 
 repositories {
     mavenCentral()
@@ -47,6 +47,9 @@ tasks.register<Copy>("installToDist") {
     from(layout.buildDirectory.file("bin/macosArm64/releaseExecutable/atlas.kexe"))
     into(layout.projectDirectory.dir("dist"))
     rename { "atlas" }
+    doFirst {
+        layout.projectDirectory.file("dist/atlas").asFile.delete()
+    }
 }
 
 tasks.register<Copy>("installToLocalBin") {
@@ -54,6 +57,9 @@ tasks.register<Copy>("installToLocalBin") {
     from(layout.buildDirectory.file("bin/macosArm64/releaseExecutable/atlas.kexe"))
     into(file(System.getProperty("user.home") + "/.local/bin"))
     rename { "atlas" }
+    doFirst {
+        file(System.getProperty("user.home") + "/.local/bin/atlas").delete()
+    }
     doLast {
         file(System.getProperty("user.home") + "/.local/bin/atlas").setExecutable(true)
     }

@@ -6,7 +6,7 @@
 
 *Sub-15ms Cold-Start &middot; Ahead-Of-Time Native Binary &middot; Zero Runtime Dependencies &middot; Model Context Protocol (MCP)*
 
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
+[![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
 [![Kotlin](https://img.shields.io/badge/Kotlin_Native-2.2.0-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/native-overview.html)
 [![macOS](https://img.shields.io/badge/macOS-Apple_Silicon_(arm64)-000000?logo=apple&logoColor=white)](https://apple.com)
 [![Startup](https://img.shields.io/badge/Cold_Start-~3ms-00C853)](https://github.com/jefferyforbes/code-atlas)
@@ -66,7 +66,7 @@ flowchart TD
 
     subgraph Interfaces["Zero-Token-Tax Interfaces"]
         CLI["Out-of-Process CLI<br/>(Default ≤400 Bytes Summary Mode)"]
-        MCP["Stdio JSON-RPC 2.0 MCP Server<br/>(2 Compound Tools &middot; 32KB Disk Spillover)"]
+        MCP["Stdio JSON-RPC 2.0 MCP Server<br/>(4 Compound Tools &middot; 32KB Disk Spillover)"]
         CI["Pre-Commit & CI Quality Gate<br/>(Exit Code 0/1 Architecture & Design Linters)"]
     end
 
@@ -361,7 +361,7 @@ Atlas evaluates Figma documents against 12 non-negotiable design system invarian
 
 ## Model Context Protocol (MCP) Integration
 
-Atlas exposes a standard **JSON-RPC 2.0 stdio MCP server** with 2 compound tools (`codegraph_query`, `codegraph_audit`) conforming strictly to the $\le 15$ tools ceiling, $\le 25$-word parameter descriptions, and 32 KB disk spillover safeguards.
+Atlas exposes a standard **JSON-RPC 2.0 stdio MCP server** with 4 tools (`codegraph_query`, `codegraph_audit`, `figma_audit`, `figma_scope`) conforming strictly to the $\le 15$ tools ceiling, $\le 25$-word parameter descriptions, and 32 KB disk spillover safeguards.
 
 ### Claude Desktop Configuration
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:

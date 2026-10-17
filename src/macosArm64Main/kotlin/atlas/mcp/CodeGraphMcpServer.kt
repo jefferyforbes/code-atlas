@@ -4,11 +4,14 @@ import atlas.bridge.VaultPlanBridge
 import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
+import atlas.engine.FigmaDesignAuditor
 import atlas.engine.ScopeSynthesizer
 import atlas.engine.WorkMemoryStore
 import atlas.extract.ModuleBoundaryDetector
 import atlas.extract.PolyglotAstExtractor
 import atlas.extract.SemioticLayerClassifier
+import atlas.model.Figma3DScope
+import atlas.model.FigmaAuditResult
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
@@ -45,10 +48,11 @@ class CodeGraphMcpServer(
     val synthesizer: ScopeSynthesizer
     val auditor: ArchitectureAuditor
     val memory: WorkMemoryStore
+    val figmaAuditor: FigmaDesignAuditor
 
     private val json = Json {
         ignoreUnknownKeys = true
-        prettyPrint = true
+        prettyPrint = false
         encodeDefaults = true
     }
 
@@ -64,6 +68,7 @@ class CodeGraphMcpServer(
         synthesizer = ScopeSynthesizer(store)
         auditor = ArchitectureAuditor(store)
         memory = WorkMemoryStore(store)
+        figmaAuditor = FigmaDesignAuditor(store)
     }
 
     fun toolDefinitions(): List<JsonObject> {
@@ -121,6 +126,8 @@ class CodeGraphMcpServer(
                         add("synthesize_3d_scope")
                         add("record_memory")
                         add("sync_index")
+                        add("figma_audit")
+                        add("figma_scope")
                     }
                     put("description", "Audit, synthesis, learning, or indexing action to execute.")
                 }
@@ -128,10 +135,14 @@ class CodeGraphMcpServer(
                     put("type", "string")
                     put("description", "Target project slug.")
                 }
+                putJsonObject("file_key") {
+                    put("type", "string")
+                    put("description", "Figma file key or document slug for figma_audit or figma_scope.")
+                }
                 putJsonObject("targets") {
                     put("type", "array")
                     putJsonObject("items") { put("type", "string") }
-                    put("description", "Seed symbols, file paths, or plan names to scope, audit, or record outcomes against.")
+                    put("description", "Seed symbols, file paths, plan names, or Figma nodes to scope, audit, or record outcomes against.")
                 }
                 putJsonObject("outcome") {
                     put("type", "string")
@@ -153,6 +164,45 @@ class CodeGraphMcpServer(
             }
         }
 
+        val figmaAuditSchema = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("file_key") {
+                    put("type", "string")
+                    put("description", "Figma document file key or identifier.")
+                }
+                putJsonObject("project") {
+                    put("type", "string")
+                    put("description", "Target project slug (default: organisation).")
+                }
+            }
+            putJsonArray("required") {
+                add("file_key")
+            }
+        }
+
+        val figmaScopeSchema = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("file_key") {
+                    put("type", "string")
+                    put("description", "Figma document file key or identifier.")
+                }
+                putJsonObject("project") {
+                    put("type", "string")
+                    put("description", "Target project slug (default: organisation).")
+                }
+                putJsonObject("seeds") {
+                    put("type", "array")
+                    putJsonObject("items") { put("type", "string") }
+                    put("description", "Seed node names, component names, or IDs to scope.")
+                }
+            }
+            putJsonArray("required") {
+                add("file_key")
+            }
+        }
+
         return listOf(
             buildJsonObject {
                 put("name", "codegraph_query")
@@ -163,8 +213,31 @@ class CodeGraphMcpServer(
                 put("name", "codegraph_audit")
                 put("description", "Audit architectural layers, verify single-declaration rules, record outcomes, or synthesize 3D scopes.")
                 put("inputSchema", auditSchema)
+            },
+            buildJsonObject {
+                put("name", "figma_audit")
+                put("description", "Run 12 deterministic design invariant audits and evaluate Gate 1 maturity compliance.")
+                put("inputSchema", figmaAuditSchema)
+            },
+            buildJsonObject {
+                put("name", "figma_scope")
+                put("description", "Synthesize Figma 3D Concurrency Scope (spatial canvas bounds, shared components, token layers).")
+                put("inputSchema", figmaScopeSchema)
             }
         )
+    }
+
+    private fun normalizeSubpath(raw: String, canonicalRoot: String): String {
+        var s = raw.trim().replace('\\', '/')
+        if (s.startsWith("$canonicalRoot/")) {
+            s = s.removePrefix("$canonicalRoot/")
+        } else if (s == canonicalRoot) {
+            s = ""
+        }
+        while (s.startsWith("./")) {
+            s = s.removePrefix("./")
+        }
+        return s.trim('/')
     }
 
     fun indexWorkspace(
@@ -172,11 +245,17 @@ class CodeGraphMcpServer(
         subpaths: List<String>? = null
     ): JsonObject {
         val root = PlatformFiles.canonicalPath(workspaceRoot)
+        val normalizedSubpaths = subpaths
+            ?.map { normalizeSubpath(it, root) }
+            ?.filter { it.isNotEmpty() }
+
         val (modNodes, modEdges, knownModules) = ModuleBoundaryDetector.extractModuleGraph(root, projectId)
 
         val allNodes = modNodes.toMutableList()
         val rawEdges = modEdges.toMutableList()
         val markdownQueue = mutableListOf<Pair<String, String>>()
+        val unchangedPlanQueue = mutableListOf<Pair<String, String>>()
+        var codeFilesIndexed = 0
         var filesIndexed = 0
         var filesSkipped = 0
 
@@ -187,9 +266,8 @@ class CodeGraphMcpServer(
             val parts = relStr.split('/')
             if (parts.any { it in SKIP_DIRS || it.startsWith(".venv") }) continue
 
-            if (subpaths != null && subpaths.isNotEmpty()) {
-                val matchesSubpath = subpaths.any { sp ->
-                    val cleanSp = sp.trimEnd('/')
+            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
+                val matchesSubpath = normalizedSubpaths.any { cleanSp ->
                     relStr == cleanSp || relStr.startsWith("$cleanSp/")
                 }
                 if (!matchesSubpath) continue
@@ -225,6 +303,9 @@ class CodeGraphMcpServer(
                     )
                     filesIndexed++
                 } else {
+                    if (relStr.startsWith("plans/")) {
+                        unchangedPlanQueue.add(Pair(relStr, sourceText))
+                    }
                     filesSkipped++
                 }
                 continue
@@ -257,20 +338,22 @@ class CodeGraphMcpServer(
             )
             allNodes.addAll(fNodes)
             rawEdges.addAll(fEdges)
+            codeFilesIndexed++
             filesIndexed++
         }
 
         val indexedFiles = store.listIndexedFiles(projectId)
+        var filesDeleted = 0
         for (indexedRel in indexedFiles) {
-            if (subpaths != null && subpaths.isNotEmpty()) {
-                val matchesSubpath = subpaths.any { sp ->
-                    val cleanSp = sp.trimEnd('/')
+            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
+                val matchesSubpath = normalizedSubpaths.any { cleanSp ->
                     indexedRel == cleanSp || indexedRel.startsWith("$cleanSp/")
                 }
                 if (!matchesSubpath) continue
             }
             if (indexedRel !in validDiskFiles) {
                 store.deleteFileRecord(projectId, indexedRel)
+                filesDeleted++
             }
         }
 
@@ -287,6 +370,27 @@ class CodeGraphMcpServer(
         val kmpEdges = ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(
             projectId, combinedNodes
         )
+
+        // When code files were incrementally re-indexed or deleted, also re-evaluate plans/*.md
+        // so PLAN_SCOPES_FILE edges link against newly added or updated code symbols.
+        if (codeFilesIndexed > 0 || filesDeleted > 0) {
+            val queuedRels = markdownQueue.map { it.first }.toSet()
+            for ((relPlan, planText) in unchangedPlanQueue) {
+                if (relPlan !in queuedRels) {
+                    markdownQueue.add(Pair(relPlan, planText))
+                }
+            }
+            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
+                for (indexedRel in indexedFiles) {
+                    if (indexedRel.startsWith("plans/") && indexedRel.endsWith(".md") && indexedRel !in markdownQueue.map { it.first }) {
+                        val fullPlanPath = "$root/$indexedRel"
+                        if (PlatformFiles.exists(fullPlanPath)) {
+                            markdownQueue.add(Pair(indexedRel, PlatformFiles.readText(fullPlanPath)))
+                        }
+                    }
+                }
+            }
+        }
 
         val docNodes = mutableListOf<GraphNode>()
         val docEdges = mutableListOf<GraphEdge>()
@@ -323,6 +427,8 @@ class CodeGraphMcpServer(
         val payload = when (name) {
             "codegraph_query", "atlas_query" -> handleQuery(arguments)
             "codegraph_audit", "atlas_audit" -> handleAudit(arguments)
+            "figma_audit" -> handleFigmaAudit(arguments)
+            "figma_scope" -> handleFigmaScope(arguments)
             else -> throw IllegalArgumentException("Unknown MCP tool: $name")
         }
         return enforceSpillover(project, payload)
@@ -449,8 +555,44 @@ class CodeGraphMcpServer(
                     put("outcome", outcome)
                 }
             }
+            "figma_audit" -> handleFigmaAudit(args)
+            "figma_scope" -> handleFigmaScope(args)
             else -> throw IllegalArgumentException("Unsupported codegraph_audit action: $action")
         }
+    }
+
+    private fun handleFigmaAudit(args: JsonObject): JsonObject {
+        val fileKey = args["file_key"]?.jsonPrimitive?.content
+            ?: args["fileKey"]?.jsonPrimitive?.content
+            ?: args["target"]?.jsonPrimitive?.content
+            ?: (args["targets"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content)
+            ?: ""
+        if (fileKey.isEmpty()) {
+            return buildJsonObject {
+                put("error", "Missing required 'file_key' parameter for figma_audit")
+            }
+        }
+        val result = figmaAuditor.audit(fileKey)
+        return json.encodeToJsonElement(result).jsonObject
+    }
+
+    private fun handleFigmaScope(args: JsonObject): JsonObject {
+        val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
+        val fileKey = args["file_key"]?.jsonPrimitive?.content
+            ?: args["fileKey"]?.jsonPrimitive?.content
+            ?: args["target"]?.jsonPrimitive?.content
+            ?: (args["targets"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content)
+            ?: ""
+        if (fileKey.isEmpty()) {
+            return buildJsonObject {
+                put("error", "Missing required 'file_key' parameter for figma_scope")
+            }
+        }
+        val seeds = args["seeds"]?.jsonArray?.map { it.jsonPrimitive.content }
+            ?: args["targets"]?.jsonArray?.map { it.jsonPrimitive.content }
+            ?: listOfNotNull(args["seed"]?.jsonPrimitive?.content ?: if (args.containsKey("file_key") || args.containsKey("fileKey")) args["target"]?.jsonPrimitive?.content else null)
+        val scope = figmaAuditor.synthesizeFigmaScope(project, fileKey, seeds)
+        return json.encodeToJsonElement(scope).jsonObject
     }
 
     private fun enforceSpillover(projectId: String, payload: JsonObject): JsonObject {
@@ -475,84 +617,91 @@ class CodeGraphMcpServer(
         }
     }
 
-    fun serveStdio() {
-        while (true) {
-            val line = readlnOrNull() ?: break
-            val trimmed = line.trim()
-            if (trimmed.isEmpty()) continue
+    fun processJsonRpcMessage(line: String): String? {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty()) return null
 
-            val req = try {
-                json.parseToJsonElement(trimmed).jsonObject
-            } catch (_: Throwable) {
-                continue
+        val req = try {
+            json.parseToJsonElement(trimmed).jsonObject
+        } catch (_: Throwable) {
+            return null
+        }
+
+        val reqId = req["id"]
+        val method = req["method"]?.jsonPrimitive?.content ?: ""
+        val params = req["params"]?.jsonObject ?: buildJsonObject {}
+
+        val resp = when (method) {
+            "initialize" -> buildJsonObject {
+                put("jsonrpc", "2.0")
+                if (reqId != null) put("id", reqId)
+                putJsonObject("result") {
+                    put("protocolVersion", "2024-11-05")
+                    putJsonObject("capabilities") {
+                        putJsonObject("tools") {}
+                    }
+                    putJsonObject("serverInfo") {
+                        put("name", "atlas")
+                        put("version", "0.3.1")
+                    }
+                }
             }
-
-            val reqId = req["id"]
-            val method = req["method"]?.jsonPrimitive?.content ?: ""
-            val params = req["params"]?.jsonObject ?: buildJsonObject {}
-
-            val resp = when (method) {
-                "initialize" -> buildJsonObject {
-                    put("jsonrpc", "2.0")
-                    if (reqId != null) put("id", reqId)
-                    putJsonObject("result") {
-                        put("protocolVersion", "2024-11-05")
-                        putJsonObject("capabilities") {
-                            putJsonObject("tools") {}
-                        }
-                        putJsonObject("serverInfo") {
-                            put("name", "atlas")
-                            put("version", "0.3.0")
-                        }
-                    }
+            "tools/list" -> buildJsonObject {
+                put("jsonrpc", "2.0")
+                if (reqId != null) put("id", reqId)
+                putJsonObject("result") {
+                    put("tools", json.encodeToJsonElement(toolDefinitions()))
                 }
-                "tools/list" -> buildJsonObject {
-                    put("jsonrpc", "2.0")
-                    if (reqId != null) put("id", reqId)
-                    putJsonObject("result") {
-                        put("tools", json.encodeToJsonElement(toolDefinitions()))
-                    }
-                }
-                "tools/call" -> {
-                    try {
-                        val tName = params["name"]?.jsonPrimitive?.content ?: ""
-                        val tArgs = params["arguments"]?.jsonObject ?: buildJsonObject {}
-                        val out = callTool(tName, tArgs)
-                        buildJsonObject {
-                            put("jsonrpc", "2.0")
-                            if (reqId != null) put("id", reqId)
-                            putJsonObject("result") {
-                                putJsonArray("content") {
-                                    addJsonObject {
-                                        put("type", "text")
-                                        put("text", json.encodeToString(out))
-                                    }
+            }
+            "tools/call" -> {
+                try {
+                    val tName = params["name"]?.jsonPrimitive?.content ?: ""
+                    val tArgs = params["arguments"]?.jsonObject ?: buildJsonObject {}
+                    val out = callTool(tName, tArgs)
+                    buildJsonObject {
+                        put("jsonrpc", "2.0")
+                        if (reqId != null) put("id", reqId)
+                        putJsonObject("result") {
+                            putJsonArray("content") {
+                                addJsonObject {
+                                    put("type", "text")
+                                    put("text", json.encodeToString(out))
                                 }
                             }
                         }
-                    } catch (e: Throwable) {
-                        buildJsonObject {
-                            put("jsonrpc", "2.0")
-                            if (reqId != null) put("id", reqId)
-                            putJsonObject("error") {
-                                put("code", -32000)
-                                put("message", e.message ?: "Unknown error")
-                            }
+                    }
+                } catch (e: Throwable) {
+                    buildJsonObject {
+                        put("jsonrpc", "2.0")
+                        if (reqId != null) put("id", reqId)
+                        putJsonObject("error") {
+                            put("code", -32000)
+                            put("message", e.message ?: "Unknown error")
                         }
                     }
                 }
-                else -> {
-                    if (reqId == null) continue
-                    buildJsonObject {
-                        put("jsonrpc", "2.0")
-                        put("id", reqId)
-                        putJsonObject("result") {}
-                    }
+            }
+            else -> {
+                if (reqId == null) return null
+                buildJsonObject {
+                    put("jsonrpc", "2.0")
+                    put("id", reqId)
+                    putJsonObject("result") {}
                 }
             }
+        }
 
-            println(json.encodeToString(resp))
-            fflush(stdout)
+        return json.encodeToString(resp)
+    }
+
+    fun serveStdio() {
+        while (true) {
+            val line = readlnOrNull() ?: break
+            val resp = processJsonRpcMessage(line)
+            if (resp != null) {
+                println(resp)
+                fflush(stdout)
+            }
         }
     }
 }
