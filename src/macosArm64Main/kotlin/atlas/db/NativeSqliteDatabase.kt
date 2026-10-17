@@ -56,6 +56,22 @@ class NativeSqliteDatabase(val path: String) {
         }
     }
 
+    fun <T> withSavepoint(name: String, block: () -> T): T {
+        val safeName = name.filter { it.isLetterOrDigit() || it == '_' }.ifEmpty { "sp_default" }
+        exec("SAVEPOINT $safeName;")
+        return try {
+            val result = block()
+            exec("RELEASE SAVEPOINT $safeName;")
+            result
+        } catch (t: Throwable) {
+            try {
+                exec("ROLLBACK TO SAVEPOINT $safeName;")
+                exec("RELEASE SAVEPOINT $safeName;")
+            } catch (_: Throwable) {}
+            throw t
+        }
+    }
+
     fun close() {
         if (dbPointer != null) {
             sqlite3_close_v2(dbPointer)
