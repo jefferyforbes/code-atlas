@@ -246,88 +246,100 @@ class WorkspaceIndexer(
                 stabilityPatterns = stabilityPatterns,
                 workspaceNodes = workspaceNodesSnapshot
             )
-            allNewComposeNodes.addAll(bundle.nodes)
-            allNewComposeParams.addAll(bundle.params)
-
-            val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
-            val modId = ModuleBoundaryDetector.resolveModuleId(relStr, knownModules)
-
-            // Ensure every ComposeNodeRecord and mutated property/CompositionLocal has a GraphNode in `nodes`
-            // so `sweepOrphanEdges` preserves all semantic Compose edges.
-            for (cn in bundle.nodes) {
-                val shortName = cn.fqName.substringAfterLast('.')
-                val existing = mergedNodeMap[cn.nodeId]
-                val compGraphNode = if (existing != null) {
-                    existing.copy(kind = "composable", sourceSet = cn.sourceSet)
-                } else {
-                    GraphNode(
-                        nodeId = cn.nodeId,
-                        projectId = projectId,
-                        fileId = fileId,
-                        name = shortName,
-                        qualifiedName = cn.fqName,
-                        kind = "composable",
-                        signature = "@Composable fun $shortName",
-                        startLine = cn.startLine,
-                        endLine = cn.endLine,
-                        moduleId = modId,
-                        sourceSet = cn.sourceSet,
-                        semioticLayer = semLayer,
-                        archLayer = archLayer,
-                        isTestDouble = false
-                    )
+            val isComposeFile = bundle.nodes.isNotEmpty() ||
+                bundle.edges.any { it.edgeType in setOf("PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "OBSERVES_STATE") } ||
+                sourceText.lineSequence().any { line ->
+                    val t = line.trim()
+                    (t.startsWith("import androidx.compose") || t.startsWith("import org.jetbrains.compose")) ||
+                    t.startsWith("@Composable") || t.contains(" @Composable ")
                 }
-                mergedNodeMap[cn.nodeId] = compGraphNode
-                changedNodes.add(compGraphNode)
-            }
 
-            for (ce in bundle.edges) {
-                if (ce.sourceNodeId.endsWith("#file") && ce.sourceNodeId !in mergedNodeMap) {
-                    val fileNode = GraphNode(
-                        nodeId = ce.sourceNodeId,
-                        projectId = projectId,
-                        fileId = fileId,
-                        name = relStr.substringAfterLast('/'),
-                        qualifiedName = relStr,
-                        kind = "file_scope",
-                        signature = relStr,
-                        startLine = 1,
-                        endLine = 1,
-                        moduleId = modId,
-                        sourceSet = SemioticLayerClassifier.detectSourceSet(relStr),
-                        semioticLayer = semLayer,
-                        archLayer = archLayer
-                    )
-                    mergedNodeMap[fileNode.nodeId] = fileNode
-                    changedNodes.add(fileNode)
-                }
-                if (ce.edgeType in setOf("MUTATES_PROPERTY", "PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "OBSERVES_STATE")) {
-                    val symName = ce.targetNodeId.removePrefix("sym:")
-                    val anyExisting = mergedNodeMap.values.any { it.name == symName }
-                    if (!anyExisting) {
-                        val syntheticId = "$fileId#$symName"
-                        val synNode = GraphNode(
-                            nodeId = syntheticId,
+            if (isComposeFile) {
+                allNewComposeNodes.addAll(bundle.nodes)
+                allNewComposeParams.addAll(bundle.params)
+
+                val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
+                val modId = ModuleBoundaryDetector.resolveModuleId(relStr, knownModules)
+
+                // Ensure every ComposeNodeRecord and mutated property/CompositionLocal has a GraphNode in `nodes`
+                // so `sweepOrphanEdges` preserves all semantic Compose edges.
+                for (cn in bundle.nodes) {
+                    val shortName = cn.fqName.substringAfterLast('.')
+                    val existing = mergedNodeMap[cn.nodeId]
+                    val compGraphNode = if (existing != null) {
+                        existing.copy(kind = "composable", sourceSet = cn.sourceSet)
+                    } else {
+                        GraphNode(
+                            nodeId = cn.nodeId,
                             projectId = projectId,
                             fileId = fileId,
-                            name = symName,
-                            qualifiedName = symName,
-                            kind = "variable",
-                            signature = symName,
-                            startLine = ce.lineNumber,
-                            endLine = ce.lineNumber,
+                            name = shortName,
+                            qualifiedName = cn.fqName,
+                            kind = "composable",
+                            signature = "@Composable fun $shortName",
+                            startLine = cn.startLine,
+                            endLine = cn.endLine,
+                            moduleId = modId,
+                            sourceSet = cn.sourceSet,
+                            semioticLayer = semLayer,
+                            archLayer = archLayer,
+                            isTestDouble = false
+                        )
+                    }
+                    mergedNodeMap[cn.nodeId] = compGraphNode
+                    changedNodes.add(compGraphNode)
+                }
+
+                for (ce in bundle.edges) {
+                    if (ce.sourceNodeId.endsWith("#file") && ce.sourceNodeId !in mergedNodeMap) {
+                        val fileNode = GraphNode(
+                            nodeId = ce.sourceNodeId,
+                            projectId = projectId,
+                            fileId = fileId,
+                            name = relStr.substringAfterLast('/'),
+                            qualifiedName = relStr,
+                            kind = "file_scope",
+                            signature = relStr,
+                            startLine = 1,
+                            endLine = 1,
                             moduleId = modId,
                             sourceSet = SemioticLayerClassifier.detectSourceSet(relStr),
                             semioticLayer = semLayer,
                             archLayer = archLayer
                         )
-                        mergedNodeMap[syntheticId] = synNode
-                        changedNodes.add(synNode)
+                        mergedNodeMap[fileNode.nodeId] = fileNode
+                        changedNodes.add(fileNode)
+                    }
+                    if (ce.edgeType in setOf("MUTATES_PROPERTY", "PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "OBSERVES_STATE")) {
+                        val symName = ce.targetNodeId.removePrefix("sym:")
+                        val anyExisting = mergedNodeMap.values.any { it.name == symName }
+                        if (!anyExisting) {
+                            val syntheticId = "$fileId#$symName"
+                            val synNode = GraphNode(
+                                nodeId = syntheticId,
+                                projectId = projectId,
+                                fileId = fileId,
+                                name = symName,
+                                qualifiedName = symName,
+                                kind = "variable",
+                                signature = symName,
+                                startLine = ce.lineNumber,
+                                endLine = ce.lineNumber,
+                                moduleId = modId,
+                                sourceSet = SemioticLayerClassifier.detectSourceSet(relStr),
+                                semioticLayer = semLayer,
+                                archLayer = archLayer
+                            )
+                            mergedNodeMap[syntheticId] = synNode
+                            changedNodes.add(synNode)
+                        }
                     }
                 }
-            }
 
-            pendingRawEdges[fileId] = baseEdges + bundle.edges
+                pendingRawEdges[fileId] = baseEdges + bundle.edges
+            } else {
+                pendingRawEdges[fileId] = baseEdges
+            }
         }
 
         if (pendingRawEdges.isNotEmpty()) {

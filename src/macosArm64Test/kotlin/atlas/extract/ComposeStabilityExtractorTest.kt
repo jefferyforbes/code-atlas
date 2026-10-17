@@ -269,4 +269,63 @@ class ComposeStabilityExtractorTest {
         val comp = bundle.nodes.first { it.fqName == "com.example.whencond.WhenEffectComponent" }
         assertTrue((comp.violationMask and ComposeStabilityExtractor.BIT_STATE_001) != 0, "remember inside argumentless when must trigger BIT_STATE_001")
     }
+
+    @Test
+    fun testMutatesPropertyIgnoresEqualityChecksAndCapturesRealMutations() {
+        val src = """
+            package com.example.stability
+
+            import androidx.compose.runtime.Composable
+
+            class CacheChecker {
+                fun check(cached: Pair<String, Long>?, sha256: String, hex: String, nodeKind: String) {
+                    if (cached.first == sha256) return
+                    if (nodeKind.kind == "function") return
+                    if (hex.length == 1) return
+                    if (cached.first === sha256) return
+                    if (cached.second != 0L) return
+                    if (nodeKind.kind !== "function") return
+                    if (cached.first =="tight") return
+                    if (hex.length <= 10) return
+                    if (hex.length >= 2) return
+
+                    // Real property mutation
+                    cached.title = "updated"
+                }
+            }
+
+            @Composable
+            fun SampleWidget(state: StateModel) {
+                if (state.count == 0) {
+                    // Equality check inside Composable
+                }
+                if (state.name === null) {
+                    // Identity equality
+                }
+                // Real mutation inside Composable
+                state.description = "New description"
+            }
+        """.trimIndent()
+
+        val bundle = extractor.extractKotlinFile(
+            projectSlug = "proj",
+            relPath = "src/commonMain/kotlin/CacheChecker.kt",
+            sourceText = src
+        )
+
+        val mutEdges = bundle.edges.filter { it.edgeType == "MUTATES_PROPERTY" }
+        val mutatedProps = mutEdges.map { it.targetNodeId.removePrefix("sym:") }.toSet()
+
+        // Verify equality comparisons are NEVER extracted as property mutations
+        assertFalse(mutatedProps.contains("first"), "cached.first == sha256 must NOT be extracted as a property mutation")
+        assertFalse(mutatedProps.contains("kind"), "nodeKind.kind == 'function' must NOT be extracted as a property mutation")
+        assertFalse(mutatedProps.contains("length"), "hex.length == 1 must NOT be extracted as a property mutation")
+        assertFalse(mutatedProps.contains("count"), "state.count == 0 must NOT be extracted as a property mutation")
+        assertFalse(mutatedProps.contains("name"), "state.name === null must NOT be extracted as a property mutation")
+        assertFalse(mutatedProps.contains("second"), "cached.second != 0L must NOT be extracted as a property mutation")
+
+        // Verify real property mutations ARE captured
+        assertTrue(mutatedProps.contains("title"), "cached.title = 'updated' MUST be extracted as a property mutation")
+        assertTrue(mutatedProps.contains("description"), "state.description = 'New description' MUST be extracted as a property mutation")
+    }
 }

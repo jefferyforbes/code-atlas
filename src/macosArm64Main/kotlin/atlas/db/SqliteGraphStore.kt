@@ -3467,18 +3467,20 @@ class SqliteGraphStore(val dbPath: String) {
     }
 
     fun countPropertyMutations(projectSlug: String, targetSymbolOrNodeId: String): Int {
+        val cleanSym = targetSymbolOrNodeId.removePrefix("sym:")
         val stmt = db.prepare(
             """
             SELECT COUNT(*) FROM edges
             WHERE project_id = ?
-              AND (target_node_id = ? OR target_node_id LIKE ?)
+              AND (target_node_id = ? OR target_node_id = ? OR target_node_id LIKE ?)
               AND edge_type = 'MUTATES_PROPERTY';
             """.trimIndent()
         )
         try {
             stmt.bindString(1, projectSlug)
             stmt.bindString(2, targetSymbolOrNodeId)
-            stmt.bindString(3, "%#$targetSymbolOrNodeId")
+            stmt.bindString(3, "sym:$cleanSym")
+            stmt.bindString(4, "%#$cleanSym")
             if (stmt.step()) {
                 return stmt.columnInt(0)
             }

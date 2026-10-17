@@ -100,7 +100,7 @@ class ComposeStabilityExtractor {
         private val PROVIDES_LOCAL_RE = Regex("""\b(Local[A-Za-z0-9_]+)\s+provides\b""")
         private val CONSUMES_LOCAL_RE = Regex("""\b(Local[A-Za-z0-9_]+)\.current\b""")
         private val OBSERVES_STATE_RE = Regex("""\b([a-zA-Z_][A-Za-z0-9_]*)\.(collectAsStateWithLifecycle|collectAsState)\s*\(""")
-        private val MUTATES_PROP_RE = Regex("""\b([a-zA-Z_][A-Za-z0-9_]*)\.([a-zA-Z_][A-Za-z0-9_]*)\s*=""")
+        private val MUTATES_PROP_RE = Regex("""\b([a-zA-Z_][A-Za-z0-9_]*)\.([a-zA-Z_][A-Za-z0-9_]*)\s*=(?!=)""")
 
         fun buildLineOffsets(text: String): IntArray {
             val offsets = mutableListOf(0)

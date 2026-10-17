@@ -11,30 +11,39 @@ import kotlinx.cinterop.*
 @OptIn(ExperimentalForeignApi::class)
 class NativeSqliteStatement(
     private val db: CPointer<sqlite3>?,
-    private val stmt: CPointer<sqlite3_stmt>?
+    private var stmt: CPointer<sqlite3_stmt>?
 ) {
+    private fun requireStmt(): CPointer<sqlite3_stmt> =
+        checkNotNull(stmt) { "Statement already closed" }
+
     fun bindString(index: Int, value: String) {
-        sqlite3_bind_text(stmt, index, value, -1, SQLITE_TRANSIENT)
+        val s = requireStmt()
+        sqlite3_bind_text(s, index, value, -1, SQLITE_TRANSIENT)
     }
 
     fun bindInt(index: Int, value: Int) {
-        sqlite3_bind_int(stmt, index, value)
+        val s = requireStmt()
+        sqlite3_bind_int(s, index, value)
     }
 
     fun bindLong(index: Int, value: Long) {
-        sqlite3_bind_int64(stmt, index, value)
+        val s = requireStmt()
+        sqlite3_bind_int64(s, index, value)
     }
 
     fun bindDouble(index: Int, value: Double) {
-        sqlite3_bind_double(stmt, index, value)
+        val s = requireStmt()
+        sqlite3_bind_double(s, index, value)
     }
 
     fun bindNull(index: Int) {
-        sqlite3_bind_null(stmt, index)
+        val s = requireStmt()
+        sqlite3_bind_null(s, index)
     }
 
     fun step(): Boolean {
-        val rc = sqlite3_step(stmt)
+        val s = requireStmt()
+        val rc = sqlite3_step(s)
         return when (rc) {
             SQLITE_ROW -> true
             SQLITE_DONE -> false
@@ -46,44 +55,55 @@ class NativeSqliteStatement(
     }
 
     fun columnString(index: Int): String {
-        return sqlite3_column_text(stmt, index)?.reinterpret<ByteVar>()?.toKString() ?: ""
+        val s = requireStmt()
+        return sqlite3_column_text(s, index)?.reinterpret<ByteVar>()?.toKString() ?: ""
     }
 
     fun columnInt(index: Int): Int {
-        return sqlite3_column_int(stmt, index)
+        val s = requireStmt()
+        return sqlite3_column_int(s, index)
     }
 
     fun columnLong(index: Int): Long {
-        return sqlite3_column_int64(stmt, index)
+        val s = requireStmt()
+        return sqlite3_column_int64(s, index)
     }
 
     fun columnDouble(index: Int): Double {
-        return sqlite3_column_double(stmt, index)
+        val s = requireStmt()
+        return sqlite3_column_double(s, index)
     }
 
     fun columnIsNull(index: Int): Boolean {
-        return sqlite3_column_type(stmt, index) == SQLITE_NULL
+        val s = requireStmt()
+        return sqlite3_column_type(s, index) == SQLITE_NULL
     }
 
     fun columnName(index: Int): String {
-        return sqlite3_column_name(stmt, index)?.toKString() ?: ""
+        val s = requireStmt()
+        return sqlite3_column_name(s, index)?.toKString() ?: ""
     }
 
     fun columnCount(): Int {
-        return sqlite3_column_count(stmt)
+        val s = requireStmt()
+        return sqlite3_column_count(s)
     }
 
     fun reset() {
-        sqlite3_reset(stmt)
+        val s = requireStmt()
+        sqlite3_reset(s)
     }
 
     fun clearBindings() {
-        sqlite3_clear_bindings(stmt)
+        val s = requireStmt()
+        sqlite3_clear_bindings(s)
     }
 
     fun close() {
-        if (stmt != null) {
-            sqlite3_finalize(stmt)
+        val s = stmt
+        if (s != null) {
+            stmt = null
+            sqlite3_finalize(s)
         }
     }
 }

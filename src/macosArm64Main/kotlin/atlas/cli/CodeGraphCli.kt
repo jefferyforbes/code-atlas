@@ -69,6 +69,12 @@ class CodeGraphCli {
             var isComposeAuditFlag = false
             var outcome: String? = null
             var note: String? = null
+            var beforeSnippet: String? = null
+            var afterSnippet: String? = null
+            var ruleIdArg: String? = null
+            var targetNodeArg: String? = null
+            var testCmdArg: String? = null
+            var applyRemediation = false
 
             var idx = 0
             while (idx < argv.size) {
@@ -92,10 +98,11 @@ class CodeGraphCli {
                         command = "query"
                         action = "shortest_path"
                     }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "version" -> {
+                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" -> {
                         command = when (arg) {
                             "dead_code" -> "dead-code"
                             "record_memory" -> "record-memory"
+                            "verify_remediation" -> "verify-remediation"
                             else -> arg
                         }
                     }
@@ -137,6 +144,13 @@ class CodeGraphCli {
                     arg == "--json" -> isJson = true
                     arg == "--summary" -> isJson = false
                     arg == "--include-source" -> includeSource = true
+                    arg == "--before" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> beforeSnippet = argv[++idx]
+                    arg == "--after" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> afterSnippet = argv[++idx]
+                    arg == "--rule" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> ruleIdArg = argv[++idx]
+                    arg == "--target-node" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> targetNodeArg = argv[++idx]
+                    arg == "--test-cmd" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> testCmdArg = argv[++idx]
+                    arg == "--apply" -> applyRemediation = true
+                    arg == "--path" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> paths.add(argv[++idx])
                     arg == "--paths" -> {
                         idx++
                         while (idx < argv.size && !argv[idx].startsWith("--")) {
@@ -309,6 +323,32 @@ class CodeGraphCli {
                         }
                         println(truncateSummary(text, isJson))
                         return 0
+                    }
+                    "verify-remediation" -> {
+                        val filePath = if (paths.isNotEmpty()) paths.first() else (if (target.isNotEmpty()) target else (fileKey ?: ""))
+                        val toolArgs = buildJsonObject {
+                            put("action", "verify_remediation")
+                            put("project", project)
+                            put("file_path", filePath)
+                            put("before_snippet", beforeSnippet ?: "")
+                            put("after_snippet", afterSnippet ?: "")
+                            if (!ruleIdArg.isNullOrBlank()) put("rule_id", ruleIdArg!!)
+                            if (!targetNodeArg.isNullOrBlank()) put("target_node_id", targetNodeArg!!)
+                            if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg!!)
+                            put("dry_run", !applyRemediation)
+                        }
+                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val data = loadSpilledData(res)
+                        val valid = data["valid"]?.jsonPrimitive?.booleanOrNull ?: false
+                        val phase = data["phase"]?.jsonPrimitive?.content ?: "UNKNOWN"
+                        val msg = data["message"]?.jsonPrimitive?.content ?: ""
+                        val text = if (isJson) {
+                            jsonPretty.encodeToString(data)
+                        } else {
+                            "[Remediation Verification] valid=$valid phase=$phase file=$filePath message=\"$msg\""
+                        }
+                        println(truncateSummary(text, isJson))
+                        return if (valid) 0 else 1
                     }
                     "query" -> {
                         val toolArgs = buildJsonObject {
@@ -772,6 +812,7 @@ class CodeGraphCli {
                   audit              Verify Clean Architecture layers and Single Declaration Principle
                   dead-code          Detect dead code unreferenced across indexed modules
                   record-memory      Record execution outcome annotation for a node into work memory
+                  verify-remediation Verify and optionally apply autonomous remediation with pre-flight & post-verification checks
                   serve-mcp          Run JSON-RPC 2.0 MCP server over stdio
                   version            Print version information
 
@@ -813,6 +854,14 @@ class CodeGraphCli {
                   --compiler-reports <d>   Path to Compose Compiler metrics directory or report file
                   --trace-log <p>          Path to @TraceRecomposition JSONL/Logcat telemetry log
                   --strong-skipping <bool> Evaluate under Kotlin 2.0+ Strong Skipping mode (default: true)
+
+                Remediation Options:
+                  --before <snippet>       Original code snippet to replace
+                  --after <snippet>        Target replacement snippet
+                  --rule <id>              Target rule ID (e.g. COMPOSE-STAB-001)
+                  --target-node <id>       Target composable/symbol ID for scoped rule verification
+                  --test-cmd <cmd>         Shell command to verify test suite preservation
+                  --apply                  Commit verified remediation to disk (default: dry-run)
 
                 Figma Options:
                   --file <key>             Figma file key
