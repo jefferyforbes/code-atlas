@@ -47,9 +47,13 @@ class ModuleBoundaryDetector {
 
             val kebabSegments = segments.map { seg ->
                 val sb = StringBuilder()
-                for (c in seg) {
-                    if (c.isUpperCase()) sb.append('-').append(c.lowercaseChar())
-                    else sb.append(c)
+                for ((idx, c) in seg.withIndex()) {
+                    if (c.isUpperCase()) {
+                        if (idx > 0) sb.append('-')
+                        sb.append(c.lowercaseChar())
+                    } else {
+                        sb.append(c)
+                    }
                 }
                 sb.toString()
             }
@@ -59,9 +63,13 @@ class ModuleBoundaryDetector {
                 if (kebabMod in knownModules) return kebabMod
                 val snakeSegments = segments.map { seg ->
                     val sb = StringBuilder()
-                    for (c in seg) {
-                        if (c.isUpperCase()) sb.append('_').append(c.lowercaseChar())
-                        else sb.append(c)
+                    for ((idx, c) in seg.withIndex()) {
+                        if (c.isUpperCase()) {
+                            if (idx > 0) sb.append('_')
+                            sb.append(c.lowercaseChar())
+                        } else {
+                            sb.append(c)
+                        }
                     }
                     sb.toString()
                 }
@@ -80,10 +88,12 @@ class ModuleBoundaryDetector {
             projectId: String,
             relPath: String,
             sourceText: String,
-            parentModule: String
+            parentModule: String,
+            knownModules: List<String> = emptyList()
         ): Pair<List<GraphNode>, List<GraphEdge>> {
             val nodes = mutableListOf<GraphNode>()
             val edges = mutableListOf<GraphEdge>()
+            val seenEdgeIds = mutableSetOf<String>()
 
             val srcNodeId = "$projectId:module:$parentModule"
             nodes.add(
@@ -101,7 +111,6 @@ class ModuleBoundaryDetector {
                 )
             )
 
-            var idx = 1
             for (match in GRADLE_PROJECT_DEP_REGEX.findAll(sourceText)) {
                 var targetMod = match.groupValues[1]
                 if (!targetMod.startsWith(":")) targetMod = ":$targetMod"
@@ -120,24 +129,26 @@ class ModuleBoundaryDetector {
                         archLayer = "infrastructure"
                     )
                 )
-                edges.add(
-                    GraphEdge(
-                        edgeId = "$projectId:mod_dep:$parentModule->$targetMod:$idx",
-                        projectId = projectId,
-                        sourceNodeId = srcNodeId,
-                        targetNodeId = tgtNodeId,
-                        edgeType = "MODULE_DEPENDS_ON",
-                        provenance = "EXTRACTED_GRADLE",
-                        confidence = 1.0,
-                        lineNumber = sourceText.substring(0, match.range.first).count { it == '\n' } + 1
+                val edgeId = "$projectId:mod_dep:$parentModule->$targetMod"
+                if (seenEdgeIds.add(edgeId)) {
+                    edges.add(
+                        GraphEdge(
+                            edgeId = edgeId,
+                            projectId = projectId,
+                            sourceNodeId = srcNodeId,
+                            targetNodeId = tgtNodeId,
+                            edgeType = "MODULE_DEPENDS_ON",
+                            provenance = "EXTRACTED_GRADLE",
+                            confidence = 1.0,
+                            lineNumber = sourceText.substring(0, match.range.first).count { it == '\n' } + 1
+                        )
                     )
-                )
-                idx++
+                }
             }
 
             for (match in GRADLE_TYPE_SAFE_REGEX.findAll(sourceText)) {
                 val accessor = match.groupValues[1]
-                val converted = convertTypesafeAccessorToModuleId(accessor)
+                val converted = convertTypesafeAccessorToModuleId(accessor, knownModules)
                 val tgtNodeId = "$projectId:module:$converted"
                 nodes.add(
                     GraphNode(
@@ -153,19 +164,21 @@ class ModuleBoundaryDetector {
                         archLayer = "infrastructure"
                     )
                 )
-                edges.add(
-                    GraphEdge(
-                        edgeId = "$projectId:mod_dep:$parentModule->$converted:$idx",
-                        projectId = projectId,
-                        sourceNodeId = srcNodeId,
-                        targetNodeId = tgtNodeId,
-                        edgeType = "MODULE_DEPENDS_ON",
-                        provenance = "EXTRACTED_GRADLE",
-                        confidence = 1.0,
-                        lineNumber = sourceText.substring(0, match.range.first).count { it == '\n' } + 1
+                val edgeId = "$projectId:mod_dep:$parentModule->$converted"
+                if (seenEdgeIds.add(edgeId)) {
+                    edges.add(
+                        GraphEdge(
+                            edgeId = edgeId,
+                            projectId = projectId,
+                            sourceNodeId = srcNodeId,
+                            targetNodeId = tgtNodeId,
+                            edgeType = "MODULE_DEPENDS_ON",
+                            provenance = "EXTRACTED_GRADLE",
+                            confidence = 1.0,
+                            lineNumber = sourceText.substring(0, match.range.first).count { it == '\n' } + 1
+                        )
                     )
-                )
-                idx++
+                }
             }
 
             return Pair(nodes, edges)
@@ -204,6 +217,7 @@ class ModuleBoundaryDetector {
             }
 
             val allFiles = PlatformFiles.listFilesRecursively(projectRoot)
+            val buildEntries = mutableListOf<Triple<String, String, String>>()
             for (filePath in allFiles) {
                 val fileName = PlatformFiles.fileName(filePath)
                 if (fileName != "build.gradle" && fileName != "build.gradle.kts") continue
@@ -215,12 +229,16 @@ class ModuleBoundaryDetector {
                 val parentRel = PlatformFiles.parentOf(rel)
                 val sourceMod = if (parentRel.isEmpty() || parentRel == ".") ":root" else ":" + parentRel.replace('/', ':')
                 if (sourceMod !in knownModules) knownModules.add(sourceMod)
+                buildEntries.add(Triple(filePath, rel, sourceMod))
+            }
 
+            for ((filePath, rel, sourceMod) in buildEntries) {
                 val (buildNodes, buildEdges) = extractFromBuildContent(
                     projectId = projectId,
                     relPath = rel,
                     sourceText = PlatformFiles.readText(filePath),
-                    parentModule = sourceMod
+                    parentModule = sourceMod,
+                    knownModules = knownModules
                 )
                 for (n in buildNodes) {
                     nodes[n.nodeId] = n
