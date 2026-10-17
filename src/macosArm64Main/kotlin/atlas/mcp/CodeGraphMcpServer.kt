@@ -148,6 +148,7 @@ class CodeGraphMcpServer(
                         add("record_memory")
                         add("sync_index")
                         add("dead_code")
+                        add("check_descriptions")
                         add("figma_audit")
                         add("figma_scope")
                         add("audit_compose")
@@ -156,6 +157,15 @@ class CodeGraphMcpServer(
                         add("verify_remediation")
                     }
                     put("description", "Audit, synthesis, Compose compliance, learning, or indexing action to execute.")
+                }
+                putJsonObject("description_mode") {
+                    put("type", "string")
+                    putJsonArray("enum") {
+                        add("domain-only")
+                        add("all")
+                        add("off")
+                    }
+                    put("description", "Filter mode for top-level doc descriptions (domain-only, all, off; default: domain-only).")
                 }
                 putJsonObject("project") {
                     put("type", "string")
@@ -513,8 +523,27 @@ class CodeGraphMcpServer(
                 }
             }
             "verify_architecture" -> {
-                val report = auditor.runFullAudit(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
+                val descMode = args["description_mode"]?.jsonPrimitive?.contentOrNull ?: "domain-only"
+                val report = auditor.runFullAudit(
+                    projectId = project,
+                    pathPrefixes = if (targets.isNotEmpty()) targets else null,
+                    descriptionMode = descMode
+                )
                 json.encodeToJsonElement(report).jsonObject
+            }
+            "check_descriptions" -> {
+                val descMode = args["description_mode"]?.jsonPrimitive?.contentOrNull ?: "domain-only"
+                val suggestions = auditor.checkTopLevelDescriptions(
+                    projectId = project,
+                    pathPrefixes = targets,
+                    mode = descMode
+                )
+                buildJsonObject {
+                    put("project", project)
+                    put("mode", descMode)
+                    put("total_suggestions", suggestions.size)
+                    put("suggestions", json.encodeToJsonElement(suggestions))
+                }
             }
             "audit_compose" -> {
                 if (stabilityConfigPath != null || compilerReportsDir != null || traceLogPath != null) {
