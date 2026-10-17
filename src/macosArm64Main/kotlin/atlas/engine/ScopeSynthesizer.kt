@@ -1,6 +1,7 @@
 package atlas.engine
 
 import atlas.db.SqliteGraphStore
+import atlas.model.Compose3DScope
 import atlas.model.GraphNode
 import atlas.model.ScopeRecommendation
 
@@ -85,4 +86,122 @@ class ScopeSynthesizer(private val store: SqliteGraphStore) {
             collidingPlans = collidingPlans.sorted()
         )
     }
+
+    /**
+     * Synthesizes a Compose-aware 3D Concurrency Boundary for `/teamwork` and `/plan`,
+     * identifying shared `@Stable`/`@Immutable` UI state models, `CompositionLocal` providers,
+     * `ComposeTheme` token providers, and downstream `*Screen` composables that would collide
+     * if modified concurrently by parallel UI workers.
+     */
+    fun synthesizeComposeScope(
+        projectId: String,
+        seedTargets: List<String>
+    ): Compose3DScope {
+        val baseScope = synthesizeScope(projectId, seedTargets, depth = 3)
+        val allComposeNodes = store.listComposeNodes(projectId)
+        val paramsByNode = store.listComposeParamsForProject(projectId)
+        val allGraphNodes = store.listNodes(projectId)
+        val nodesById = allGraphNodes.associateBy { it.nodeId }
+
+        val targetFiles = (baseScope.files + seedTargets.filter { it.endsWith(".kt") }).distinct().sorted()
+        val scopedComposeNodes = allComposeNodes.filter { cn ->
+            targetFiles.any { tf -> cn.filePath == tf || cn.filePath.endsWith(tf) || cn.fqName.endsWith(".$tf") } ||
+                seedTargets.any { st -> cn.nodeId == st || cn.fqName == st || cn.fqName.endsWith(".$st") }
+        }
+
+        val sharedStableModels = mutableSetOf<String>()
+        val compositionLocals = mutableSetOf<String>()
+        val themeProviders = mutableSetOf<String>()
+        val downstreamScreens = mutableSetOf<String>()
+        val collisionRisks = mutableListOf<Compose3DScope.CollisionRisk>()
+
+        // 1. Identify shared UI state models used across multiple composables/files
+        val paramTypeToFiles = mutableMapOf<String, MutableSet<String>>()
+        for (cn in allComposeNodes) {
+            for (p in paramsByNode[cn.nodeId] ?: emptyList()) {
+                val baseType = p.typeSignature.substringBefore('<').substringAfterLast('.').removeSuffix("?").trim()
+                if (baseType.endsWith("State") || baseType.endsWith("UiModel") || baseType.endsWith("Item") || p.stabilityReason == "EXPLICIT_STABLE_ANNOTATION") {
+                    paramTypeToFiles.getOrPut(baseType) { mutableSetOf() }.add(cn.filePath)
+                }
+            }
+        }
+
+        for (cn in scopedComposeNodes) {
+            if (cn.fqName.endsWith("Screen")) {
+                downstreamScreens.add(cn.fqName)
+            }
+            for (hop in store.queryComposeCascade(projectId, cn.nodeId, maxDepth = 4)) {
+                if (hop.calleeFqName.endsWith("Screen") || hop.calleeFqName.isNotEmpty()) {
+                    downstreamScreens.add(hop.calleeFqName)
+                }
+            }
+            for (p in paramsByNode[cn.nodeId] ?: emptyList()) {
+                val baseType = p.typeSignature.substringBefore('<').substringAfterLast('.').removeSuffix("?").trim()
+                val consumers = paramTypeToFiles[baseType] ?: emptySet()
+                if (consumers.size > 1) {
+                    sharedStableModels.add(baseType)
+                    val outsideFiles = consumers.filter { it !in targetFiles }.sorted()
+                    if (outsideFiles.isNotEmpty()) {
+                        collisionRisks.add(
+                            Compose3DScope.CollisionRisk(
+                                sharedSymbolId = baseType,
+                                riskKind = "SHARED_STABLE_MODEL",
+                                collidingFiles = (consumers).sorted(),
+                                remediation = "Serialize edits to shared UI model '$baseType' in a prerequisite foundation PR before dispatching parallel screen workers."
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // 2. Inspect CompositionLocal and Theme edges
+        val composeEdges = store.listEdges(
+            projectId,
+            edgeTypes = listOf("PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "EXPECT_ACTUAL")
+        )
+        val localToFiles = mutableMapOf<String, MutableSet<String>>()
+        for (edge in composeEdges) {
+            val srcFile = nodesById[edge.sourceNodeId]?.fileId?.substringAfter(':')
+                ?: edge.sourceNodeId.substringAfter(':').substringBefore('#')
+            val tgtName = nodesById[edge.targetNodeId]?.name
+                ?: edge.targetNodeId.substringAfterLast('#').removePrefix("sym:")
+            if (edge.edgeType in setOf("PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL")) {
+                compositionLocals.add(tgtName)
+                localToFiles.getOrPut(tgtName) { mutableSetOf() }.add(srcFile)
+                if (tgtName.contains("Theme") || tgtName.contains("Color") || tgtName.contains("Typography") || tgtName.contains("Spacing")) {
+                    themeProviders.add(tgtName)
+                }
+            }
+        }
+
+        for ((localSym, files) in localToFiles) {
+            if (files.size > 1 && files.any { it in targetFiles }) {
+                val isTheme = localSym in themeProviders
+                collisionRisks.add(
+                    Compose3DScope.CollisionRisk(
+                        sharedSymbolId = localSym,
+                        riskKind = if (isTheme) "THEME_TOKEN_DRIFT" else "COMPOSITION_LOCAL_PROVIDER",
+                        collidingFiles = files.sorted(),
+                        remediation = "Lock CompositionLocal '$localSym' provider contract before parallel worker execution."
+                    )
+                )
+            }
+        }
+
+        val dedupedRisks = collisionRisks.distinctBy { "${it.sharedSymbolId}:${it.riskKind}" }
+        return Compose3DScope(
+            project = projectId,
+            targetFiles = targetFiles,
+            modules = baseScope.modules,
+            architectureLayers = baseScope.architecture.ifEmpty { listOf("pragmatic:presentation") },
+            sharedStableModels = sharedStableModels.sorted(),
+            compositionLocals = compositionLocals.sorted(),
+            themeTokenProviders = themeProviders.sorted(),
+            downstreamScreens = downstreamScreens.sorted(),
+            collisionRisks = dedupedRisks,
+            safeForParallelDispatch = dedupedRisks.isEmpty()
+        )
+    }
 }
+
