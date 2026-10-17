@@ -597,29 +597,6 @@ class CodeGraphMcpServer(
                 )
                 json.encodeToJsonElement(res).jsonObject
             }
-            "verify_remediation" -> {
-                val filePath = args["file_path"]?.jsonPrimitive?.contentOrNull
-                    ?: (targets.firstOrNull() ?: (args["target"]?.jsonPrimitive?.contentOrNull ?: ""))
-                val beforeSnippet = args["before_snippet"]?.jsonPrimitive?.content ?: ""
-                val afterSnippet = args["after_snippet"]?.jsonPrimitive?.content ?: ""
-                val ruleId = args["rule_id"]?.jsonPrimitive?.content ?: "GENERIC"
-                val targetNodeId = args["target_node_id"]?.jsonPrimitive?.contentOrNull
-                val writeSiteSafe = args["write_site_safe"]?.jsonPrimitive?.booleanOrNull ?: true
-                val dryRun = args["dry_run"]?.jsonPrimitive?.booleanOrNull ?: true
-                val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
-                val res = resolveServerForProject(project).remediationVerifier.verifyAndApply(
-                    projectSlug = project,
-                    relPath = filePath,
-                    beforeSnippet = beforeSnippet,
-                    afterSnippet = afterSnippet,
-                    ruleId = ruleId,
-                    targetNodeId = targetNodeId,
-                    writeSiteSafe = writeSiteSafe,
-                    dryRun = dryRun,
-                    testCommand = testCmd
-                )
-                json.encodeToJsonElement(res).jsonObject
-            }
             "dead_code" -> {
                 val deadNodes = auditor.detectDeadCode(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
                 buildJsonObject {

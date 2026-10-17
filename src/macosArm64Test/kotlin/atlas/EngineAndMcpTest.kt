@@ -1403,4 +1403,129 @@ class EngineAndMcpTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testSwiftProtocolAndActorAuditSuggestions() {
+        val dbPath = "/tmp/test_atlas_swift_proto_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val protocolNode = GraphNode(
+                nodeId = "p:src/domain/AccountRepo.swift#AccountRepo",
+                projectId = "p",
+                fileId = "p:src/domain/AccountRepo.swift",
+                name = "AccountRepo",
+                qualifiedName = "AccountRepo",
+                kind = "protocol",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            val actorNode = GraphNode(
+                nodeId = "p:src/domain/SessionActor.swift#SessionActor",
+                projectId = "p",
+                fileId = "p:src/domain/SessionActor.swift",
+                name = "SessionActor",
+                qualifiedName = "SessionActor",
+                kind = "actor",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            store.upsertNodesAndEdges("p", listOf(protocolNode, actorNode), emptyList())
+
+            val auditor = ArchitectureAuditor(store)
+            val suggestions = auditor.checkTopLevelDescriptions("p", mode = "domain-only")
+            assertEquals(2, suggestions.size)
+            val names = suggestions.map { it.name }.toSet()
+            assertEquals(setOf("AccountRepo", "SessionActor"), names)
+            val protoSug = suggestions.first { it.name == "AccountRepo" }
+            assertTrue(protoSug.message.contains("Top-level interface 'AccountRepo'"))
+            val actorSug = suggestions.first { it.name == "SessionActor" }
+            assertTrue(actorSug.message.contains("Top-level actor 'SessionActor'"))
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testComposableAuditedInAllMode() {
+        val dbPath = "/tmp/test_atlas_composable_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val compNode = GraphNode(
+                nodeId = "p:src/ui/UserCard.kt#UserCard",
+                projectId = "p",
+                fileId = "p:src/ui/UserCard.kt",
+                name = "UserCard",
+                qualifiedName = "ui.UserCard",
+                kind = "composable",
+                semioticLayer = "pragmatic",
+                archLayer = "presentation",
+                description = null,
+                isTopLevel = true
+            )
+            store.upsertNodesAndEdges("p", listOf(compNode), emptyList())
+
+            val auditor = ArchitectureAuditor(store)
+            // Domain-only ignores presentation layer
+            val domSug = auditor.checkTopLevelDescriptions("p", mode = "domain-only")
+            assertEquals(0, domSug.size)
+
+            // All mode flags presentation composable
+            val allSug = auditor.checkTopLevelDescriptions("p", mode = "all")
+            assertEquals(1, allSug.size)
+            assertEquals("UserCard", allSug[0].name)
+            assertTrue(allSug[0].message.contains("Top-level function 'UserCard'"))
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testAuditorPrefixMatchingExactBoundary() {
+        val dbPath = "/tmp/test_atlas_prefix_bound_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val appNode = GraphNode(
+                nodeId = "p:src/app/Foo.kt#Foo",
+                projectId = "p",
+                fileId = "p:src/app/Foo.kt",
+                name = "Foo",
+                qualifiedName = "app.Foo",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            val appleNode = GraphNode(
+                nodeId = "p:src/apple/Bar.kt#Bar",
+                projectId = "p",
+                fileId = "p:src/apple/Bar.kt",
+                name = "Bar",
+                qualifiedName = "apple.Bar",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            store.upsertNodesAndEdges("p", listOf(appNode, appleNode), emptyList())
+
+            val auditor = ArchitectureAuditor(store)
+            val scopedSug = auditor.checkTopLevelDescriptions("p", pathPrefixes = listOf("src/app"))
+            assertEquals(1, scopedSug.size)
+            assertEquals("Foo", scopedSug[0].name)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }

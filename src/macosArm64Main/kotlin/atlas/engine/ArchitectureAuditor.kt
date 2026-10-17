@@ -60,7 +60,10 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         }
 
         val prefixes = normalizePathPrefixes(pathPrefixes)
-        val candidateKinds = setOf("class", "interface", "function", "object", "enum", "struct")
+        val candidateKinds = setOf(
+            "class", "interface", "protocol", "function", "composable",
+            "object", "enum", "struct", "actor", "annotation", "expect_decl"
+        )
         val suggestions = mutableListOf<DescriptionSuggestion>()
 
         for (node in store.listNodes(projectId)) {
@@ -82,11 +85,14 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
             if (node.description.isNullOrBlank()) {
                 val kindDesc = when (node.kind) {
                     "class" -> "class"
-                    "interface" -> "interface"
-                    "function" -> "function"
+                    "interface", "protocol" -> "interface"
+                    "function", "composable" -> "function"
                     "object" -> "object"
                     "struct" -> "struct"
                     "enum" -> "enum"
+                    "actor" -> "actor"
+                    "annotation" -> "annotation class"
+                    "expect_decl" -> "expect declaration"
                     else -> node.kind
                 }
                 suggestions.add(
@@ -119,7 +125,7 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
     private fun matchesAnyPrefix(relPath: String, prefixes: List<String>): Boolean {
         if (prefixes.isEmpty()) return true
         val norm = relPath.replace('\\', '/').removePrefix("./")
-        return prefixes.any { p -> norm == p || norm.startsWith("$p/") || norm.startsWith(p) }
+        return prefixes.any { p -> norm == p || norm.startsWith("$p/") }
     }
 
     fun checkSingleDeclarationPrinciple(
