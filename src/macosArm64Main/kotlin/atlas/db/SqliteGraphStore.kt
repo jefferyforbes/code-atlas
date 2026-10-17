@@ -271,9 +271,48 @@ class SqliteGraphStore(val dbPath: String) {
                 recorded_at INTEGER NOT NULL,
                 PRIMARY KEY(node_id, session_id)
             ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS project_metadata (
+                project_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (project_id, key)
+            );
             """.trimIndent()
         )
         migrateComposeSchema()
+    }
+
+    fun getProjectMetadata(projectId: String, key: String): String? {
+        val stmt = db.prepare("SELECT value FROM project_metadata WHERE project_id = ? AND key = ?;")
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindString(2, key)
+            if (stmt.step()) {
+                return stmt.columnString(0)
+            }
+            return null
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun setProjectMetadata(projectId: String, key: String, value: String) {
+        val stmt = db.prepare(
+            """
+            INSERT INTO project_metadata (project_id, key, value)
+            VALUES (?, ?, ?)
+            ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value;
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindString(2, key)
+            stmt.bindString(3, value)
+            stmt.step()
+        } finally {
+            stmt.close()
+        }
     }
 
     fun migrateComposeSchema() {
