@@ -71,7 +71,9 @@ class SqliteGraphStore(val dbPath: String) {
                 arch_layer TEXT NOT NULL DEFAULT 'domain',
                 is_test_double INTEGER NOT NULL DEFAULT 0,
                 in_degree INTEGER NOT NULL DEFAULT 0,
-                out_degree INTEGER NOT NULL DEFAULT 0
+                out_degree INTEGER NOT NULL DEFAULT 0,
+                description TEXT DEFAULT NULL,
+                is_top_level INTEGER NOT NULL DEFAULT 1
             );
             CREATE INDEX IF NOT EXISTS idx_nodes_project_name ON nodes(project_id, name);
             CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_id);
@@ -281,6 +283,7 @@ class SqliteGraphStore(val dbPath: String) {
             """.trimIndent()
         )
         migrateComposeSchema()
+        migrateNodesSchema()
     }
 
     fun getProjectMetadata(projectId: String, key: String): String? {
@@ -332,6 +335,28 @@ class SqliteGraphStore(val dbPath: String) {
                 }
                 if ("violation_mask" !in cols) {
                     db.exec("ALTER TABLE compose_nodes ADD COLUMN violation_mask INTEGER NOT NULL DEFAULT 0;")
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    fun migrateNodesSchema() {
+        try {
+            val cols = mutableSetOf<String>()
+            val stmt = db.prepare("PRAGMA table_info(nodes);")
+            try {
+                while (stmt.step()) {
+                    cols.add(stmt.columnString(1))
+                }
+            } finally {
+                stmt.close()
+            }
+            if (cols.isNotEmpty()) {
+                if ("description" !in cols) {
+                    db.exec("ALTER TABLE nodes ADD COLUMN description TEXT DEFAULT NULL;")
+                }
+                if ("is_top_level" !in cols) {
+                    db.exec("ALTER TABLE nodes ADD COLUMN is_top_level INTEGER NOT NULL DEFAULT 1;")
                 }
             }
         } catch (_: Throwable) {}
@@ -844,8 +869,8 @@ class SqliteGraphStore(val dbPath: String) {
                     INSERT INTO nodes (
                         node_id, project_id, file_id, name, qualified_name, kind, signature,
                         start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                        is_test_double, in_degree, out_degree
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        is_test_double, in_degree, out_degree, description, is_top_level
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(node_id) DO UPDATE SET
                         file_id = excluded.file_id,
                         name = excluded.name,
@@ -858,7 +883,9 @@ class SqliteGraphStore(val dbPath: String) {
                         source_set = excluded.source_set,
                         semiotic_layer = excluded.semiotic_layer,
                         arch_layer = excluded.arch_layer,
-                        is_test_double = excluded.is_test_double;
+                        is_test_double = excluded.is_test_double,
+                        description = excluded.description,
+                        is_top_level = excluded.is_top_level;
                     """.trimIndent()
                 )
                 val insFts = scope.prepare(
@@ -890,7 +917,7 @@ class SqliteGraphStore(val dbPath: String) {
                     """
                     DELETE FROM edges
                     WHERE project_id = ?
-                      AND (
+                    AND (
                         source_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
                         OR (
                           target_node_id NOT LIKE 'vault_ref#%'
@@ -930,6 +957,12 @@ class SqliteGraphStore(val dbPath: String) {
                     insNode.bindInt(14, if (node.isTestDouble) 1 else 0)
                     insNode.bindInt(15, node.inDegree)
                     insNode.bindInt(16, node.outDegree)
+                    if (node.description != null) {
+                        insNode.bindString(17, node.description)
+                    } else {
+                        insNode.bindNull(17)
+                    }
+                    insNode.bindInt(18, if (node.isTopLevel) 1 else 0)
                     insNode.step()
 
                     insFts.reset()
@@ -995,7 +1028,9 @@ class SqliteGraphStore(val dbPath: String) {
             archLayer = stmt.columnString(12),
             isTestDouble = stmt.columnInt(13) != 0,
             inDegree = stmt.columnInt(14),
-            outDegree = stmt.columnInt(15)
+            outDegree = stmt.columnInt(15),
+            description = stmt.columnStringNullable(16),
+            isTopLevel = stmt.columnInt(17) != 0
         )
     }
 
@@ -1008,7 +1043,7 @@ class SqliteGraphStore(val dbPath: String) {
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                    start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree
+                   is_test_double, in_degree, out_degree, description, is_top_level
             FROM nodes
             WHERE project_id = ? AND (
                 node_id = ?
@@ -1052,7 +1087,7 @@ class SqliteGraphStore(val dbPath: String) {
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                    start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree
+                   is_test_double, in_degree, out_degree, description, is_top_level
             FROM nodes
             WHERE project_id = ? AND (
                 file_id = ?
@@ -1088,7 +1123,7 @@ class SqliteGraphStore(val dbPath: String) {
                 """
                 SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                        start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree
+                       is_test_double, in_degree, out_degree, description, is_top_level
                 FROM nodes
                 WHERE project_id = ? AND file_id IN ($placeholders)
                 ORDER BY in_degree DESC;
@@ -1220,7 +1255,7 @@ class SqliteGraphStore(val dbPath: String) {
                 """
                 SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                        start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree
+                       is_test_double, in_degree, out_degree, description, is_top_level
                 FROM nodes WHERE node_id IN ($placeholders);
                 """.trimIndent()
             )
@@ -1375,7 +1410,7 @@ class SqliteGraphStore(val dbPath: String) {
                 """
                 SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                        start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree
+                       is_test_double, in_degree, out_degree, description, is_top_level
                 FROM nodes WHERE project_id = ? AND node_id IN ($placeholders);
                 """.trimIndent()
             )
@@ -1417,7 +1452,7 @@ class SqliteGraphStore(val dbPath: String) {
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                    start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree
+                   is_test_double, in_degree, out_degree, description, is_top_level
             FROM nodes
             WHERE project_id = ? AND kind NOT IN ('file', 'module', 'plan_contract', 'obsidian_note')
             ORDER BY (in_degree * 2 + out_degree) DESC, in_degree DESC
@@ -1578,7 +1613,7 @@ class SqliteGraphStore(val dbPath: String) {
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                    start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree
+                   is_test_double, in_degree, out_degree, description, is_top_level
             FROM nodes WHERE project_id = ? ORDER BY node_id ASC;
             """.trimIndent()
         )

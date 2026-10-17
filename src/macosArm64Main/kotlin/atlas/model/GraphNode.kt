@@ -19,5 +19,7 @@ data class GraphNode(
     val archLayer: String = "domain",
     val isTestDouble: Boolean = false,
     val inDegree: Int = 0,
-    val outDegree: Int = 0
+    val outDegree: Int = 0,
+    val description: String? = null,
+    val isTopLevel: Boolean = true
 )

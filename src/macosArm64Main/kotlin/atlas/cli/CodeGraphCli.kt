@@ -92,6 +92,7 @@ class CodeGraphCli {
             var targetNodeArg: String? = null
             var testCmdArg: String? = null
             var applyRemediation = false
+            var descriptionMode: String? = null
 
             var idx = 0
             while (idx < argv.size) {
@@ -167,6 +168,10 @@ class CodeGraphCli {
                     arg == "--target-node" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> targetNodeArg = argv[++idx]
                     arg == "--test-cmd" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> testCmdArg = argv[++idx]
                     arg == "--apply" -> applyRemediation = true
+                    (arg == "--description-mode" || arg == "--descriptions") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> descriptionMode = argv[++idx]
+                    arg.startsWith("--description-mode=") -> descriptionMode = arg.substringAfter('=')
+                    arg.startsWith("--descriptions=") -> descriptionMode = arg.substringAfter('=')
+                    arg == "--no-description-check" || arg == "--no-descriptions" -> descriptionMode = "off"
                     arg == "--path" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> paths.add(argv[++idx])
                     arg == "--paths" -> {
                         idx++
@@ -285,6 +290,9 @@ class CodeGraphCli {
                             if (filterPaths.isNotEmpty()) {
                                 putJsonArray("targets") { filterPaths.forEach { add(it) } }
                             }
+                            if (!descriptionMode.isNullOrBlank()) {
+                                put("description_mode", descriptionMode)
+                            }
                             if (!outcome.isNullOrBlank()) put("outcome", outcome)
                             if (!note.isNullOrBlank()) put("note", note)
                         }
@@ -293,11 +301,12 @@ class CodeGraphCli {
                         val bViolations = (data["single_declaration_violations"] ?: data["singleDeclarationViolations"])?.jsonArray?.size ?: 0
                         val lInversions = (data["layer_inversions"] ?: data["layerInversions"])?.jsonArray?.size ?: 0
                         val pCollisions = (data["plan_3d_collisions"] ?: data["plan3dCollisions"])?.jsonArray?.size ?: 0
+                        val dSuggestions = (data["description_suggestions"] ?: data["descriptionSuggestions"])?.jsonArray?.size ?: 0
                         val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: (bViolations == 0 && lInversions == 0 && pCollisions == 0)
                         val text = if (isJson) {
                             jsonPretty.encodeToString(data)
                         } else {
-                            "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions"
+                            "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions description_suggestions=$dSuggestions"
                         }
                         println(truncateSummary(text, isJson))
                         return if (passed) 0 else 1
@@ -931,6 +940,10 @@ class CodeGraphCli {
                   --summary                Emit compact summary <= 400 bytes (default)
                   --outcome <status>       Outcome status for memory recording (default: useful)
                   --note <text>            Descriptive note or rationale for memory recording
+
+                Audit Options:
+                  --description-mode <m>   Filter mode for description suggestions (domain-only, all, off; default: domain-only)
+                  --no-description-check   Disable top-level description suggestions check
 
                 Query & Compose Options:
                   --target <sym>           Symbol name, node name, or ID

@@ -3,6 +3,7 @@ package atlas.engine
 import atlas.db.SqliteGraphStore
 import atlas.model.AuditReport
 import atlas.model.ComposeAuditResult
+import atlas.model.DescriptionSuggestion
 import atlas.model.GraphNode
 import atlas.model.LayerInversionViolation
 import atlas.model.PlanCollision
@@ -19,11 +20,16 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         return composeEngine.auditCompose(projectId, strongSkipping = strongSkipping)
     }
 
-    fun runFullAudit(projectId: String, pathPrefixes: List<String>? = null): AuditReport {
+    fun runFullAudit(
+        projectId: String,
+        pathPrefixes: List<String>? = null,
+        descriptionMode: String = "domain-only"
+    ): AuditReport {
         val normalizedPrefixes = normalizePathPrefixes(pathPrefixes)
         val singleDeclViolations = checkSingleDeclarationPrinciple(projectId, normalizedPrefixes)
         val layerInversions = checkLayerInversions(projectId, normalizedPrefixes)
         val planCollisions = checkPlan3dCollisions(projectId, normalizedPrefixes)
+        val descriptionSuggestions = checkTopLevelDescriptions(projectId, normalizedPrefixes, descriptionMode)
 
         val passed = singleDeclViolations.isEmpty() && layerInversions.isEmpty() && planCollisions.isEmpty()
         return AuditReport(
@@ -31,8 +37,81 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
             passed = passed,
             singleDeclarationViolations = singleDeclViolations,
             layerInversions = layerInversions,
-            plan3dCollisions = planCollisions
+            plan3dCollisions = planCollisions,
+            descriptionSuggestions = descriptionSuggestions
         )
+    }
+
+    /**
+     * Checks for top-level classes and functions missing doc descriptions.
+     * Supported modes:
+     * - "domain-only" (default): only flags domain layer symbols
+     * - "all": flags all production symbols across layers (excluding tests)
+     * - "off" / "none" / "disabled": disables the check and returns empty list
+     */
+    fun checkTopLevelDescriptions(
+        projectId: String,
+        pathPrefixes: List<String> = emptyList(),
+        mode: String = "domain-only"
+    ): List<DescriptionSuggestion> {
+        val normalizedMode = mode.trim().lowercase()
+        if (normalizedMode in setOf("off", "none", "disabled", "false")) {
+            return emptyList()
+        }
+
+        val prefixes = normalizePathPrefixes(pathPrefixes)
+        val candidateKinds = setOf(
+            "class", "interface", "protocol", "function", "composable",
+            "object", "enum", "struct", "actor", "annotation", "expect_decl"
+        )
+        val suggestions = mutableListOf<DescriptionSuggestion>()
+
+        for (node in store.listNodes(projectId)) {
+            if (!node.isTopLevel) continue
+            if (node.kind !in candidateKinds) continue
+            // Ignore tests and test doubles
+            if (node.semioticLayer == "test" || node.archLayer == "test" || node.isTestDouble) continue
+            val relPath = node.fileId.substringAfter(':')
+            if (relPath.endsWith("__init__.py") || relPath.endsWith(".md")) continue
+            if (!matchesAnyPrefix(relPath, prefixes)) continue
+
+            val inScope = when (normalizedMode) {
+                "all" -> true
+                "domain-only", "domain" -> node.archLayer == "domain"
+                else -> node.archLayer == "domain"
+            }
+            if (!inScope) continue
+
+            if (node.description.isNullOrBlank()) {
+                val kindDesc = when (node.kind) {
+                    "class" -> "class"
+                    "interface", "protocol" -> "interface"
+                    "function", "composable" -> "function"
+                    "object" -> "object"
+                    "struct" -> "struct"
+                    "enum" -> "enum"
+                    "actor" -> "actor"
+                    "annotation" -> "annotation class"
+                    "expect_decl" -> "expect declaration"
+                    else -> node.kind
+                }
+                suggestions.add(
+                    DescriptionSuggestion(
+                        rule = "DOC-TOP-LEVEL",
+                        nodeId = node.nodeId,
+                        name = node.name,
+                        kind = node.kind,
+                        relPath = relPath,
+                        lineNumber = node.startLine,
+                        semioticLayer = node.semioticLayer,
+                        archLayer = node.archLayer,
+                        message = "Top-level $kindDesc '${node.name}' in layer '${node.archLayer}' is missing a doc description."
+                    )
+                )
+            }
+        }
+
+        return suggestions.sortedWith(compareBy({ it.relPath }, { it.lineNumber }))
     }
 
     private fun normalizePathPrefixes(pathPrefixes: List<String>?): List<String> {
@@ -46,7 +125,7 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
     private fun matchesAnyPrefix(relPath: String, prefixes: List<String>): Boolean {
         if (prefixes.isEmpty()) return true
         val norm = relPath.replace('\\', '/').removePrefix("./")
-        return prefixes.any { p -> norm == p || norm.startsWith("$p/") || norm.startsWith(p) }
+        return prefixes.any { p -> norm == p || norm.startsWith("$p/") }
     }
 
     fun checkSingleDeclarationPrinciple(

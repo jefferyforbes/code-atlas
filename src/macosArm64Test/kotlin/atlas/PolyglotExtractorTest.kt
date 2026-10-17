@@ -776,4 +776,297 @@ $tq
             "Infix call 'rotate' must be recognized as an inferred infix call edge"
         )
     }
+
+    @Test
+    fun testKotlinDocDescriptionExtraction() {
+        val src = """
+            package com.example.service
+
+            /**
+             * Core user account management service.
+             * Handles registration, authentication, and credentials.
+             *
+             * @param db Database handle
+             */
+            @Serializable
+            class UserService(val db: String) {
+                class NestedInner
+            }
+
+            /** Process payment transactions securely. */
+            fun processPayment(amount: Double): Boolean = true
+
+            // Regular single-line comment
+            class UndocumentedService
+        """.trimIndent()
+
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/UserService.kt", src)
+        val userNode = nodes.firstOrNull { it.name == "UserService" }
+        assertNotNull(userNode)
+        assertTrue(userNode.isTopLevel)
+        assertEquals("Core user account management service. Handles registration, authentication, and credentials.", userNode.description)
+
+        val procNode = nodes.firstOrNull { it.name == "processPayment" }
+        assertNotNull(procNode)
+        assertTrue(procNode.isTopLevel)
+        assertEquals("Process payment transactions securely.", procNode.description)
+
+        val innerNode = nodes.firstOrNull { it.name == "NestedInner" }
+        assertNotNull(innerNode)
+        assertFalse(innerNode.isTopLevel)
+        assertEquals(null, innerNode.description)
+
+        val undocNode = nodes.firstOrNull { it.name == "UndocumentedService" }
+        assertNotNull(undocNode)
+        assertTrue(undocNode.isTopLevel)
+        assertEquals("Regular single-line comment", undocNode.description)
+    }
+
+    @Test
+    fun testSwiftDocDescriptionExtraction() {
+        val src = """
+            import Foundation
+
+            /// Manages customer sessions and tokens.
+            /// Synchronizes token refreshes across threads.
+            public struct SessionManager {
+                var token: String
+            }
+
+            /**
+             * Computes cryptographic signature for the payload.
+             * - Parameter payload: The byte payload
+             */
+            func signPayload(payload: Data) -> String {
+                return "sig"
+            }
+        """.trimIndent()
+
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "Sources/SessionManager.swift", src)
+        val mgrNode = nodes.firstOrNull { it.name == "SessionManager" }
+        assertNotNull(mgrNode)
+        assertTrue(mgrNode.isTopLevel)
+        assertEquals("Manages customer sessions and tokens. Synchronizes token refreshes across threads.", mgrNode.description)
+
+        val signNode = nodes.firstOrNull { it.name == "signPayload" }
+        assertNotNull(signNode)
+        assertTrue(signNode.isTopLevel)
+        assertEquals("Computes cryptographic signature for the payload.", signNode.description)
+    }
+
+    @Test
+    fun testTypeScriptDocDescriptionExtraction() {
+        val src = """
+            /**
+             * Represents a verified user identity entity.
+             */
+            export interface UserEntity {
+                id: string;
+                email: string;
+            }
+
+            /**
+             * Dispatches analytic telemetry events.
+             * @param event The event payload
+             */
+            export function dispatchEvent(event: any): void {
+                console.log(event);
+            }
+        """.trimIndent()
+
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/models/user.ts", src)
+        val entityNode = nodes.firstOrNull { it.name == "UserEntity" }
+        assertNotNull(entityNode)
+        assertTrue(entityNode.isTopLevel)
+        assertEquals("Represents a verified user identity entity.", entityNode.description)
+
+        val dispatchNode = nodes.firstOrNull { it.name == "dispatchEvent" }
+        assertNotNull(dispatchNode)
+        assertTrue(dispatchNode.isTopLevel)
+        assertEquals("Dispatches analytic telemetry events.", dispatchNode.description)
+    }
+
+    @Test
+    fun testRustDocDescriptionExtraction() {
+        val src = """
+            /// High-performance token bucket rate limiter.
+            /// Guarantees lock-free atomic token refills.
+            #[derive(Debug, Clone)]
+            pub struct RateLimiter {
+                capacity: usize,
+            }
+
+            /// Creates a newly initialized rate limiter.
+            pub fn new_limiter(cap: usize) -> RateLimiter {
+                RateLimiter { capacity: cap }
+            }
+        """.trimIndent()
+
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/limiter.rs", src)
+        val limiterNode = nodes.firstOrNull { it.name == "RateLimiter" }
+        assertNotNull(limiterNode)
+        assertTrue(limiterNode.isTopLevel)
+        assertEquals("High-performance token bucket rate limiter. Guarantees lock-free atomic token refills.", limiterNode.description)
+
+        val fnNode = nodes.firstOrNull { it.name == "new_limiter" }
+        assertNotNull(fnNode)
+        assertTrue(fnNode.isTopLevel)
+        assertEquals("Creates a newly initialized rate limiter.", fnNode.description)
+    }
+
+    @Test
+    fun testCppDocDescriptionExtraction() {
+        val src = """
+            #include <string>
+
+            /**
+             * Thread-safe memory allocation arena.
+             */
+            class MemoryArena {
+            public:
+                int capacity;
+            };
+
+            /// Allocates a contiguous block of memory.
+            void* allocateBlock(size_t size) {
+                return nullptr;
+            }
+        """.trimIndent()
+
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/arena.cpp", src)
+        val arenaNode = nodes.firstOrNull { it.name == "MemoryArena" }
+        assertNotNull(arenaNode)
+        assertTrue(arenaNode.isTopLevel)
+        assertEquals("Thread-safe memory allocation arena.", arenaNode.description)
+
+        val allocNode = nodes.firstOrNull { it.name == "allocateBlock" }
+        assertNotNull(allocNode)
+        assertTrue(allocNode.isTopLevel)
+        assertEquals("Allocates a contiguous block of memory.", allocNode.description)
+    }
+
+    @Test
+    fun testPythonDocDescriptionExtraction() {
+        val src = """
+            class CustomerRepository:
+                ${"\"\"\""}Persistent customer repository backed by Postgres.
+                Provides transactional atomic mutations.${"\"\"\""}
+                def __init__(self):
+                    pass
+
+            def validate_email(email: str) -> bool:
+                '''Checks RFC 5322 compliance for recipient email.'''
+                return True
+
+            # Mathematical utility helper for fast inverse square root
+            def fast_inv_sqrt(number: float) -> float:
+                return 1.0 / number
+
+            def undocumented_function():
+                pass
+        """.trimIndent()
+
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/repo.py", src)
+        val repoNode = nodes.firstOrNull { it.name == "CustomerRepository" }
+        assertNotNull(repoNode)
+        assertTrue(repoNode.isTopLevel)
+        assertEquals("Persistent customer repository backed by Postgres. Provides transactional atomic mutations.", repoNode.description)
+
+        val valNode = nodes.firstOrNull { it.name == "validate_email" }
+        assertNotNull(valNode)
+        assertTrue(valNode.isTopLevel)
+        assertEquals("Checks RFC 5322 compliance for recipient email.", valNode.description)
+
+        val invNode = nodes.firstOrNull { it.name == "fast_inv_sqrt" }
+        assertNotNull(invNode)
+        assertTrue(invNode.isTopLevel)
+        assertEquals("Mathematical utility helper for fast inverse square root", invNode.description)
+
+        val undocNode = nodes.firstOrNull { it.name == "undocumented_function" }
+        assertNotNull(undocNode)
+        assertTrue(undocNode.isTopLevel)
+        assertEquals(null, undocNode.description)
+    }
+
+    @Test
+    fun testDocDescriptionWithMultilineAnnotation() {
+        val src = """
+            package demo
+
+            /**
+             * Handles refunds and chargebacks securely.
+             */
+            @Deprecated(
+                message = "Migrate to RefundService",
+                replaceWith = ReplaceWith("RefundService")
+            )
+            class OldRefundService
+        """.trimIndent()
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/Refund.kt", src)
+        val node = nodes.firstOrNull { it.name == "OldRefundService" }
+        assertNotNull(node)
+        assertTrue(node.isTopLevel)
+        assertEquals("Handles refunds and chargebacks securely.", node.description)
+    }
+
+    @Test
+    fun testRustInnerModuleCommentNotAttachedToStruct() {
+        val src = """
+            //! This crate provides serialization tools.
+            //! Copyright (C) 2026.
+
+            pub struct Serializer {
+                buffer: Vec<u8>,
+            }
+        """.trimIndent()
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/serializer.rs", src)
+        val node = nodes.firstOrNull { it.name == "Serializer" }
+        assertNotNull(node)
+        assertTrue(node.isTopLevel)
+        assertEquals(null, node.description)
+    }
+
+    @Test
+    fun testPythonInlineDocstring() {
+        val src = """
+            def compute_hash(payload: bytes) -> str: ${"\"\"\""}Computes SHA-256 digest.${"\"\"\""}
+                pass
+        """.trimIndent()
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/hasher.py", src)
+        val node = nodes.firstOrNull { it.name == "compute_hash" }
+        assertNotNull(node)
+        assertTrue(node.isTopLevel)
+        assertEquals("Computes SHA-256 digest.", node.description)
+    }
+
+    @Test
+    fun testNonDocCommentsIgnored() {
+        val src = """
+            package demo
+
+            // Copyright 2026 Acme Corp. All rights reserved.
+            // Licensed under Apache 2.0.
+            class LicenseTestService
+
+            // ============================================
+            // Section Divider
+            // ============================================
+            class SectionTestService
+
+            // MARK: - Navigation Handlers
+            class MarkTestService
+        """.trimIndent()
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile("proj", "src/Demo.kt", src)
+        val licenseNode = nodes.firstOrNull { it.name == "LicenseTestService" }
+        assertNotNull(licenseNode)
+        assertEquals(null, licenseNode.description)
+
+        val sectionNode = nodes.firstOrNull { it.name == "SectionTestService" }
+        assertNotNull(sectionNode)
+        assertEquals(null, sectionNode.description)
+
+        val markNode = nodes.firstOrNull { it.name == "MarkTestService" }
+        assertNotNull(markNode)
+        assertEquals(null, markNode.description)
+    }
 }

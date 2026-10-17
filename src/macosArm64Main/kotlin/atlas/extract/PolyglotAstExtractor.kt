@@ -63,7 +63,7 @@ class PolyglotAstExtractor {
             "require", "check", "match", "throw", "yield", "guard", "case", "typeof"
         )
 
-        const val EXTRACTOR_VERSION: String = "1.2.0"
+        const val EXTRACTOR_VERSION: String = "1.3.0"
 
         private val INFIX_CALL_RE = Regex(
             """(?<=\s|[)\]a-zA-Z0-9_])\s+(?<callee>[a-zA-Z_][a-zA-Z0-9_]{1,})\s+(?=[A-Za-z0-9_"'(\[])"""
@@ -1016,6 +1016,317 @@ class PolyglotAstExtractor {
             return results
         }
 
+        private val NON_DOC_LINE_PREFIXES = listOf(
+            "// copyright", "// (c)", "// license", "// spdx-", "// all rights reserved",
+            "// mark:", "// todo", "// fixme", "// note:", "// hack:", "// xxx",
+            "// nolint", "// clang-format", "// eslint-", "// @ts-", "// ts-ignore",
+            "// --", "// ==", "// **", "// ##"
+        )
+
+        private val PYTHON_NON_DOC_PREFIXES = listOf(
+            "# copyright", "# (c)", "# license", "# spdx-", "# all rights reserved",
+            "# todo", "# fixme", "# note:", "# type:", "# noqa", "# pylint:", "# flake8:",
+            "# mypy:", "# pyright:", "# --", "# ==", "# **", "# ##"
+        )
+
+        /**
+         * Extracts doc comment description (KDoc, Javadoc, JSDoc, Swift/Rust ///, C++ Doxygen)
+         * preceding a declaration at [matchStartLine] (1-based line of the declaration or leading annotation).
+         */
+        fun extractDocDescription(
+            lines: List<String>,
+            matchStartLine: Int,
+            language: String
+        ): String? {
+            val startIdx = matchStartLine - 1
+            if (startIdx <= 0 || startIdx > lines.size) return null
+
+            var cur = startIdx - 1
+            var blankCount = 0
+            while (cur >= 0) {
+                val raw = lines[cur]
+                val trimmed = raw.trim()
+                if (trimmed.isEmpty()) {
+                    blankCount++
+                    if (blankCount > 1) break
+                    cur--
+                    continue
+                }
+                // Skip single-line annotations or attributes preceding the declaration
+                if (isAnnotationOrAttributeLine(trimmed, language)) {
+                    blankCount = 0
+                    cur--
+                    continue
+                }
+                // Skip multi-line annotations / attributes / templates ending on this line:
+                if (trimmed.endsWith(")") || trimmed.endsWith("]") || (language == "cpp" && trimmed.endsWith(">"))) {
+                    var pDepth = 0
+                    var bDepth = 0
+                    var aDepth = 0
+                    var scanIdx = cur
+                    var matchedAnnoStart = false
+                    while (scanIdx >= 0) {
+                        val sLine = lines[scanIdx].trim()
+                        for (c in sLine) {
+                            when (c) {
+                                '(' -> pDepth--
+                                ')' -> pDepth++
+                                '[' -> bDepth--
+                                ']' -> bDepth++
+                                '<' -> if (language == "cpp") aDepth--
+                                '>' -> if (language == "cpp") aDepth++
+                            }
+                        }
+                        if (pDepth <= 0 && bDepth <= 0 && aDepth <= 0) {
+                            if (isAnnotationOrAttributeLine(sLine, language)) {
+                                matchedAnnoStart = true
+                                cur = scanIdx - 1
+                                blankCount = 0
+                                break
+                            }
+                        }
+                        scanIdx--
+                    }
+                    if (matchedAnnoStart) continue
+                }
+                // Block doc comment closing */
+                if (trimmed.endsWith("*/")) {
+                    return parseBlockDocComment(lines, cur)
+                }
+                // Rust inner doc comments document the module/crate, not the item
+                if (language == "rust" && (trimmed.startsWith("//!") || trimmed.startsWith("/*!"))) {
+                    break
+                }
+                // Triple-slash doc comment ///
+                if (trimmed.startsWith("///")) {
+                    return parseTripleSlashDocComment(lines, cur)
+                }
+                // Double-slash doc comment //
+                if (trimmed.startsWith("//")) {
+                    val low = trimmed.lowercase()
+                    if (NON_DOC_LINE_PREFIXES.any { low.startsWith(it) }) {
+                        break
+                    }
+                    return parseDoubleSlashDocComment(lines, cur)
+                }
+                // Any other code line means no doc comment immediately preceding
+                break
+            }
+            return null
+        }
+
+        private fun isAnnotationOrAttributeLine(trimmed: String, language: String): Boolean {
+            return when (language) {
+                "rust" -> trimmed.startsWith("#[") || trimmed.startsWith("#![")
+                "cpp" -> trimmed.startsWith("[[") || trimmed.startsWith("template") ||
+                         trimmed.startsWith("__attribute__") ||
+                         trimmed.matches(Regex("""^[A-Z][A-Z0-9_]+(?:\(.*\))?$"""))
+                else -> trimmed.startsWith("@")
+            }
+        }
+
+        private fun parseBlockDocComment(lines: List<String>, endIdx: Int): String? {
+            var startIdx = endIdx
+            while (startIdx >= 0) {
+                if (lines[startIdx].trimStart().startsWith("/*")) {
+                    break
+                }
+                startIdx--
+            }
+            if (startIdx < 0) return null
+            val firstLine = lines[startIdx].trimStart()
+            if (!firstLine.startsWith("/**") && !firstLine.startsWith("/*!")) {
+                return null
+            }
+
+            val contentLines = mutableListOf<String>()
+            for (i in startIdx..endIdx) {
+                var line = lines[i].trim()
+                if (i == startIdx) {
+                    line = if (line.startsWith("/**")) line.removePrefix("/**").trim()
+                           else line.removePrefix("/*!").trim()
+                }
+                if (i == endIdx) {
+                    line = line.removeSuffix("*/").trim()
+                }
+                if (line.startsWith("*")) {
+                    line = line.removePrefix("*").trim()
+                }
+                if (line.isNotEmpty()) {
+                    if (line.startsWith("@") || line.startsWith(":param") || line.startsWith("- Parameter") || line.startsWith("- Returns")) {
+                        break
+                    }
+                    contentLines.add(line)
+                }
+            }
+            val result = contentLines.joinToString(" ").trim()
+            return if (result.isNotEmpty()) result else null
+        }
+
+        private fun parseTripleSlashDocComment(lines: List<String>, endIdx: Int): String? {
+            var startIdx = endIdx
+            while (startIdx > 0 && lines[startIdx - 1].trim().startsWith("///")) {
+                startIdx--
+            }
+            val contentLines = mutableListOf<String>()
+            for (i in startIdx..endIdx) {
+                val line = lines[i].trim().removePrefix("///").trim()
+                if (line.startsWith("@") || line.startsWith(":param") || line.startsWith("- Parameter") || line.startsWith("- Returns")) {
+                    break
+                }
+                if (line.isNotEmpty()) {
+                    contentLines.add(line)
+                }
+            }
+            val result = contentLines.joinToString(" ").trim()
+            return if (result.isNotEmpty()) result else null
+        }
+
+        private fun parseDoubleSlashDocComment(lines: List<String>, endIdx: Int): String? {
+            var startIdx = endIdx
+            while (startIdx > 0 && lines[startIdx - 1].trim().startsWith("//")) {
+                val prevLow = lines[startIdx - 1].trim().lowercase()
+                if (NON_DOC_LINE_PREFIXES.any { prevLow.startsWith(it) }) break
+                startIdx--
+            }
+            val contentLines = mutableListOf<String>()
+            for (i in startIdx..endIdx) {
+                val rawTrim = lines[i].trim()
+                val line = rawTrim.removePrefix("//").trim()
+                val lLow = rawTrim.lowercase()
+                if (NON_DOC_LINE_PREFIXES.any { lLow.startsWith(it) }) {
+                    break
+                }
+                if (line.isNotEmpty()) {
+                    contentLines.add(line)
+                }
+            }
+            val result = contentLines.joinToString(" ").trim()
+            return if (result.isNotEmpty()) result else null
+        }
+
+        /**
+         * Extracts Python docstring (PEP 257) or preceding comment description for a function/class.
+         */
+        fun extractPythonDocDescription(
+            lines: List<String>,
+            declStartLine: Int,
+            hdrEndLine: Int,
+            bodyEndLine: Int
+        ): String? {
+            // Check if inline docstring on the header line itself
+            val declLineIdx = declStartLine - 1
+            if (declLineIdx >= 0 && declLineIdx < lines.size) {
+                val declLine = lines[declLineIdx]
+                var pDepth = 0
+                var bDepth = 0
+                var headerColonIdx = -1
+                for (i in declLine.indices) {
+                    when (declLine[i]) {
+                        '(' -> pDepth++
+                        ')' -> if (pDepth > 0) pDepth--
+                        '[' -> bDepth++
+                        ']' -> if (bDepth > 0) bDepth--
+                        ':' -> if (pDepth == 0 && bDepth == 0) {
+                            headerColonIdx = i
+                            break
+                        }
+                    }
+                }
+                if (headerColonIdx >= 0 && headerColonIdx + 1 < declLine.length) {
+                    val afterColon = declLine.substring(headerColonIdx + 1).trim()
+                    val quote = when {
+                        afterColon.startsWith("\"\"\"") || afterColon.startsWith("r\"\"\"") || afterColon.startsWith("f\"\"\"") -> "\"\"\""
+                        afterColon.startsWith("'''") || afterColon.startsWith("r'''") || afterColon.startsWith("f'''") -> "'''"
+                        else -> null
+                    }
+                    if (quote != null) {
+                        val afterFirst = afterColon.substring(afterColon.indexOf(quote) + quote.length)
+                        if (afterFirst.contains(quote)) {
+                            val content = afterFirst.substringBefore(quote).trim()
+                            if (content.isNotEmpty()) return content
+                        }
+                    }
+                }
+            }
+
+            val searchStart = hdrEndLine
+            val searchEnd = minOf(lines.size, bodyEndLine)
+            var docLineIdx = -1
+            for (idx in searchStart until searchEnd) {
+                val trimmed = lines[idx].trim()
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) continue
+                docLineIdx = idx
+                break
+            }
+
+            if (docLineIdx != -1) {
+                val line = lines[docLineIdx].trim()
+                val quote = when {
+                    line.startsWith("\"\"\"") || line.startsWith("r\"\"\"") || line.startsWith("f\"\"\"") -> "\"\"\""
+                    line.startsWith("'''") || line.startsWith("r'''") || line.startsWith("f'''") -> "'''"
+                    else -> null
+                }
+                if (quote != null) {
+                    val afterFirst = line.substring(line.indexOf(quote) + quote.length)
+                    if (afterFirst.contains(quote)) {
+                        val content = afterFirst.substringBefore(quote).trim()
+                        if (content.isNotEmpty()) return content
+                    } else {
+                        val contentLines = mutableListOf<String>()
+                        if (afterFirst.trim().isNotEmpty()) {
+                            contentLines.add(afterFirst.trim())
+                        }
+                        for (idx in (docLineIdx + 1) until searchEnd) {
+                            val curLine = lines[idx].trim()
+                            if (curLine.contains(quote)) {
+                                val beforeEnd = curLine.substringBefore(quote).trim()
+                                if (beforeEnd.isNotEmpty() && !beforeEnd.startsWith(":") && !beforeEnd.startsWith("@")) {
+                                    contentLines.add(beforeEnd)
+                                }
+                                break
+                            } else {
+                                if (curLine.startsWith(":") || curLine.startsWith("@")) break
+                                if (curLine.isNotEmpty()) contentLines.add(curLine)
+                            }
+                        }
+                        val result = contentLines.joinToString(" ").trim()
+                        if (result.isNotEmpty()) return result
+                    }
+                }
+            }
+
+            // Fallback: check preceding # comments right before declStartLine
+            val startIdx = declStartLine - 1
+            if (startIdx > 0) {
+                var cur = startIdx - 1
+                while (cur >= 0 && lines[cur].trim().startsWith("@")) cur--
+                if (cur >= 0 && lines[cur].trim().startsWith("#")) {
+                    var cEnd = cur
+                    var cStart = cur
+                    while (cStart > 0 && lines[cStart - 1].trim().startsWith("#")) {
+                        val prevLow = lines[cStart - 1].trim().lowercase()
+                        if (PYTHON_NON_DOC_PREFIXES.any { prevLow.startsWith(it) }) break
+                        cStart--
+                    }
+                    val commentLines = mutableListOf<String>()
+                    for (i in cStart..cEnd) {
+                        val cTrim = lines[i].trim()
+                        val cLow = cTrim.lowercase()
+                        if (PYTHON_NON_DOC_PREFIXES.any { cLow.startsWith(it) }) break
+                        val c = cTrim.removePrefix("#").trim()
+                        if (c.isNotEmpty()) {
+                            commentLines.add(c)
+                        }
+                    }
+                    val result = commentLines.joinToString(" ").trim()
+                    if (result.isNotEmpty()) return result
+                }
+            }
+
+            return null
+        }
+
         private fun extractKotlin(
             projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String
         ): Triple<List<GraphNode>, List<GraphEdge>, Int> {
@@ -1052,6 +1363,7 @@ class PolyglotAstExtractor {
                 }
                 if (name == "Companion") continue
 
+                val matchStartLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
                 val declStartOffset = if (modifiers.isNotEmpty() && modifiersGroup != null) {
                     modifiersGroup.range.first
                 } else {
@@ -1089,12 +1401,19 @@ class PolyglotAstExtractor {
 
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name, annTokens)
 
+                val description = if (isTopLevel && (kw in listOf("class", "interface", "object", "fun") || "Composable" in annTokens)) {
+                    extractDocDescription(lines, matchStartLine, "kotlin")
+                } else {
+                    null
+                }
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
                         qualifiedName = qualifiedName, kind = kind, signature = sigLine,
                         startLine = startLine, endLine = endLine, moduleId = moduleId,
-                        sourceSet = sourceSet, semioticLayer = sem, archLayer = arch, isTestDouble = isTd
+                        sourceSet = sourceSet, semioticLayer = sem, archLayer = arch, isTestDouble = isTd,
+                        description = description, isTopLevel = isTopLevel
                     )
                 )
 
@@ -1186,13 +1505,16 @@ class PolyglotAstExtractor {
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
                 val nodeId = "$fileId#$name"
 
+                val description = if (isTopLevel) extractDocDescription(lines, startLine, "swift") else null
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
                         qualifiedName = "$relPath:$name", kind = if (kw == "func") "function" else kw,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd
+                        archLayer = arch, isTestDouble = isTd,
+                        description = description, isTopLevel = isTopLevel
                     )
                 )
 
@@ -1279,13 +1601,18 @@ class PolyglotAstExtractor {
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
                 val nodeId = "$fileId#$name"
 
+                val description = if (isTopLevel && kind in setOf("class", "interface", "function", "enum")) {
+                    extractDocDescription(lines, startLine, "typescript")
+                } else null
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
                         qualifiedName = "$relPath:$name", kind = kind,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd
+                        archLayer = arch, isTestDouble = isTd,
+                        description = description, isTopLevel = isTopLevel
                     )
                 )
 
@@ -1361,13 +1688,18 @@ class PolyglotAstExtractor {
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
                 val nodeId = "$fileId#$name"
 
+                val description = if (isTopLevel && kind in setOf("class", "interface", "enum", "function")) {
+                    extractDocDescription(lines, startLine, "rust")
+                } else null
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
                         qualifiedName = "$relPath:$name", kind = kind,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd
+                        archLayer = arch, isTestDouble = isTd,
+                        description = description, isTopLevel = isTopLevel
                     )
                 )
 
@@ -1449,13 +1781,18 @@ class PolyglotAstExtractor {
                 val nodeId = "$fileId#$name"
                 if (!seenNodeIds.add(nodeId)) continue
 
+                val description = if (isTopLevel && kind in setOf("class", "struct", "enum")) {
+                    extractDocDescription(lines, startLine, "cpp")
+                } else null
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
                         qualifiedName = "$relPath:$name", kind = kind,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd
+                        archLayer = arch, isTestDouble = isTd,
+                        description = description, isTopLevel = isTopLevel
                     )
                 )
 
@@ -1488,13 +1825,18 @@ class PolyglotAstExtractor {
                 val nodeId = "$fileId#$shortName"
                 if (!seenNodeIds.add(nodeId)) continue
 
+                val description = if (isTopLevel) {
+                    extractDocDescription(lines, startLine, "cpp")
+                } else null
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = shortName,
                         qualifiedName = "$relPath:$rawName", kind = "function",
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd
+                        archLayer = arch, isTestDouble = isTd,
+                        description = description, isTopLevel = isTopLevel
                     )
                 )
 
@@ -1585,13 +1927,19 @@ class PolyglotAstExtractor {
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
                 val nodeId = "$fileId#$name"
 
+                val headerEndLine = findPythonHeaderEndLine(maskedLines, startLine, endLine)
+                val description = if (isTopLevel) {
+                    extractPythonDocDescription(lines, startLine, headerEndLine, endLine)
+                } else null
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
                         qualifiedName = "$relPath:$name", kind = if ("class" in kw) "class" else "function",
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd
+                        archLayer = arch, isTestDouble = isTd,
+                        description = description, isTopLevel = isTopLevel
                     )
                 )
 

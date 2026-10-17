@@ -13,8 +13,11 @@ import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import platform.posix.getpid
@@ -1067,6 +1070,459 @@ class EngineAndMcpTest {
             // 3. Seed by specific file path: "src/service/OrderService.kt" resolves both nodes in that file
             val fileScope = synthesizer.synthesizeScope("p", listOf("src/service/OrderService.kt"))
             assertTrue(fileScope.files.contains("src/service/OrderService.kt"))
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testSqliteGraphStoreDescriptionPersistenceAndMigration() {
+        val dbPath = "/tmp/test_atlas_desc_store_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val documentedNode = GraphNode(
+                nodeId = "p:src/domain/User.kt#User",
+                projectId = "p",
+                fileId = "p:src/domain/User.kt",
+                name = "User",
+                qualifiedName = "com.domain.User",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = "Core user domain entity.",
+                isTopLevel = true
+            )
+            val undocumentedNode = GraphNode(
+                nodeId = "p:src/domain/Order.kt#Order",
+                projectId = "p",
+                fileId = "p:src/domain/Order.kt",
+                name = "Order",
+                qualifiedName = "com.domain.Order",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            val nestedNode = GraphNode(
+                nodeId = "p:src/domain/User.kt#User.Address",
+                projectId = "p",
+                fileId = "p:src/domain/User.kt",
+                name = "Address",
+                qualifiedName = "com.domain.User.Address",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = false
+            )
+
+            store.upsertNodesAndEdges("p", listOf(documentedNode, undocumentedNode, nestedNode), emptyList())
+
+            // Test getNode
+            val retrievedUser = store.getNode("p", "User")
+            assertNotNull(retrievedUser)
+            assertEquals("Core user domain entity.", retrievedUser.description)
+            assertTrue(retrievedUser.isTopLevel)
+
+            val retrievedOrder = store.getNode("p", "Order")
+            assertNotNull(retrievedOrder)
+            assertEquals(null, retrievedOrder.description)
+            assertTrue(retrievedOrder.isTopLevel)
+
+            val retrievedNested = store.getNode("p", "Address")
+            assertNotNull(retrievedNested)
+            assertEquals(null, retrievedNested.description)
+            assertFalse(retrievedNested.isTopLevel)
+
+            // Test getNodesForFile
+            val fileNodes = store.getNodesForFile("p", "src/domain/User.kt")
+            assertEquals(2, fileNodes.size)
+            val userInFile = fileNodes.firstOrNull { it.name == "User" }
+            assertNotNull(userInFile)
+            assertEquals("Core user domain entity.", userInFile.description)
+            assertTrue(userInFile.isTopLevel)
+
+            // Test listNodes
+            val allNodes = store.listNodes("p")
+            assertEquals(3, allNodes.size)
+
+            // Test searchNodes
+            val searchResults = store.searchNodes("p", "User")
+            val searchedUser = searchResults.firstOrNull { it.name == "User" }
+            assertNotNull(searchedUser)
+            assertEquals("Core user domain entity.", searchedUser.description)
+
+            // Test schema migration idempotency
+            store.migrateNodesSchema()
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testArchitectureAuditorDescriptionSuggestionsAndModes() {
+        val dbPath = "/tmp/test_atlas_desc_auditor_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val domainNoDesc = GraphNode(
+                nodeId = "p:src/domain/OrderService.kt#OrderService",
+                projectId = "p",
+                fileId = "p:src/domain/OrderService.kt",
+                name = "OrderService",
+                qualifiedName = "com.domain.OrderService",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            val domainWithDesc = GraphNode(
+                nodeId = "p:src/domain/UserService.kt#UserService",
+                projectId = "p",
+                fileId = "p:src/domain/UserService.kt",
+                name = "UserService",
+                qualifiedName = "com.domain.UserService",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = "Manages user account operations.",
+                isTopLevel = true
+            )
+            val presNoDesc = GraphNode(
+                nodeId = "p:src/ui/OrderView.kt#OrderView",
+                projectId = "p",
+                fileId = "p:src/ui/OrderView.kt",
+                name = "OrderView",
+                qualifiedName = "com.ui.OrderView",
+                kind = "function",
+                semioticLayer = "pragmatic",
+                archLayer = "presentation",
+                description = null,
+                isTopLevel = true
+            )
+            val dataNoDesc = GraphNode(
+                nodeId = "p:src/data/OrderRepo.kt#OrderRepo",
+                projectId = "p",
+                fileId = "p:src/data/OrderRepo.kt",
+                name = "OrderRepo",
+                qualifiedName = "com.data.OrderRepo",
+                kind = "class",
+                semioticLayer = "syntactic",
+                archLayer = "data",
+                description = null,
+                isTopLevel = true
+            )
+            val testNode = GraphNode(
+                nodeId = "p:src/test/OrderTest.kt#OrderTest",
+                projectId = "p",
+                fileId = "p:src/test/OrderTest.kt",
+                name = "OrderTest",
+                qualifiedName = "com.test.OrderTest",
+                kind = "class",
+                semioticLayer = "test",
+                archLayer = "test",
+                description = null,
+                isTopLevel = true
+            )
+            val testDoubleNode = GraphNode(
+                nodeId = "p:src/domain/FakeOrder.kt#FakeOrder",
+                projectId = "p",
+                fileId = "p:src/domain/FakeOrder.kt",
+                name = "FakeOrder",
+                qualifiedName = "com.domain.FakeOrder",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                isTestDouble = true,
+                description = null,
+                isTopLevel = true
+            )
+            val nestedNode = GraphNode(
+                nodeId = "p:src/domain/OrderService.kt#OrderService.Builder",
+                projectId = "p",
+                fileId = "p:src/domain/OrderService.kt",
+                name = "Builder",
+                qualifiedName = "com.domain.OrderService.Builder",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = false
+            )
+
+            store.upsertNodesAndEdges(
+                "p",
+                listOf(domainNoDesc, domainWithDesc, presNoDesc, dataNoDesc, testNode, testDoubleNode, nestedNode),
+                emptyList()
+            )
+
+            val auditor = ArchitectureAuditor(store)
+
+            // 1. Default mode ("domain-only"): flags only domainNoDesc
+            val defaultSuggestions = auditor.checkTopLevelDescriptions("p")
+            assertEquals(1, defaultSuggestions.size)
+            val sug0 = defaultSuggestions[0]
+            assertEquals("OrderService", sug0.name)
+            assertEquals("domain", sug0.archLayer)
+            assertEquals("DOC-TOP-LEVEL", sug0.rule)
+
+            // 2. "all" mode: flags domainNoDesc, presNoDesc, dataNoDesc (ignores test & test double & nested)
+            val allSuggestions = auditor.checkTopLevelDescriptions("p", mode = "all")
+            assertEquals(3, allSuggestions.size)
+            val namesInAll = allSuggestions.map { it.name }.toSet()
+            assertEquals(setOf("OrderService", "OrderView", "OrderRepo"), namesInAll)
+
+            // 3. "off" mode: returns empty list
+            val offSuggestions = auditor.checkTopLevelDescriptions("p", mode = "off")
+            assertEquals(0, offSuggestions.size)
+
+            val disabledSuggestions = auditor.checkTopLevelDescriptions("p", mode = "disabled")
+            assertEquals(0, disabledSuggestions.size)
+
+            // 4. runFullAudit with default domain-only: passed is true because suggestions are warnings
+            val auditReport = auditor.runFullAudit("p")
+            assertTrue(auditReport.passed, "Audit must pass because description suggestions are advisory warnings")
+            assertEquals(1, auditReport.descriptionSuggestions.size)
+
+            // 5. runFullAudit with mode = "off"
+            val auditReportOff = auditor.runFullAudit("p", descriptionMode = "off")
+            assertTrue(auditReportOff.passed)
+            assertEquals(0, auditReportOff.descriptionSuggestions.size)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testMcpServerVerifyArchitectureAndCheckDescriptions() {
+        val dbPath = "/tmp/test_atlas_desc_mcp_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val server = CodeGraphMcpServer(workspaceRoot = ".", customDbPath = dbPath)
+        try {
+            val domainNode = GraphNode(
+                nodeId = "p:src/domain/Payment.kt#Payment",
+                projectId = "p",
+                fileId = "p:src/domain/Payment.kt",
+                name = "Payment",
+                qualifiedName = "com.domain.Payment",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            server.store.upsertNodesAndEdges("p", listOf(domainNode), emptyList())
+
+            // Test verify_architecture with default mode
+            val auditArgs = buildJsonObject {
+                put("action", "verify_architecture")
+                put("project", "p")
+            }
+            val auditRes = server.callTool("codegraph_audit", auditArgs)
+            val auditData = auditRes["data"]?.jsonObject ?: auditRes
+            assertTrue(auditData["passed"]?.jsonPrimitive?.boolean == true)
+            val suggestionsArray = auditData["description_suggestions"]?.jsonArray
+                ?: auditData["descriptionSuggestions"]?.jsonArray
+            assertNotNull(suggestionsArray)
+            assertEquals(1, suggestionsArray.size)
+
+            // Test verify_architecture with description_mode = "off"
+            val auditOffArgs = buildJsonObject {
+                put("action", "verify_architecture")
+                put("project", "p")
+                put("description_mode", "off")
+            }
+            val auditOffRes = server.callTool("codegraph_audit", auditOffArgs)
+            val auditOffData = auditOffRes["data"]?.jsonObject ?: auditOffRes
+            val suggestionsOffArray = auditOffData["description_suggestions"]?.jsonArray
+                ?: auditOffData["descriptionSuggestions"]?.jsonArray
+            assertNotNull(suggestionsOffArray)
+            assertEquals(0, suggestionsOffArray.size)
+
+            // Test check_descriptions action
+            val checkArgs = buildJsonObject {
+                put("action", "check_descriptions")
+                put("project", "p")
+                put("description_mode", "domain-only")
+            }
+            val checkRes = server.callTool("codegraph_audit", checkArgs)
+            val checkData = checkRes["data"]?.jsonObject ?: checkRes
+            assertEquals("domain-only", checkData["mode"]?.jsonPrimitive?.content)
+            assertEquals(1, checkData["total_suggestions"]?.jsonPrimitive?.int)
+            val checkSuggestions = checkData["suggestions"]?.jsonArray
+            assertNotNull(checkSuggestions)
+            assertEquals(1, checkSuggestions.size)
+        } finally {
+            server.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testCliAuditDescriptionModeFlag() {
+        val dbPath = "/tmp/test_atlas_desc_cli_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val domainNode = GraphNode(
+                nodeId = "p:src/domain/Wallet.kt#Wallet",
+                projectId = "p",
+                fileId = "p:src/domain/Wallet.kt",
+                name = "Wallet",
+                qualifiedName = "com.domain.Wallet",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            store.upsertNodesAndEdges("p", listOf(domainNode), emptyList())
+        } finally {
+            store.close()
+        }
+
+        try {
+            // CLI audit with default options (exit code 0 since suggestions don't fail audit)
+            val exitCodeDefault = CodeGraphCli.run(arrayOf("audit", "--project", "p", "--db", dbPath))
+            assertEquals(0, exitCodeDefault)
+
+            // CLI audit with --description-mode all
+            val exitCodeAll = CodeGraphCli.run(arrayOf("audit", "--project", "p", "--db", dbPath, "--description-mode", "all"))
+            assertEquals(0, exitCodeAll)
+
+            // CLI audit with --no-description-check
+            val exitCodeNoCheck = CodeGraphCli.run(arrayOf("audit", "--project", "p", "--db", dbPath, "--no-description-check"))
+            assertEquals(0, exitCodeNoCheck)
+        } finally {
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testSwiftProtocolAndActorAuditSuggestions() {
+        val dbPath = "/tmp/test_atlas_swift_proto_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val protocolNode = GraphNode(
+                nodeId = "p:src/domain/AccountRepo.swift#AccountRepo",
+                projectId = "p",
+                fileId = "p:src/domain/AccountRepo.swift",
+                name = "AccountRepo",
+                qualifiedName = "AccountRepo",
+                kind = "protocol",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            val actorNode = GraphNode(
+                nodeId = "p:src/domain/SessionActor.swift#SessionActor",
+                projectId = "p",
+                fileId = "p:src/domain/SessionActor.swift",
+                name = "SessionActor",
+                qualifiedName = "SessionActor",
+                kind = "actor",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            store.upsertNodesAndEdges("p", listOf(protocolNode, actorNode), emptyList())
+
+            val auditor = ArchitectureAuditor(store)
+            val suggestions = auditor.checkTopLevelDescriptions("p", mode = "domain-only")
+            assertEquals(2, suggestions.size)
+            val names = suggestions.map { it.name }.toSet()
+            assertEquals(setOf("AccountRepo", "SessionActor"), names)
+            val protoSug = suggestions.first { it.name == "AccountRepo" }
+            assertTrue(protoSug.message.contains("Top-level interface 'AccountRepo'"))
+            val actorSug = suggestions.first { it.name == "SessionActor" }
+            assertTrue(actorSug.message.contains("Top-level actor 'SessionActor'"))
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testComposableAuditedInAllMode() {
+        val dbPath = "/tmp/test_atlas_composable_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val compNode = GraphNode(
+                nodeId = "p:src/ui/UserCard.kt#UserCard",
+                projectId = "p",
+                fileId = "p:src/ui/UserCard.kt",
+                name = "UserCard",
+                qualifiedName = "ui.UserCard",
+                kind = "composable",
+                semioticLayer = "pragmatic",
+                archLayer = "presentation",
+                description = null,
+                isTopLevel = true
+            )
+            store.upsertNodesAndEdges("p", listOf(compNode), emptyList())
+
+            val auditor = ArchitectureAuditor(store)
+            // Domain-only ignores presentation layer
+            val domSug = auditor.checkTopLevelDescriptions("p", mode = "domain-only")
+            assertEquals(0, domSug.size)
+
+            // All mode flags presentation composable
+            val allSug = auditor.checkTopLevelDescriptions("p", mode = "all")
+            assertEquals(1, allSug.size)
+            assertEquals("UserCard", allSug[0].name)
+            assertTrue(allSug[0].message.contains("Top-level function 'UserCard'"))
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testAuditorPrefixMatchingExactBoundary() {
+        val dbPath = "/tmp/test_atlas_prefix_bound_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val appNode = GraphNode(
+                nodeId = "p:src/app/Foo.kt#Foo",
+                projectId = "p",
+                fileId = "p:src/app/Foo.kt",
+                name = "Foo",
+                qualifiedName = "app.Foo",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            val appleNode = GraphNode(
+                nodeId = "p:src/apple/Bar.kt#Bar",
+                projectId = "p",
+                fileId = "p:src/apple/Bar.kt",
+                name = "Bar",
+                qualifiedName = "apple.Bar",
+                kind = "class",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                description = null,
+                isTopLevel = true
+            )
+            store.upsertNodesAndEdges("p", listOf(appNode, appleNode), emptyList())
+
+            val auditor = ArchitectureAuditor(store)
+            val scopedSug = auditor.checkTopLevelDescriptions("p", pathPrefixes = listOf("src/app"))
+            assertEquals(1, scopedSug.size)
+            assertEquals("Foo", scopedSug[0].name)
         } finally {
             store.close()
             PlatformFiles.delete(dbPath)
