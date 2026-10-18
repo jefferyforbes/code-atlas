@@ -122,7 +122,7 @@ object VaultPlanBridge {
             val rawToken = match.groupValues[1].trim()
             val lineNo = markdownText.take(match.range.first).count { it == '\n' } + 1
             val symCandidate = rawToken.substringAfterLast("::").substringAfterLast('#').trimEnd('(', ')')
-            val targetNode = byName[symCandidate]
+            val targetNode = byName[symCandidate] ?: byName[symCandidate.substringAfterLast('.')]
             if (targetNode != null) {
                 val eid = "$docNodeId:codespan:${targetNode.nodeId}:$lineNo"
                 if (seenEdges.add(eid)) {

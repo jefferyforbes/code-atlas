@@ -79,10 +79,12 @@ object ComplexityExtractor {
 
         val scopeStack = mutableListOf<ScopeType>()
         var pendingControl = false
+        var pendingSwitchLike = false
         var lastIdentifier = ""
         var lastCallIdentifier = ""
         var prevWord = ""
 
+        var parenDepth = 0
         for (line in maskedLines) {
             val trimmed = line.trim()
             if (trimmed.isEmpty()) continue
@@ -103,7 +105,7 @@ object ComplexityExtractor {
                 cyclomatic += elvisCount
                 cognitive += elvisCount
             } else if (language in listOf("typescript", "javascript", "ts", "js", "cpp", "c")) {
-                val ternaryCount = countRegexMatches(trimmed, Regex("""\?[^:]+:"""))
+                val ternaryCount = countRegexMatches(trimmed, Regex("""(?<=\S)\s+\?\s+[^:?]+\s+:"""))
                 cyclomatic += ternaryCount
                 cognitive += ternaryCount
             }
@@ -114,16 +116,22 @@ object ComplexityExtractor {
                 val c = trimmed[i]
 
                 if (c == '(') {
+                    parenDepth++
                     lastCallIdentifier = lastIdentifier
+                    i++
+                    continue
+                } else if (c == ')') {
+                    if (parenDepth > 0) parenDepth--
                     i++
                     continue
                 }
 
                 if (c == '{') {
                     val callTarget = if (lastCallIdentifier.isNotEmpty()) lastCallIdentifier else lastIdentifier
-                    val isRootScope = scopeStack.isEmpty() && !pendingControl
+                    val isRootScope = scopeStack.isEmpty() && !pendingControl && !pendingSwitchLike
                     val isSelfDecl = functionName != null && callTarget == functionName
                     val scopeType = when {
+                        pendingSwitchLike -> ScopeType.SWITCH_LIKE
                         pendingControl -> ScopeType.CONTROL
                         isRootScope || isSelfDecl -> ScopeType.OTHER
                         isComposable && callTarget in COMPOSE_CONTAINERS -> ScopeType.COMPOSE_CONTAINER
@@ -132,11 +140,12 @@ object ComplexityExtractor {
                         else -> ScopeType.OTHER
                     }
                     scopeStack.add(scopeType)
-                    val activeCognitiveNesting = scopeStack.count { it == ScopeType.CONTROL || it == ScopeType.LAMBDA }
+                    val activeCognitiveNesting = scopeStack.count { it == ScopeType.CONTROL || it == ScopeType.SWITCH_LIKE || it == ScopeType.LAMBDA }
                     if (activeCognitiveNesting > maxNesting) {
                         maxNesting = activeCognitiveNesting
                     }
                     pendingControl = false
+                    pendingSwitchLike = false
                     lastCallIdentifier = ""
                     i++
                     continue
@@ -155,7 +164,7 @@ object ComplexityExtractor {
                         i++
                     }
                     val word = trimmed.substring(start, i)
-                    val currentNesting = scopeStack.count { it == ScopeType.CONTROL || it == ScopeType.LAMBDA }
+                    val currentNesting = scopeStack.count { it == ScopeType.CONTROL || it == ScopeType.SWITCH_LIKE || it == ScopeType.LAMBDA }
 
                     when (word) {
                         "if" -> {
@@ -175,10 +184,11 @@ object ComplexityExtractor {
                                 pendingControl = true
                             }
                         }
-                        "when", "switch" -> {
+                        "when", "switch", "match" -> {
                             cyclomatic++
                             cognitive += (1 + currentNesting)
                             pendingControl = true
+                            pendingSwitchLike = true
                         }
                         "for", "while", "do" -> {
                             cyclomatic++
@@ -205,11 +215,31 @@ object ComplexityExtractor {
                     continue
                 }
 
-                // Arrow branch in Kotlin when
+                // Arrow branch in Kotlin when (->)
                 if (c == '-' && i + 1 < trimmed.length && trimmed[i + 1] == '>') {
-                    val beforeArrow = trimmed.substring(0, i).trim()
-                    if (!beforeArrow.endsWith("else")) {
-                        cyclomatic++
+                    val inKotlinWhen = (language in listOf("kotlin", "kt")) &&
+                        scopeStack.lastOrNull() == ScopeType.SWITCH_LIKE &&
+                        parenDepth == 0
+                    if (inKotlinWhen) {
+                        val beforeArrow = trimmed.substring(0, i).trim()
+                        if (!beforeArrow.endsWith("else")) {
+                            cyclomatic++
+                        }
+                    }
+                    i += 2
+                    continue
+                }
+
+                // Fat-arrow branch in Rust match (=>)
+                if (c == '=' && i + 1 < trimmed.length && trimmed[i + 1] == '>') {
+                    val inRustMatch = (language in listOf("rust", "rs")) &&
+                        scopeStack.lastOrNull() == ScopeType.SWITCH_LIKE &&
+                        parenDepth == 0
+                    if (inRustMatch) {
+                        val beforeArrow = trimmed.substring(0, i).trim()
+                        if (!beforeArrow.endsWith("_")) {
+                            cyclomatic++
+                        }
                     }
                     i += 2
                     continue
@@ -219,16 +249,17 @@ object ComplexityExtractor {
             }
 
             // Reset pending control if line finishes a single-line statement without opening a brace
-            if (pendingControl && !trimmed.endsWith("{") && !trimmed.endsWith("(") && !trimmed.endsWith("&&") && !trimmed.endsWith("||")) {
+            if ((pendingControl || pendingSwitchLike) && !trimmed.endsWith("{") && !trimmed.endsWith("(") && !trimmed.endsWith("&&") && !trimmed.endsWith("||")) {
                 // If it was a single line statement (e.g. if (x) return 1), control does not persist to next line
                 if (trimmed.contains("return") || trimmed.contains("=") || trimmed.endsWith(";")) {
                     pendingControl = false
+                    pendingSwitchLike = false
                 }
             }
         }
 
         val sloc = computeSloc(if (rawLines.isNotEmpty()) rawLines else maskedLines, language)
-        val paramCount = extractParamCount(if (rawLines.isNotEmpty()) rawLines.firstOrNull() ?: "" else maskedLines.firstOrNull() ?: "")
+        val paramCount = extractParamCount(if (rawLines.isNotEmpty()) rawLines else maskedLines)
 
         return ComplexityVector(
             cyclomatic = cyclomatic,
@@ -331,7 +362,7 @@ object ComplexityExtractor {
         }
 
         val sloc = computeSloc(if (rawLines.isNotEmpty()) rawLines else maskedLines, "python")
-        val paramCount = extractParamCount(if (rawLines.isNotEmpty()) rawLines.firstOrNull() ?: "" else maskedLines.firstOrNull() ?: "")
+        val paramCount = extractParamCount(if (rawLines.isNotEmpty()) rawLines else maskedLines)
 
         return ComplexityVector(
             cyclomatic = cyclomatic,
@@ -406,11 +437,29 @@ object ComplexityExtractor {
         }
     }
 
-    private fun extractParamCount(headerLine: String): Int {
-        val openParen = headerLine.indexOf('(')
-        val closeParen = headerLine.lastIndexOf(')')
+    private fun extractParamCount(lines: List<String>): Int {
+        if (lines.isEmpty()) return 0
+        val headerSb = StringBuilder()
+        var parenDepth = 0
+        var foundOpen = false
+        for (line in lines) {
+            headerSb.append(line).append(' ')
+            for (c in line) {
+                if (c == '(') {
+                    parenDepth++
+                    foundOpen = true
+                } else if (c == ')') {
+                    parenDepth--
+                }
+            }
+            if (foundOpen && parenDepth <= 0) break
+            if (headerSb.length > 500) break
+        }
+        val header = headerSb.toString()
+        val openParen = header.indexOf('(')
+        val closeParen = header.lastIndexOf(')')
         if (openParen == -1 || closeParen <= openParen) return 0
-        val paramContent = headerLine.substring(openParen + 1, closeParen).trim()
+        val paramContent = header.substring(openParen + 1, closeParen).trim()
         if (paramContent.isEmpty()) return 0
 
         var depth = 0
@@ -428,6 +477,7 @@ object ComplexityExtractor {
     private enum class ScopeType {
         COMPOSE_CONTAINER,
         CONTROL,
+        SWITCH_LIKE,
         LAMBDA,
         OTHER
     }

@@ -136,7 +136,25 @@ class NativeSqliteStatementTest {
             // capturedStmt must be closed by .use
             assertTrue(capturedStmt != null)
             assertFailsWith<IllegalStateException> {
-                capturedStmt!!.step()
+                capturedStmt.step()
+            }
+        } finally {
+            db.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testBindChecksReturnCode() {
+        val dbPath = "/tmp/atlas_stmt_bind_test_${getpid()}_${Random.nextInt(100000, 999999)}.db"
+        val db = NativeSqliteDatabase(dbPath)
+        try {
+            db.exec("CREATE TABLE test_bind (a TEXT);")
+            db.prepare("INSERT INTO test_bind VALUES (?);").use { stmt ->
+                // Binding to index 99 (out of range) must throw RuntimeException
+                assertFailsWith<RuntimeException> {
+                    stmt.bindString(99, "invalid")
+                }
             }
         } finally {
             db.close()

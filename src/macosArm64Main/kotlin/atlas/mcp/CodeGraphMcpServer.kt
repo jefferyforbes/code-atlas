@@ -147,6 +147,10 @@ class CodeGraphMcpServer(
                     put("type", "boolean")
                     put("description", "Evaluate Compose stability under Kotlin 2.0+ Strong Skipping rules (default: true).")
                 }
+                putJsonObject("limit") {
+                    put("type", "integer")
+                    put("description", "Maximum results to return (default: 50).")
+                }
             }
             putJsonArray("required") {
                 add("action")
@@ -268,6 +272,30 @@ class CodeGraphMcpServer(
                 putJsonObject("test_command") {
                     put("type", "string")
                     put("description", "Optional shell command to verify test suite preservation (e.g. './gradlew test').")
+                }
+                putJsonObject("limit") {
+                    put("type", "integer")
+                    put("description", "Maximum prescriptions or violations to return (default: 10 for doctor, 50 for audit).")
+                }
+                putJsonObject("max_cyclomatic") {
+                    put("type", "integer")
+                    put("description", "Maximum cyclomatic complexity threshold for audit_complexity (default: 15).")
+                }
+                putJsonObject("split") {
+                    put("type", "boolean")
+                    put("description", "Enable BOOST-003 file splitting during remediation (default: true).")
+                }
+                putJsonObject("make_private") {
+                    put("type", "boolean")
+                    put("description", "Enable BOOST-003 visibility reduction to private during remediation (default: false).")
+                }
+                putJsonObject("rule") {
+                    put("type", "string")
+                    put("description", "Filter by specific architecture rule ID (e.g. BOOST-003, ARCH-LAYER-INVERSION).")
+                }
+                putJsonObject("target") {
+                    put("type", "string")
+                    put("description", "Target symbol name, file path, or composable identifier.")
                 }
             }
             putJsonArray("required") {
@@ -650,7 +678,7 @@ class CodeGraphMcpServer(
             }
             "compose_doctor" -> {
                 val targetSym = targets.firstOrNull() ?: args["target"]?.jsonPrimitive?.contentOrNull
-                val report = composeEngine.runDoctor(project, target = targetSym, limit = limit)
+                val report = composeEngine.runDoctor(project, target = targetSym, limit = limit, workspaceRoot = workspaceRoot)
                 json.encodeToJsonElement(report).jsonObject
             }
             "audit_complexity" -> {
@@ -766,6 +794,9 @@ class CodeGraphMcpServer(
                     testCommand = testCmd,
                     limit = limitArg
                 )
+                if (!dryRun) {
+                    active.indexer.indexWorkspace(project, force = true)
+                }
                 json.encodeToJsonElement(report).jsonObject
             }
             "figma_audit" -> handleFigmaAudit(args)
@@ -825,7 +856,7 @@ class CodeGraphMcpServer(
             return payload
         }
 
-        val ts = (time(null) * 1000).toLong()
+        val ts = time(null) * 1000L
         val seq = ++spilloverSeq
         val spillFile = "$artifactsDir/spillover_${projectId}_${ts}_$seq.json"
         PlatformFiles.writeText(spillFile, rawJson)
@@ -866,7 +897,7 @@ class CodeGraphMcpServer(
                     }
                     putJsonObject("serverInfo") {
                         put("name", "atlas")
-                        put("version", "0.5.0")
+                        put("version", "0.5.1")
                     }
                 }
             }

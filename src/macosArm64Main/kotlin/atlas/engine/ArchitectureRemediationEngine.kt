@@ -386,7 +386,8 @@ class ArchitectureRemediationEngine(
 
                 // 3. Run test command if specified
                 if (!testCommand.isNullOrBlank()) {
-                    val exitCode = system(testCommand)
+                    val cmd = "cd \"$workspaceRoot\" && $testCommand"
+                    val exitCode = system(cmd)
                     if (exitCode != 0) {
                         testsPreserved = false
                         details.add("Test command '$testCommand' failed (exit code $exitCode). Automatic rollback performed.")
@@ -462,6 +463,23 @@ class ArchitectureRemediationEngine(
                             trimmed.startsWith("public ") -> "private " + trimmed.removePrefix("public ")
                             trimmed.startsWith("internal ") -> "private " + trimmed.removePrefix("internal ")
                             trimmed.startsWith("open ") -> "private " + trimmed.removePrefix("open ")
+                            trimmed.startsWith("@") -> {
+                                val annMatch = Regex("""^((?:@[A-Za-z0-9_]+(?:\([^)]*\))?\s*)+)(.*)""").find(trimmed)
+                                if (annMatch != null) {
+                                    val anns = annMatch.groupValues[1]
+                                    val rest = annMatch.groupValues[2]
+                                    val subTrimmed = when {
+                                        rest.startsWith("public ") -> "private " + rest.removePrefix("public ")
+                                        rest.startsWith("internal ") -> "private " + rest.removePrefix("internal ")
+                                        rest.startsWith("open ") -> "private " + rest.removePrefix("open ")
+                                        !rest.startsWith("private ") -> "private $rest"
+                                        else -> rest
+                                    }
+                                    anns + subTrimmed
+                                } else {
+                                    "private $trimmed"
+                                }
+                            }
                             !trimmed.startsWith("private ") -> "private $trimmed"
                             else -> trimmed
                         }
@@ -527,7 +545,8 @@ class ArchitectureRemediationEngine(
             try {
                 PlatformFiles.writeText(fullPath, modifiedContent)
                 if (!testCommand.isNullOrBlank()) {
-                    val exitCode = system(testCommand)
+                    val cmd = "cd \"$workspaceRoot\" && $testCommand"
+                    val exitCode = system(cmd)
                     if (exitCode != 0) {
                         testsPreserved = false
                         details.add("Test command '$testCommand' failed (exit code $exitCode). Automatic rollback performed.")
@@ -688,6 +707,31 @@ class ArchitectureRemediationEngine(
         for (line in originalLines) {
             val trimmed = line.trim()
             if (trimmed.isEmpty()) continue
+
+            // Stop scanning once declarations begin to prevent extracting false imports from code bodies
+            val isDeclStart = when (lang) {
+                "kotlin" -> !trimmed.startsWith("@file:") && !trimmed.startsWith("package ") &&
+                    !trimmed.startsWith("import ") && !trimmed.startsWith("//") &&
+                    !trimmed.startsWith("/*") && !trimmed.startsWith("*")
+                "python" -> !trimmed.startsWith("#") && !trimmed.startsWith("\"\"\"") &&
+                    !trimmed.startsWith("'''") && !trimmed.startsWith("import ") &&
+                    !trimmed.startsWith("from ")
+                "swift" -> !trimmed.startsWith("//") && !trimmed.startsWith("/*") &&
+                    !trimmed.startsWith("*") && !trimmed.startsWith("import ")
+                "rust" -> !trimmed.startsWith("//") && !trimmed.startsWith("/*") &&
+                    !trimmed.startsWith("*") && !trimmed.startsWith("#![") &&
+                    !trimmed.startsWith("use ")
+                "cpp" -> !trimmed.startsWith("//") && !trimmed.startsWith("/*") &&
+                    !trimmed.startsWith("*") && !trimmed.startsWith("#")
+                "typescript", "javascript" -> !trimmed.startsWith("//") && !trimmed.startsWith("/*") &&
+                    !trimmed.startsWith("*") && !trimmed.startsWith("import ") &&
+                    !(trimmed.startsWith("const ") && "require(" in trimmed)
+                else -> !trimmed.startsWith("package ") && !trimmed.startsWith("import ") &&
+                    !trimmed.startsWith("from ") && !trimmed.startsWith("use ")
+            }
+            if (isDeclStart) {
+                break
+            }
 
             when (lang) {
                 "kotlin" -> {

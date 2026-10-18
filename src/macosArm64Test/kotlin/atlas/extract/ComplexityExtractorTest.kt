@@ -166,4 +166,85 @@ class ComplexityExtractorTest {
         assertEquals(2, funcNode.maxNestingDepth)
         assertTrue(funcNode.complexityScore < 100.0)
     }
+
+    @Test
+    fun testRustMatchFatArrowBranchesAndDefaultArm() {
+        val rustCode = listOf(
+            "fn handle_event(event: Event) -> i32 {",
+            "    match event {",
+            "        Event::Start => 1,",
+            "        Event::Stop => 2,",
+            "        Event::Pause => 3,",
+            "        _ => 0,",
+            "    }",
+            "}"
+        )
+        val vector = ComplexityExtractor.calculate(rustCode, rustCode, "rust")
+        // match: 1 cyclo, 1 cog. Branches: Start (+1), Stop (+1), Pause (+1). Default '_' does not increment.
+        // Base cyclomatic = 1. Total cyclomatic = 1 base + 1 match + 3 branches = 5.
+        assertEquals(5, vector.cyclomatic, "Rust match should count fat-arrow branches but omit default arm")
+        assertEquals(1, vector.cognitive, "Rust match cognitive score")
+        assertEquals(1, vector.paramCount, "Rust parameter count")
+    }
+
+    @Test
+    fun testKotlinWhenBranchesDoNotCountNestedLambdasOrFunctionTypes() {
+        val ktCode = listOf(
+            "fun handleState(state: State) {",
+            "    when (state) {",
+            "        is State.Success -> {",
+            "            val names = state.items.map { item -> item.name }",
+            "            val filter = { x: Int -> x > 0 }",
+            "        }",
+            "        is State.Loading -> showSpinner()",
+            "        else -> showError()",
+            "    }",
+            "}"
+        )
+        val vector = ComplexityExtractor.calculate(ktCode, ktCode, "kotlin")
+        // when (+1 cyclo), is Success -> (+1 cyclo), is Loading -> (+1 cyclo), else -> (+0 cyclo)
+        // Nested lambdas '{ item ->' and '{ x ->' must NOT increment cyclomatic branches!
+        // Total cyclomatic: 1 base + 1 when + 2 branches = 4.
+        assertEquals(4, vector.cyclomatic, "When branches must increment cyclomatic, but nested lambdas must not")
+    }
+
+    @Test
+    fun testCppSwitchWithPointerDereferenceDoesNotCountArrowAsBranch() {
+        val cppCode = listOf(
+            "void process(State* ptr, int mode) {",
+            "    switch (mode) {",
+            "        case 1:",
+            "            ptr->execute();",
+            "            break;",
+            "        case 2:",
+            "            ptr->reset();",
+            "            break;",
+            "        default:",
+            "            break;",
+            "    }",
+            "}"
+        )
+        val vector = ComplexityExtractor.calculate(cppCode, cppCode, "cpp")
+        // switch (+1 cyclo), case 1 (+1 cyclo), case 2 (+1 cyclo)
+        // ptr->execute() and ptr->reset() must NOT increment cyclomatic!
+        // Total cyclomatic: 1 base + 1 switch + 2 cases = 4.
+        assertEquals(4, vector.cyclomatic, "C++ switch must count cases, and ptr-> must NOT be counted as branch")
+        assertEquals(2, vector.paramCount, "C++ parameter count should be 2")
+    }
+
+    @Test
+    fun testMultilineParameterCounting() {
+        val multilineCode = listOf(
+            "fun renderCard(",
+            "    title: String,",
+            "    subtitle: String?,",
+            "    count: Int = 0,",
+            "    onClick: () -> Unit",
+            "): View {",
+            "    return View()",
+            "}"
+        )
+        val vector = ComplexityExtractor.calculate(multilineCode, multilineCode, "kotlin")
+        assertEquals(4, vector.paramCount, "extractParamCount must count all 4 multiline parameters")
+    }
 }

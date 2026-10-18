@@ -32,7 +32,7 @@ import kotlinx.serialization.json.putJsonObject
  */
 class CodeGraphCli {
     companion object {
-        const val VERSION = "0.5.0"
+        const val VERSION = "0.5.1"
         const val SUMMARY_CEILING_BYTES = 400
 
         private val jsonPretty = Json { prettyPrint = true }
@@ -196,8 +196,10 @@ class CodeGraphCli {
                     arg == "--json" -> isJson = true
                     arg == "--summary" -> isJson = false
                     arg == "--include-source" -> includeSource = true
-                    arg == "--before" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> beforeSnippet = argv[++idx]
-                    arg == "--after" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> afterSnippet = argv[++idx]
+                    arg == "--before" && idx + 1 < argv.size -> beforeSnippet = argv[++idx]
+                    arg.startsWith("--before=") -> beforeSnippet = arg.substringAfter('=')
+                    arg == "--after" && idx + 1 < argv.size -> afterSnippet = argv[++idx]
+                    arg.startsWith("--after=") -> afterSnippet = arg.substringAfter('=')
                     arg == "--rule" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> ruleIdArg = argv[++idx]
                     arg == "--target-node" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> targetNodeArg = argv[++idx]
                     arg == "--test-cmd" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> testCmdArg = argv[++idx]
@@ -377,11 +379,12 @@ class CodeGraphCli {
                         val lInversions = (data["layer_inversions"] ?: data["layerInversions"])?.jsonArray?.size ?: 0
                         val pCollisions = (data["plan_3d_collisions"] ?: data["plan3dCollisions"])?.jsonArray?.size ?: 0
                         val dSuggestions = (data["description_suggestions"] ?: data["descriptionSuggestions"])?.jsonArray?.size ?: 0
-                        val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: (bViolations == 0 && lInversions == 0 && pCollisions == 0)
+                        val cViolations = (data["complexity_violations"] ?: data["complexityViolations"])?.jsonArray?.size ?: 0
+                        val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: (bViolations == 0 && lInversions == 0 && pCollisions == 0 && cViolations == 0)
                         val text = if (isJson) {
                             jsonPretty.encodeToString(data)
                         } else {
-                            "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions description_suggestions=$dSuggestions"
+                            "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions complexity_violations=$cViolations description_suggestions=$dSuggestions"
                         }
                         println(truncateSummary(text, isJson))
                         return if (passed) 0 else 1
@@ -394,11 +397,11 @@ class CodeGraphCli {
                             if (filterPaths.isNotEmpty()) {
                                 putJsonArray("targets") { filterPaths.forEach { add(it) } }
                             }
-                            if (!ruleIdArg.isNullOrBlank()) put("rule_id", ruleIdArg!!)
+                            if (!ruleIdArg.isNullOrBlank()) put("rule_id", ruleIdArg)
                             put("dry_run", !applyRemediation)
                             put("split", splitBoost003)
                             put("make_private", makePrivateBoost003)
-                            if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg!!)
+                            if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg)
                             put("limit", limit)
                         }
                         val res = server.callTool("codegraph_audit", toolArgs)
@@ -509,9 +512,9 @@ class CodeGraphCli {
                             put("file_path", filePath)
                             put("before_snippet", beforeSnippet ?: "")
                             put("after_snippet", afterSnippet ?: "")
-                            if (!ruleIdArg.isNullOrBlank()) put("rule_id", ruleIdArg!!)
-                            if (!targetNodeArg.isNullOrBlank()) put("target_node_id", targetNodeArg!!)
-                            if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg!!)
+                            if (!ruleIdArg.isNullOrBlank()) put("rule_id", ruleIdArg)
+                            if (!targetNodeArg.isNullOrBlank()) put("target_node_id", targetNodeArg)
+                            if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg)
                             put("dry_run", !applyRemediation)
                         }
                         val res = server.callTool("codegraph_audit", toolArgs)

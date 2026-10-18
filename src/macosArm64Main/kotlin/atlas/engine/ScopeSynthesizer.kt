@@ -173,7 +173,7 @@ class ScopeSynthesizer(private val store: SqliteGraphStore) {
                 downstreamScreens.add(cn.fqName)
             }
             for (hop in store.queryComposeCascade(projectId, cn.nodeId, maxDepth = 4)) {
-                if (hop.calleeFqName.endsWith("Screen") || hop.calleeFqName.isNotEmpty()) {
+                if (hop.calleeFqName.endsWith("Screen")) {
                     downstreamScreens.add(hop.calleeFqName)
                 }
             }

@@ -106,7 +106,8 @@ class AutonomousRemediationVerifier(
             val varPropMatch = Regex("""\bvar\s+([A-Za-z0-9_]+)\s*:""").find(beforeSnippet)
             if (varPropMatch != null) {
                 val propName = varPropMatch.groupValues[1]
-                val mutations = store.countPropertyMutations(projectSlug, propName)
+                val className = Regex("""\b(?:data\s+)?class\s+([A-Za-z0-9_]+)""").find(beforeSnippet)?.groupValues?.get(1)
+                val mutations = store.countPropertyMutations(projectSlug, propName, className)
                 if (mutations > 0) {
                     val msg = "Pre-flight failed: Write-site mutations exist in call graph ($mutations active mutation(s) for '$propName')."
                     details.add("Graph store check failed: Property '$propName' has $mutations MUTATES_PROPERTY edge(s). Refactor mutations before converting 'var' -> 'val'.")
@@ -425,7 +426,8 @@ class AutonomousRemediationVerifier(
                 details.add("Failed to stage modified content to disk for test execution: $fullPath")
             } else {
                 try {
-                    val exitCode = system(testCommand)
+                    val cmd = "cd \"$workspaceRoot\" && $testCommand"
+                    val exitCode = system(cmd)
                     if (exitCode != 0) {
                         testsPreserved = false
                         details.add("Test command '$testCommand' failed (exit code $exitCode).")

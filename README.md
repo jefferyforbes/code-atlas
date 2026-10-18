@@ -6,7 +6,7 @@
 
 *Sub-15ms Cold-Start &middot; Ahead-Of-Time Native Binary &middot; Zero Runtime Dependencies &middot; Model Context Protocol (MCP)*
 
-[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
+[![Version](https://img.shields.io/badge/version-0.5.1-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
 [![Kotlin](https://img.shields.io/badge/Kotlin_Native-2.2.0-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/native-overview.html)
 [![macOS](https://img.shields.io/badge/macOS-Apple_Silicon_(arm64)-000000?logo=apple&logoColor=white)](https://apple.com)
 [![Startup](https://img.shields.io/badge/Cold_Start-~3ms-00C853)](https://github.com/jefferyforbes/code-atlas)
@@ -37,6 +37,13 @@ AI coding and design agents waste thousands of prompt tokens repeatedly reading,
   - **Autonomous Architecture Remediation Engine (`atlas fix`)**: Plans, verifies, and applies automated AST file-splitting diffs for `BOOST-003` Single Declaration Principle compliance, converts unreferenced secondary declarations to private (`--make-private`), corrects layer classification inversions, and verifies test-command rollback guards.
   - **Top-Level Description Audit (`atlas audit --check-descriptions`)**: Extracts docstrings, KDoc, and JSDoc comments for top-level declarations, persisting coverage to SQLite with actionable suggestions.
   - **Autonomous Compose Doctor Remediation (`atlas compose doctor --apply`)**: Automated remediation of Compose stability anti-patterns with write-site safety verification and batched Figma graph traversal.
+- **v0.5.1 &middot; Engine Correctness, FTS5 Scalability & Platform Hardening**:
+  - **Native SQLite FTS5 Indexing & Deletion Hardening**: Eliminates $O(N^2)$ full-table scans during batch deletion and indexing by indexing `node_id` and `project_id` in `nodes_fts`, with composite indexes on `edges` (`source_node_id`, `target_node_id`, `project_id`) accelerating degree recomputations.
+  - **Compose Stability Scope Isolation (`BIT_STAB_002`)**: Isolates broken `@Immutable`/`@Stable` contract violations strictly to composables that reference unstable types, preventing workspace-wide false positive contamination.
+  - **Deterministic Compose Doctor (`atlas compose doctor --apply`)**: Synthesizes AST source replacements directly from disk for real-world verified file rewrites.
+  - **Polyglot Complexity Accuracy**: Properly counts Rust `match` arms (`=>`), restricts Kotlin `when` arrow branches to switch-like scopes (`parenDepth == 0`), and avoids false positives on lambdas, function types, return types, and C++ pointer dereferences.
+  - **Cross-File Edge Resolution & Import Wildcards**: Full support for wildcard imports (`import foo.*`) restoring affinity weighting, coupled with class-qualified method `nodeId`s across Python, Swift, TypeScript, Rust, and C++.
+  - **CI/CD & Platform Resilience**: Modernizes GitHub Actions workflow to valid upstream actions, prevents test cache directory leaks, and resolves macOS `/tmp` symlinks consistently.
 
 Whether invoked directly from your shell, embedded into git pre-commit hooks, or running as a background **Model Context Protocol (MCP)** server, Atlas provides deterministic codebase and design truth with minimal token consumption.
 

@@ -6,6 +6,7 @@ import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
 import atlas.engine.ScopeSynthesizer
+import atlas.engine.WorkspaceIndexer
 import atlas.extract.FigmaSnapshotExtractor
 import atlas.extract.ModuleBoundaryDetector
 import atlas.mcp.CodeGraphMcpServer
@@ -145,9 +146,9 @@ class EngineAndMcpTest {
             assertTrue(entDb.contains("/Library/Caches/atlas/$hash/atlas.db"))
             assertTrue(entArt.contains("/Library/Caches/atlas/$hash/artifacts"))
         } finally {
-            PlatformFiles.delete("$tmpWs/sub/loop")
-            PlatformFiles.delete("$tmpWs/sub/Sample.kt")
-            PlatformFiles.delete("$tmpWs/.atlas/atlas.db")
+            PlatformFiles.deleteRecursively(tmpWs)
+            val hash = CacheProfileResolver.computeRepoHash(tmpWs)
+            PlatformFiles.deleteRecursively("${PlatformFiles.userHome()}/Library/Caches/atlas/$hash")
         }
     }
 
@@ -1528,4 +1529,300 @@ class EngineAndMcpTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testScopeSynthesizerDownstreamScreensOnlyIncludesScreens() {
+        val dbPath = "/tmp/test_atlas_scope_screens_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val rootScreen = "p:src/HomeScreen.kt#HomeScreen"
+            val childButton = "p:src/PrimaryButton.kt#PrimaryButton"
+            val childScreen = "p:src/DetailScreen.kt#DetailScreen"
+            store.upsertComposeNodesAndParams(
+                listOf(
+                    atlas.model.ComposeNodeRecord(
+                        nodeId = rootScreen, projectSlug = "p", filePath = "src/HomeScreen.kt",
+                        fqName = "com.example.HomeScreen", startLine = 1, endLine = 10,
+                        isSkippable = true, isRestartable = true
+                    ),
+                    atlas.model.ComposeNodeRecord(
+                        nodeId = childButton, projectSlug = "p", filePath = "src/PrimaryButton.kt",
+                        fqName = "com.example.PrimaryButton", startLine = 1, endLine = 10,
+                        isSkippable = true, isRestartable = true
+                    ),
+                    atlas.model.ComposeNodeRecord(
+                        nodeId = childScreen, projectSlug = "p", filePath = "src/DetailScreen.kt",
+                        fqName = "com.example.DetailScreen", startLine = 1, endLine = 10,
+                        isSkippable = true, isRestartable = true
+                    )
+                ),
+                emptyList()
+            )
+            val nodeHome = GraphNode(nodeId = rootScreen, projectId = "p", fileId = "p:src/HomeScreen.kt", name = "HomeScreen", qualifiedName = "com.example.HomeScreen", kind = "composable")
+            val nodeButton = GraphNode(nodeId = childButton, projectId = "p", fileId = "p:src/PrimaryButton.kt", name = "PrimaryButton", qualifiedName = "com.example.PrimaryButton", kind = "composable")
+            val nodeDetail = GraphNode(nodeId = childScreen, projectId = "p", fileId = "p:src/DetailScreen.kt", name = "DetailScreen", qualifiedName = "com.example.DetailScreen", kind = "composable")
+            store.upsertNodesAndEdges(
+                "p",
+                listOf(nodeHome, nodeButton, nodeDetail),
+                listOf(
+                    GraphEdge(
+                        edgeId = "e1", projectId = "p",
+                        sourceNodeId = rootScreen, targetNodeId = childButton,
+                        edgeType = "CALLS"
+                    ),
+                    GraphEdge(
+                        edgeId = "e2", projectId = "p",
+                        sourceNodeId = rootScreen, targetNodeId = childScreen,
+                        edgeType = "CALLS"
+                    )
+                )
+            )
+            val synthesizer = ScopeSynthesizer(store)
+            val scope = synthesizer.synthesizeComposeScope("p", listOf("src/HomeScreen.kt"))
+            assertTrue(scope.downstreamScreens.contains("com.example.DetailScreen"))
+            assertFalse(scope.downstreamScreens.contains("com.example.PrimaryButton"))
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testComposeDoctorRealFileSlicing() {
+        val tmpDir = "/tmp/test_atlas_compose_slice_${getpid()}_${time(null)}"
+        PlatformFiles.mkdirs(tmpDir)
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val srcDir = "$tmpDir/src"
+            PlatformFiles.mkdirs(srcDir)
+            val filePath = "src/UserCard.kt"
+            val fileContent = """
+                package com.example
+
+                data class UserProfile(
+                    var nickname: String,
+                    val id: String
+                )
+            """.trimIndent()
+            PlatformFiles.writeText("$tmpDir/$filePath", fileContent)
+
+            val classNodeId = "p:$filePath#UserProfile"
+            val compNodeId = "p:$filePath#UserCard"
+            store.upsertNodesAndEdges(
+                "p",
+                listOf(
+                    GraphNode(
+                        nodeId = classNodeId, projectId = "p", fileId = "p:$filePath",
+                        name = "UserProfile", qualifiedName = "com.example.UserProfile",
+                        kind = "data class", startLine = 3, endLine = 6
+                    )
+                ),
+                emptyList()
+            )
+            store.upsertComposeNodesAndParams(
+                listOf(
+                    atlas.model.ComposeNodeRecord(
+                        nodeId = compNodeId, projectSlug = "p", filePath = filePath,
+                        fqName = "com.example.UserCard", startLine = 8, endLine = 20,
+                        isSkippable = false, isRestartable = true,
+                        violationMask = atlas.extract.ComposeStabilityExtractor.BIT_STAB_001
+                    )
+                ),
+                listOf(
+                    atlas.model.ComposeParamRecord(
+                        nodeId = compNodeId, paramIndex = 0, paramName = "profile",
+                        typeSignature = "com.example.UserProfile", stability = "UNSTABLE",
+                        stabilityReason = "MUTABLE_VAR_PROPERTY:nickname"
+                    )
+                )
+            )
+
+            val engine = atlas.engine.ComposeStabilityEngine(store)
+            val report = engine.runDoctor("p", workspaceRoot = tmpDir)
+            assertEquals(1, report.totalPrescriptions)
+            val presc = report.prescriptions.first()
+            assertTrue(presc.writeSiteSafe)
+            assertEquals("    var nickname: String,", presc.beforeSnippet)
+            assertEquals("    val nickname: String,", presc.afterSnippet)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+            PlatformFiles.deleteRecursively(tmpDir)
+        }
+    }
+
+    @Test
+    fun testMcpToolSchemasIncludeAllRequiredProperties() {
+        val testDb = "/tmp/test_schemas_${getpid()}_${time(null)}.db"
+        val server = CodeGraphMcpServer(workspaceRoot = "/tmp", customDbPath = testDb)
+        try {
+            val tools = server.toolDefinitions()
+            val queryTool = tools.first { it["name"]?.jsonPrimitive?.content == "codegraph_query" }
+            val queryProps = queryTool["inputSchema"]?.jsonObject?.get("properties")?.jsonObject
+            assertNotNull(queryProps)
+            assertTrue(queryProps.containsKey("limit"), "querySchema must contain limit")
+
+            val auditTool = tools.first { it["name"]?.jsonPrimitive?.content == "codegraph_audit" }
+            val auditProps = auditTool["inputSchema"]?.jsonObject?.get("properties")?.jsonObject
+            assertNotNull(auditProps)
+            assertTrue(auditProps.containsKey("limit"), "auditSchema must contain limit")
+            assertTrue(auditProps.containsKey("max_cyclomatic"), "auditSchema must contain max_cyclomatic")
+            assertTrue(auditProps.containsKey("split"), "auditSchema must contain split")
+            assertTrue(auditProps.containsKey("make_private"), "auditSchema must contain make_private")
+            assertTrue(auditProps.containsKey("rule"), "auditSchema must contain rule")
+            assertTrue(auditProps.containsKey("target"), "auditSchema must contain target")
+        } finally {
+            server.store.close()
+            PlatformFiles.delete(testDb)
+            PlatformFiles.delete("$testDb-wal")
+            PlatformFiles.delete("$testDb-shm")
+        }
+    }
+
+    @Test
+    fun testSqliteGraphStoreFtsUpsertAndReindexCollisionSafety() {
+        val testDb = "/tmp/test_fts_collision_${getpid()}_${time(null)}.db"
+        val store = SqliteGraphStore(testDb)
+        try {
+            val fileA = "proj:src/FileA.kt"
+            val nodeA1 = GraphNode(
+                nodeId = "proj:src/FileA.kt#AlphaService",
+                projectId = "proj",
+                fileId = fileA,
+                name = "AlphaService",
+                qualifiedName = "com.example.AlphaService",
+                kind = "class"
+            )
+            store.upsertFileRecord(
+                projectId = "proj",
+                relPath = "src/FileA.kt",
+                language = "kotlin",
+                moduleId = ":app",
+                sourceSet = "main",
+                semioticLayer = "syntactic",
+                archLayer = "domain",
+                sha256 = "hash1",
+                mtime = 1000.0,
+                loc = 50,
+                topLevelDeclCount = 1
+            )
+            store.upsertNodesAndEdges("proj", listOf(nodeA1), emptyList())
+
+            // Re-upsert file A (which deletes old nodes from nodes and nodes_fts)
+            store.upsertFileRecord(
+                projectId = "proj",
+                relPath = "src/FileA.kt",
+                language = "kotlin",
+                moduleId = ":app",
+                sourceSet = "main",
+                semioticLayer = "syntactic",
+                archLayer = "domain",
+                sha256 = "hash2",
+                mtime = 2000.0,
+                loc = 60,
+                topLevelDeclCount = 1
+            )
+
+            // Now insert a new node with different ID into file A
+            val nodeA2 = GraphNode(
+                nodeId = "proj:src/FileA.kt#BetaWorker",
+                projectId = "proj",
+                fileId = fileA,
+                name = "BetaWorker",
+                qualifiedName = "com.example.BetaWorker",
+                kind = "class"
+            )
+            // This must not crash even if rowid is reused by SQLite
+            store.upsertNodesAndEdges("proj", listOf(nodeA2), emptyList())
+
+            // Re-insert nodeA1 as well
+            store.upsertNodesAndEdges("proj", listOf(nodeA1, nodeA2), emptyList())
+
+            // FTS query should find both
+            val matches = store.searchNodes("proj", "AlphaService")
+            assertEquals(1, matches.size)
+            assertEquals("proj:src/FileA.kt#AlphaService", matches[0].nodeId)
+
+            val matches2 = store.searchNodes("proj", "BetaWorker")
+            assertEquals(1, matches2.size)
+            assertEquals("proj:src/FileA.kt#BetaWorker", matches2[0].nodeId)
+        } finally {
+            store.close()
+            PlatformFiles.delete(testDb)
+            PlatformFiles.delete("$testDb-wal")
+            PlatformFiles.delete("$testDb-shm")
+        }
+    }
+
+    @Test
+    fun testVaultPlanBridgeDotQualifiedBacktickResolution() {
+        val targetNode = GraphNode(
+            nodeId = "p:src/SqliteGraphStore.kt#SqliteGraphStore.searchNodes",
+            projectId = "p",
+            fileId = "p:src/SqliteGraphStore.kt",
+            name = "searchNodes",
+            qualifiedName = "atlas.db.SqliteGraphStore.searchNodes",
+            kind = "function"
+        )
+        val markdown = """
+            # Architecture Notes
+            We invoke `SqliteGraphStore.searchNodes` to search FTS index.
+        """.trimIndent()
+        val (nodes, edges) = VaultPlanBridge.extractMarkdownAndPlans(
+            projectId = "p",
+            relPath = "docs/architecture.md",
+            markdownText = markdown,
+            indexedNodes = listOf(targetNode)
+        )
+        val codeSpanEdges = edges.filter { it.edgeType == "CODE_SPAN_REFS" }
+        assertEquals(1, codeSpanEdges.size)
+        assertEquals(targetNode.nodeId, codeSpanEdges[0].targetNodeId)
+    }
+
+    @Test
+    fun testIncrementalReindexingRelinksUnchangedMarkdownDocs() {
+        val tmpDir = "/tmp/test_atlas_md_relink_${getpid()}_${time(null)}"
+        PlatformFiles.mkdirs(tmpDir)
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val docsDir = "$tmpDir/docs"
+            val srcDir = "$tmpDir/src"
+            PlatformFiles.mkdirs(docsDir)
+            PlatformFiles.mkdirs(srcDir)
+
+            val docFile = "$docsDir/notes.md"
+            PlatformFiles.writeText(docFile, "Reference to `NewWorker` here.")
+
+            val srcFile = "$srcDir/Initial.kt"
+            PlatformFiles.writeText(srcFile, "package com.example\nclass Initial")
+
+            val indexer = WorkspaceIndexer(tmpDir, store)
+            indexer.indexWorkspace("test_proj")
+
+            // Initial index: NewWorker does not exist yet
+            val edges1 = store.listEdges("test_proj").filter { it.sourceNodeId == "test_proj:docs/notes.md#notes" }
+            assertTrue(edges1.none { it.edgeType == "CODE_SPAN_REFS" })
+
+            // Add NewWorker.kt without touching notes.md
+            val workerFile = "$srcDir/NewWorker.kt"
+            PlatformFiles.writeText(workerFile, "package com.example\nclass NewWorker")
+
+            // Incremental index
+            indexer.indexWorkspace("test_proj")
+
+            // notes.md must be re-evaluated and link to NewWorker!
+            val edges2 = store.listEdges("test_proj").filter { it.sourceNodeId == "test_proj:docs/notes.md#notes" }
+            assertTrue(edges2.any { it.edgeType == "CODE_SPAN_REFS" && it.targetNodeId.contains("NewWorker") })
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+            PlatformFiles.delete("$dbPath-wal")
+            PlatformFiles.delete("$dbPath-shm")
+            PlatformFiles.deleteRecursively(tmpDir)
+        }
+    }
 }
+
