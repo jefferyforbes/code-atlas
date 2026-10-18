@@ -1,6 +1,7 @@
 package atlas.cli
 
 import atlas.engine.FigmaDesignAuditor
+import atlas.engine.WorkspaceInitEngine
 import atlas.extract.FigmaSnapshotExtractor
 import atlas.extract.UrlTargetResolver
 import atlas.mcp.CodeGraphMcpServer
@@ -101,6 +102,9 @@ class CodeGraphCli {
             var makePrivateBoost003 = false
             var descriptionMode: String? = null
             var forceIndex = false
+            var hookTypeArg = "pre-commit"
+            var isDryRun = false
+            var forceFlag = false
 
             var idx = 0
             while (idx < argv.size) {
@@ -132,7 +136,7 @@ class CodeGraphCli {
                         command = "query"
                         action = "shortest_path"
                     }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "fix" || arg == "remedy" || arg == "remediate" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" -> {
+                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "fix" || arg == "remedy" || arg == "remediate" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" || arg == "init" -> {
                         command = when (arg) {
                             "dead_code" -> "dead-code"
                             "record_memory" -> "record-memory"
@@ -204,11 +208,19 @@ class CodeGraphCli {
                     arg == "--target-node" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> targetNodeArg = argv[++idx]
                     arg == "--test-cmd" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> testCmdArg = argv[++idx]
                     arg == "--apply" -> applyRemediation = true
-                    arg == "--dry-run" -> applyRemediation = false
+                    arg == "--dry-run" -> {
+                        applyRemediation = false
+                        isDryRun = true
+                    }
                     arg == "--split" -> splitBoost003 = true
                     arg == "--no-split" -> splitBoost003 = false
                     arg == "--make-private" -> makePrivateBoost003 = true
-                    arg == "--force" -> forceIndex = true
+                    arg == "--force" -> {
+                        forceIndex = true
+                        forceFlag = true
+                    }
+                    arg == "--hook-type" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> hookTypeArg = argv[++idx]
+                    arg.startsWith("--hook-type=") -> hookTypeArg = arg.substringAfter('=')
                     (arg == "--description-mode" || arg == "--descriptions") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> descriptionMode = argv[++idx]
                     arg.startsWith("--description-mode=") -> descriptionMode = arg.substringAfter('=')
                     arg.startsWith("--descriptions=") -> descriptionMode = arg.substringAfter('=')
@@ -550,6 +562,17 @@ class CodeGraphCli {
                             println(truncateSummary(compact, false))
                         }
                         return 0
+                    }
+                    "init" -> {
+                        return runInitCommand(
+                            workspace = workspace,
+                            project = project,
+                            hookType = hookTypeArg,
+                            force = forceFlag,
+                            threshold = thresholdArg ?: 15,
+                            dryRun = isDryRun,
+                            isJson = isJson
+                        )
                     }
                     "version" -> {
                         if (isJson) {
@@ -1205,6 +1228,52 @@ class CodeGraphCli {
             return 0
         }
 
+        private fun runInitCommand(
+            workspace: String,
+            project: String,
+            hookType: String,
+            force: Boolean,
+            threshold: Int,
+            dryRun: Boolean,
+            isJson: Boolean
+        ): Int {
+            val engine = WorkspaceInitEngine(workspace)
+            val result = engine.initHook(
+                project = project,
+                hookType = hookType,
+                force = force,
+                threshold = threshold,
+                dryRun = dryRun
+            )
+
+            if (isJson) {
+                val jsonObject = buildJsonObject {
+                    put("success", result.success)
+                    put("hook_path", result.hookPath)
+                    put("hook_type", result.hookType)
+                    put("message", result.message)
+                    put("overwritten", result.overwritten)
+                    put("dry_run", result.dryRun)
+                    if (result.scriptContent != null) {
+                        put("script_content", result.scriptContent)
+                    }
+                }
+                println(jsonPretty.encodeToString(jsonObject))
+            } else {
+                if (result.success) {
+                    println("[Init] $project: ${result.message}")
+                    if (result.dryRun && result.scriptContent != null) {
+                        println("--- Script Preview ---")
+                        println(result.scriptContent)
+                        println("----------------------")
+                    }
+                } else {
+                    println("[Init Error] $project: ${result.message}")
+                }
+            }
+            return if (result.success) 0 else 1
+        }
+
         private fun printHelp() {
             println(
                 """
@@ -1215,6 +1284,7 @@ class CodeGraphCli {
                        atlas compose <command> [options]
 
                 Code Commands:
+                  init               Configure and install git pre-commit/pre-push hooks in repository
                   index              Incrementally index workspace AST symbols and markdown notes
                   query              Query AST symbols, callers, callees, blast radius, or status
                   synthesize-scope   Synthesize 3D Concurrency Scope (files, modules, architecture)
@@ -1254,6 +1324,9 @@ class CodeGraphCli {
                   --cache-profile <p>      'enterprise' (user cache) or 'in-repo' (.atlas/)
                   --json                   Emit full formatted JSON output
                   --summary                Emit compact summary <= 400 bytes (default)
+                  --hook-type <type>       Git hook type to install ('pre-commit' or 'pre-push'; default: pre-commit)
+                  --force                  Force overwrite of existing git hook
+                  --dry-run                Preview generated git hook script without disk mutations
                   --outcome <status>       Outcome status for memory recording (default: useful)
                   --note <text>            Descriptive note or rationale for memory recording
 
