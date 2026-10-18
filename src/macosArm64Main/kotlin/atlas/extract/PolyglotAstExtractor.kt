@@ -1,5 +1,6 @@
 package atlas.extract
 
+import atlas.model.ComplexityVector
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 
@@ -941,6 +942,29 @@ class PolyglotAstExtractor {
             return rest
         }
 
+        private fun computeComplexityForNode(
+            kind: String,
+            startLine: Int,
+            endLine: Int,
+            maskedLines: List<String>,
+            lines: List<String>,
+            language: String,
+            isComposable: Boolean = false,
+            functionName: String? = null
+        ): Pair<ComplexityVector, Double> {
+            return if (kind in setOf("function", "composable", "method")) {
+                val sIdx = (startLine - 1).coerceAtLeast(0)
+                val eIdx = endLine.coerceAtMost(maskedLines.size)
+                val fMasked = if (sIdx < eIdx) maskedLines.subList(sIdx, eIdx) else emptyList()
+                val fRaw = if (sIdx < lines.size) lines.subList(sIdx, minOf(eIdx, lines.size)) else emptyList()
+                val vec = ComplexityExtractor.calculate(fMasked, fRaw, language, isComposable, functionName)
+                val score = ComplexityExtractor.computeScore(vec)
+                Pair(vec, score)
+            } else {
+                Pair(ComplexityVector(), 100.0)
+            }
+        }
+
         private fun extractKotlinSupertypes(
             lines: List<String>,
             startLine: Int,
@@ -1407,13 +1431,26 @@ class PolyglotAstExtractor {
                     null
                 }
 
+                val (cVec, cScore) = computeComplexityForNode(
+                    kind = kind,
+                    startLine = startLine,
+                    endLine = endLine,
+                    maskedLines = maskedLines,
+                    lines = lines,
+                    language = "kotlin",
+                    isComposable = "Composable" in annTokens,
+                    functionName = name
+                )
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
                         qualifiedName = qualifiedName, kind = kind, signature = sigLine,
                         startLine = startLine, endLine = endLine, moduleId = moduleId,
                         sourceSet = sourceSet, semioticLayer = sem, archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel
+                        description = description, isTopLevel = isTopLevel,
+                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
                     )
                 )
 
@@ -1507,14 +1544,27 @@ class PolyglotAstExtractor {
 
                 val description = if (isTopLevel) extractDocDescription(lines, startLine, "swift") else null
 
+                val kind = if (kw == "func") "function" else kw
+                val (cVec, cScore) = computeComplexityForNode(
+                    kind = kind,
+                    startLine = startLine,
+                    endLine = endLine,
+                    maskedLines = maskedLines,
+                    lines = lines,
+                    language = "swift",
+                    functionName = name
+                )
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = "$relPath:$name", kind = if (kw == "func") "function" else kw,
+                        qualifiedName = "$relPath:$name", kind = kind,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel
+                        description = description, isTopLevel = isTopLevel,
+                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
                     )
                 )
 
@@ -1605,6 +1655,16 @@ class PolyglotAstExtractor {
                     extractDocDescription(lines, startLine, "typescript")
                 } else null
 
+                val (cVec, cScore) = computeComplexityForNode(
+                    kind = kind,
+                    startLine = startLine,
+                    endLine = endLine,
+                    maskedLines = maskedLines,
+                    lines = lines,
+                    language = "typescript",
+                    functionName = name
+                )
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
@@ -1612,7 +1672,9 @@ class PolyglotAstExtractor {
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel
+                        description = description, isTopLevel = isTopLevel,
+                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
                     )
                 )
 
@@ -1692,6 +1754,16 @@ class PolyglotAstExtractor {
                     extractDocDescription(lines, startLine, "rust")
                 } else null
 
+                val (cVec, cScore) = computeComplexityForNode(
+                    kind = kind,
+                    startLine = startLine,
+                    endLine = endLine,
+                    maskedLines = maskedLines,
+                    lines = lines,
+                    language = "rust",
+                    functionName = name
+                )
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
@@ -1699,7 +1771,9 @@ class PolyglotAstExtractor {
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel
+                        description = description, isTopLevel = isTopLevel,
+                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
                     )
                 )
 
@@ -1829,6 +1903,16 @@ class PolyglotAstExtractor {
                     extractDocDescription(lines, startLine, "cpp")
                 } else null
 
+                val (cVec, cScore) = computeComplexityForNode(
+                    kind = "function",
+                    startLine = startLine,
+                    endLine = endLine,
+                    maskedLines = maskedLines,
+                    lines = lines,
+                    language = "cpp",
+                    functionName = shortName
+                )
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = shortName,
@@ -1836,7 +1920,9 @@ class PolyglotAstExtractor {
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel
+                        description = description, isTopLevel = isTopLevel,
+                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
                     )
                 )
 
@@ -1932,14 +2018,27 @@ class PolyglotAstExtractor {
                     extractPythonDocDescription(lines, startLine, headerEndLine, endLine)
                 } else null
 
+                val kind = if ("class" in kw) "class" else "function"
+                val (cVec, cScore) = computeComplexityForNode(
+                    kind = kind,
+                    startLine = startLine,
+                    endLine = endLine,
+                    maskedLines = maskedLines,
+                    lines = lines,
+                    language = "python",
+                    functionName = name
+                )
+
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = "$relPath:$name", kind = if ("class" in kw) "class" else "function",
+                        qualifiedName = "$relPath:$name", kind = kind,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel
+                        description = description, isTopLevel = isTopLevel,
+                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
                     )
                 )
 

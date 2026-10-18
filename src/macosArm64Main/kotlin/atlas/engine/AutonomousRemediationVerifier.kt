@@ -4,9 +4,12 @@ import atlas.db.SqliteGraphStore
 import atlas.extract.ComposeStabilityExtractor
 import atlas.extract.PolyglotAstExtractor
 import atlas.extract.SemioticLayerClassifier
+import atlas.model.ComplexityDoctorReport
 import atlas.model.ComposeDoctorReport
+import atlas.model.GraphNode
 import atlas.model.RemediationVerificationResult
 import atlas.util.PlatformFiles
+import kotlin.math.roundToInt
 import platform.posix.system
 
 /**
@@ -41,6 +44,28 @@ class AutonomousRemediationVerifier(
         )
     }
 
+    fun verifyPrescription(
+        projectSlug: String,
+        prescription: ComplexityDoctorReport.Prescription,
+        dryRun: Boolean = true,
+        testCommand: String? = null,
+        testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null
+    ): RemediationVerificationResult {
+        return verifyAndApply(
+            projectSlug = projectSlug,
+            relPath = prescription.filePath,
+            beforeSnippet = prescription.beforeSnippet,
+            afterSnippet = prescription.afterSnippet,
+            ruleId = prescription.ruleId,
+            targetNodeId = prescription.targetNodeId,
+            writeSiteSafe = prescription.writeSiteSafe,
+            dryRun = dryRun,
+            testCommand = testCommand,
+            testVerifier = testVerifier,
+            expectedReductionPercent = prescription.reductionPercent
+        )
+    }
+
     fun verifyAndApply(
         projectSlug: String,
         relPath: String,
@@ -51,7 +76,8 @@ class AutonomousRemediationVerifier(
         writeSiteSafe: Boolean = true,
         dryRun: Boolean = true,
         testCommand: String? = null,
-        testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null
+        testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null,
+        expectedReductionPercent: Double? = null
     ): RemediationVerificationResult {
         val root = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
         val fullPath = if (relPath.startsWith("/")) relPath else "$root/$relPath"
@@ -215,6 +241,8 @@ class AutonomousRemediationVerifier(
         val lang = PolyglotAstExtractor.supportedLanguage(ext)
         var astValid = true
         var topDeclCount = 1
+        var origNodes: List<GraphNode> = emptyList()
+        var nodes: List<GraphNode> = emptyList()
 
         if (lang.isNotEmpty()) {
             val masked = PolyglotAstExtractor.maskCommentsAndStrings(modifiedContent, lang)
@@ -223,18 +251,20 @@ class AutonomousRemediationVerifier(
                 details.add("Syntax check failed: Unbalanced or improperly nested delimiters ({}, (), or []) in modified content.")
             } else {
                 try {
-                    val (origNodes, _, _) = PolyglotAstExtractor.extractFile(
+                    val extractedOrig = PolyglotAstExtractor.extractFile(
                         projectSlug, relPath, originalContent
                     )
-                    val (nodes, _, declCount) = PolyglotAstExtractor.extractFile(
+                    origNodes = extractedOrig.first
+                    val extractedMod = PolyglotAstExtractor.extractFile(
                         projectSlug, relPath, modifiedContent
                     )
-                    topDeclCount = declCount
+                    nodes = extractedMod.first
+                    topDeclCount = extractedMod.third
                     if (origNodes.isNotEmpty() && nodes.isEmpty() && modifiedContent.trim().isNotEmpty()) {
                         astValid = false
                         details.add("AST extraction produced 0 nodes for modified $lang source file (previously had ${origNodes.size} node(s)).")
                     } else {
-                        details.add("Polyglot AST extraction succeeded (${nodes.size} nodes, topLevelDeclCount=$declCount).")
+                        details.add("Polyglot AST extraction succeeded (${nodes.size} nodes, topLevelDeclCount=$topDeclCount).")
                     }
                 } catch (e: Exception) {
                     astValid = false
@@ -308,6 +338,43 @@ class AutonomousRemediationVerifier(
             } catch (e: Exception) {
                 checksPassed = false
                 details.add("Compose stability validation crashed: ${e.message}")
+            }
+        }
+
+        if (ruleId.startsWith("COMPLEXITY") || expectedReductionPercent != null) {
+            val origTargetNode = if (!targetNodeId.isNullOrBlank()) {
+                origNodes.firstOrNull { it.nodeId == targetNodeId }
+                    ?: origNodes.firstOrNull { it.qualifiedName == targetNodeId }
+                    ?: origNodes.firstOrNull { it.name == targetNodeId }
+            } else {
+                origNodes.firstOrNull { it.kind in setOf("function", "method", "composable") }
+            }
+            val newTargetNode = if (!targetNodeId.isNullOrBlank()) {
+                val matches = nodes.filter {
+                    it.nodeId == targetNodeId || it.qualifiedName == targetNodeId || it.name == targetNodeId
+                }
+                if (origTargetNode != null && matches.size > 1) {
+                    matches.minByOrNull { kotlin.math.abs(it.startLine - origTargetNode.startLine) }
+                } else {
+                    matches.firstOrNull()
+                }
+            } else {
+                nodes.firstOrNull { it.kind in setOf("function", "method", "composable") }
+            }
+
+            val reductionPct = if (origTargetNode != null && newTargetNode != null && origTargetNode.cognitiveComplexity > 0) {
+                val diff = origTargetNode.cognitiveComplexity - newTargetNode.cognitiveComplexity
+                (diff.toDouble() / origTargetNode.cognitiveComplexity.toDouble()) * 100.0
+            } else {
+                expectedReductionPercent ?: 0.0
+            }
+
+            val roundedReduction = (reductionPct * 10.0).roundToInt() / 10.0
+            if (reductionPct < 25.0) {
+                checksPassed = false
+                details.add("Gate 4 failed: Cognitive complexity reduction ($roundedReduction%) is below the required 25.0% threshold.")
+            } else {
+                details.add("Gate 4 passed: Cognitive complexity reduction verified ($roundedReduction% >= 25.0%).")
             }
         }
 
