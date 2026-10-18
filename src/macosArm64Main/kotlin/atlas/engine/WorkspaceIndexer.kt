@@ -196,6 +196,7 @@ class WorkspaceIndexer(
 
         var filesDeleted = 0
         for (indexedRel in cachedFiles.keys) {
+            if (indexedRel == "__endpoints__") continue
             if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
                 val matchesSubpath = normalizedSubpaths.any { cleanSp ->
                     indexedRel == cleanSp || indexedRel.startsWith("$cleanSp/")
@@ -411,9 +412,55 @@ class WorkspaceIndexer(
             docEdges.addAll(dEdges)
         }
 
+        val endpointNodes = mutableListOf<GraphNode>()
+        val endpointPrefix = "$projectId:endpoint#"
+        val activeEndpointTargets = LinkedHashSet<String>()
+        for (edge in resolvedEdges) {
+            if (edge.targetNodeId.startsWith(endpointPrefix)) {
+                activeEndpointTargets.add(edge.targetNodeId)
+            }
+        }
+        for (edge in docEdges) {
+            if (edge.targetNodeId.startsWith(endpointPrefix)) {
+                activeEndpointTargets.add(edge.targetNodeId)
+            }
+        }
+        for (edge in store.listEdges(projectId, listOf("URL_REFS"))) {
+            if (edge.targetNodeId.startsWith(endpointPrefix)) {
+                activeEndpointTargets.add(edge.targetNodeId)
+            }
+        }
+        if (activeEndpointTargets.isNotEmpty()) {
+            store.ensureVirtualFileRecord(projectId, "__endpoints__")
+            val virtualFileId = "$projectId:__endpoints__"
+            for (epNodeId in activeEndpointTargets) {
+                val canonicalRoute = epNodeId.removePrefix(endpointPrefix)
+                if (canonicalRoute.isEmpty()) continue
+                endpointNodes.add(
+                    GraphNode(
+                        nodeId = epNodeId,
+                        projectId = projectId,
+                        fileId = virtualFileId,
+                        name = canonicalRoute,
+                        qualifiedName = canonicalRoute,
+                        kind = "endpoint",
+                        signature = "endpoint $canonicalRoute",
+                        startLine = 1,
+                        endLine = 1,
+                        moduleId = "endpoints",
+                        sourceSet = "main",
+                        semioticLayer = "syntactic",
+                        archLayer = "interface",
+                        isTestDouble = false,
+                        isTopLevel = false
+                    )
+                )
+            }
+        }
+
         store.upsertNodesAndEdges(
             projectId = projectId,
-            nodes = modNodes + changedNodes.distinctBy { it.nodeId } + docNodes,
+            nodes = modNodes + changedNodes.distinctBy { it.nodeId } + docNodes + endpointNodes,
             edges = modEdges + resolvedEdges + kmpEdges + docEdges
         )
         store.setProjectMetadata(projectId, "extractor_version", PolyglotAstExtractor.EXTRACTOR_VERSION)

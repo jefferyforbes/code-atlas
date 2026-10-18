@@ -330,7 +330,7 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         val entrypointNames = setOf("main", "init", "run", "invoke", "Companion", "onCreate", "onStart")
         val excludedKinds = setOf(
             "module", "markdown_doc", "markdown_note", "plan_contract", "expect_decl", "actual_decl",
-            "typealias", "namespace", "variable", "composable", "file_scope"
+            "typealias", "namespace", "variable", "composable", "file_scope", "endpoint", "url_ref"
         )
         return store.listNodes(projectId)
             .filter { node ->
