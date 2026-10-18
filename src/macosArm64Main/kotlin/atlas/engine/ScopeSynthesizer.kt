@@ -2,6 +2,7 @@ package atlas.engine
 
 import atlas.bridge.VaultPlanBridge
 import atlas.db.SqliteGraphStore
+import atlas.extract.UrlTargetResolver
 import atlas.model.Compose3DScope
 import atlas.model.GraphNode
 import atlas.model.ScopeRecommendation
@@ -20,6 +21,20 @@ class ScopeSynthesizer(private val store: SqliteGraphStore) {
         for (target in seedTargets) {
             val cleanTarget = target.trim().trim('\'', '"').removePrefix("./").replace('\\', '/')
             val matchedNodes = when {
+                UrlTargetResolver.isUrlOrDeepLink(cleanTarget) -> {
+                    val codeLink = UrlTargetResolver.parseCodeLocationUrl(cleanTarget)
+                    when {
+                        codeLink != null && (codeLink.startLine != null || codeLink.symbolFragment != null) -> {
+                            listOfNotNull(store.getNode(projectId, cleanTarget))
+                        }
+                        codeLink != null -> {
+                            store.getNodesForFile(projectId, codeLink.filePathSuffix)
+                        }
+                        else -> {
+                            listOfNotNull(store.getNode(projectId, cleanTarget))
+                        }
+                    }
+                }
                 cleanTarget.contains('*') || cleanTarget.contains('?') -> {
                     val globRe = VaultPlanBridge.globToRegex(cleanTarget)
                     val allFiles = store.listIndexedFiles(projectId)

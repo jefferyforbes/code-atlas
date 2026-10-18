@@ -11,6 +11,7 @@ import atlas.engine.FigmaDesignAuditor
 import atlas.engine.ScopeSynthesizer
 import atlas.engine.WorkMemoryStore
 import atlas.engine.WorkspaceIndexer
+import atlas.extract.UrlTargetResolver
 import atlas.model.ComplexityScoreRecord
 import atlas.util.PlatformFiles
 import kotlin.math.ln
@@ -771,35 +772,45 @@ class CodeGraphMcpServer(
     }
 
     private fun handleFigmaAudit(args: JsonObject): JsonObject {
-        val fileKey = args["file_key"]?.jsonPrimitive?.content
+        val rawFileKey = args["file_key"]?.jsonPrimitive?.content
             ?: args["fileKey"]?.jsonPrimitive?.content
             ?: args["target"]?.jsonPrimitive?.content
             ?: (args["targets"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content)
             ?: ""
-        if (fileKey.isEmpty()) {
+        if (rawFileKey.isEmpty()) {
             return buildJsonObject {
                 put("error", "Missing required 'file_key' parameter for figma_audit")
             }
         }
+        val fileKey = UrlTargetResolver.parseFigmaUrl(rawFileKey)?.fileKey ?: rawFileKey
         val result = figmaAuditor.audit(fileKey)
         return json.encodeToJsonElement(result).jsonObject
     }
 
     private fun handleFigmaScope(args: JsonObject): JsonObject {
         val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
-        val fileKey = args["file_key"]?.jsonPrimitive?.content
+        val rawFileKey = args["file_key"]?.jsonPrimitive?.content
             ?: args["fileKey"]?.jsonPrimitive?.content
             ?: args["target"]?.jsonPrimitive?.content
             ?: (args["targets"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content)
             ?: ""
-        if (fileKey.isEmpty()) {
+        if (rawFileKey.isEmpty()) {
             return buildJsonObject {
                 put("error", "Missing required 'file_key' parameter for figma_scope")
             }
         }
-        val seeds = args["seeds"]?.jsonArray?.map { it.jsonPrimitive.content }
+        val parsedFileUrl = UrlTargetResolver.parseFigmaUrl(rawFileKey)
+        val fileKey = parsedFileUrl?.fileKey ?: rawFileKey
+        val rawSeeds = args["seeds"]?.jsonArray?.map { it.jsonPrimitive.content }
             ?: args["targets"]?.jsonArray?.map { it.jsonPrimitive.content }
             ?: listOfNotNull(args["seed"]?.jsonPrimitive?.content ?: if (args.containsKey("file_key") || args.containsKey("fileKey")) args["target"]?.jsonPrimitive?.content else null)
+        val seeds = if (rawSeeds.isEmpty() && parsedFileUrl?.nodeId != null) {
+            listOf(parsedFileUrl.nodeId)
+        } else {
+            rawSeeds.map { seed ->
+                UrlTargetResolver.parseFigmaUrl(seed)?.nodeId ?: UrlTargetResolver.normalizeFigmaNodeId(seed)
+            }
+        }
         val scope = figmaAuditor.synthesizeFigmaScope(project, fileKey, seeds)
         return json.encodeToJsonElement(scope).jsonObject
     }
