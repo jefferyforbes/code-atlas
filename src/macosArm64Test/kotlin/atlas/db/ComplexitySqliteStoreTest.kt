@@ -254,4 +254,93 @@ class ComplexitySqliteStoreTest {
             PlatformFiles.delete("$dbPath-shm")
         }
     }
+
+    @Test
+    fun testSqliteDegreeRecomputationOnMutation() {
+        val dbPath = "/tmp/atlas_degrees_test_${Random.nextInt(100000, 999999)}.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val nodeA = GraphNode(
+                nodeId = "proj:src/A.kt#fnA",
+                projectId = "proj",
+                fileId = "proj:src/A.kt",
+                name = "fnA",
+                qualifiedName = "pkg.A.fnA",
+                kind = "function"
+            )
+            val nodeB = GraphNode(
+                nodeId = "proj:src/B.kt#fnB",
+                projectId = "proj",
+                fileId = "proj:src/B.kt",
+                name = "fnB",
+                qualifiedName = "pkg.B.fnB",
+                kind = "function"
+            )
+            val nodeC = GraphNode(
+                nodeId = "proj:src/C.kt#fnC",
+                projectId = "proj",
+                fileId = "proj:src/C.kt",
+                name = "fnC",
+                qualifiedName = "pkg.C.fnC",
+                kind = "function"
+            )
+
+            // Initially upsert with no edges
+            store.upsertNodesAndEdges("proj", listOf(nodeA, nodeB, nodeC), emptyList())
+
+            var fetchedA = store.getNode("proj", nodeA.nodeId)
+            var fetchedB = store.getNode("proj", nodeB.nodeId)
+            var fetchedC = store.getNode("proj", nodeC.nodeId)
+            assertEquals(0, fetchedA?.inDegree)
+            assertEquals(0, fetchedA?.outDegree)
+            assertEquals(0, fetchedB?.inDegree)
+            assertEquals(0, fetchedB?.outDegree)
+
+            // Add edges: A -> B, C -> B, B -> C
+            val edge1 = GraphEdge(
+                edgeId = "e1",
+                projectId = "proj",
+                sourceNodeId = nodeA.nodeId,
+                targetNodeId = nodeB.nodeId,
+                edgeType = "CALLS"
+            )
+            val edge2 = GraphEdge(
+                edgeId = "e2",
+                projectId = "proj",
+                sourceNodeId = nodeC.nodeId,
+                targetNodeId = nodeB.nodeId,
+                edgeType = "CALLS"
+            )
+            val edge3 = GraphEdge(
+                edgeId = "e3",
+                projectId = "proj",
+                sourceNodeId = nodeB.nodeId,
+                targetNodeId = nodeC.nodeId,
+                edgeType = "CALLS"
+            )
+
+            store.upsertNodesAndEdges("proj", listOf(nodeA, nodeB, nodeC), listOf(edge1, edge2, edge3))
+
+            fetchedA = store.getNode("proj", nodeA.nodeId)
+            fetchedB = store.getNode("proj", nodeB.nodeId)
+            fetchedC = store.getNode("proj", nodeC.nodeId)
+
+            // A calls B: in=0, out=1
+            assertEquals(0, fetchedA?.inDegree)
+            assertEquals(1, fetchedA?.outDegree)
+
+            // B is called by A and C, and calls C: in=2, out=1
+            assertEquals(2, fetchedB?.inDegree)
+            assertEquals(1, fetchedB?.outDegree)
+
+            // C is called by B, and calls B: in=1, out=1
+            assertEquals(1, fetchedC?.inDegree)
+            assertEquals(1, fetchedC?.outDegree)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+            PlatformFiles.delete("$dbPath-wal")
+            PlatformFiles.delete("$dbPath-shm")
+        }
+    }
 }

@@ -1162,4 +1162,168 @@ $tq
         val doctorEdge = rawEdges.firstOrNull { it.targetNodeId.contains("ComplexityDoctorEngine.runDoctor") }
         assertNotNull(doctorEdge, "Local variable assignment must map doctor.runDoctor to ComplexityDoctorEngine.runDoctor")
     }
+
+    @Test
+    fun testSwiftFunctionExtractionWithModifiersAndAttributes() {
+        val swiftCode = """
+            import Foundation
+
+            public protocol Worker {
+                func performTask()
+            }
+
+            @MainActor
+            public class JobRunner: Worker {
+                public var state: String = "idle"
+
+                @objc
+                public override func performTask() {
+                    logExecution()
+                }
+
+                @MainActor
+                public static func createDefault() -> JobRunner {
+                    return JobRunner()
+                }
+
+                private mutating func logExecution() {
+                    print(state)
+                }
+            }
+        """.trimIndent()
+
+        val (nodes, edges, topLevelCount) = PolyglotAstExtractor.extractFile(
+            projectId = "swift_proj",
+            relPath = "Sources/JobRunner.swift",
+            sourceText = swiftCode
+        )
+
+        // Worker protocol and JobRunner class are top-level declarations
+        assertEquals(2, topLevelCount)
+
+        val byName = nodes.associateBy { it.name }
+        val runnerNode = byName["JobRunner"]
+        assertNotNull(runnerNode)
+        assertEquals("class", runnerNode.kind)
+
+        val performTaskNode = byName["performTask"]
+        assertNotNull(performTaskNode, "performTask with override and @objc should be extracted")
+        assertEquals("function", performTaskNode.kind)
+
+        val createDefaultNode = byName["createDefault"]
+        assertNotNull(createDefaultNode, "createDefault with @MainActor static func should be extracted")
+        assertEquals("function", createDefaultNode.kind)
+
+        val logExecutionNode = byName["logExecution"]
+        assertNotNull(logExecutionNode, "logExecution with mutating func should be extracted")
+        assertEquals("function", logExecutionNode.kind)
+
+        val callEdges = edges.filter { it.sourceNodeId == performTaskNode.nodeId && it.edgeType == "CALLS" }
+        assertTrue(callEdges.any { it.targetNodeId == "sym:logExecution" })
+    }
+
+    @Test
+    fun testTypeScriptClassMethodsAndNestedTemplateLiterals() {
+        val tsCode = """
+            import { Logger } from './logger';
+
+            export class OrderProcessor {
+                private readonly logger: Logger;
+
+                constructor(logger: Logger) {
+                    this.logger = logger;
+                }
+
+                public async processOrder(orderId: string): Promise<boolean> {
+                    const message = `Order processing for ID: ${'$'}{orderId} with status: ${'$'}{`nested_${'$'}{orderId}`}`;
+                    this.logMessage(message);
+                    return true;
+                }
+
+                private logMessage(msg: string): void {
+                    console.log(msg);
+                }
+
+                public get status(): string {
+                    return "active";
+                }
+            }
+        """.trimIndent()
+
+        val (nodes, edges, topLevelCount) = PolyglotAstExtractor.extractFile(
+            projectId = "ts_proj",
+            relPath = "src/services/OrderProcessor.ts",
+            sourceText = tsCode
+        )
+
+        assertEquals(1, topLevelCount)
+
+        val byName = nodes.associateBy { it.name }
+        val classNode = byName["OrderProcessor"]
+        assertNotNull(classNode)
+        assertEquals("class", classNode.kind)
+
+        val processMethod = byName["processOrder"]
+        assertNotNull(processMethod, "processOrder should be extracted as class method")
+        assertEquals("method", processMethod.kind)
+        assertEquals("src/services/OrderProcessor.ts:OrderProcessor.processOrder", processMethod.qualifiedName)
+
+        val logMethod = byName["logMessage"]
+        assertNotNull(logMethod, "logMessage should be extracted as class method")
+        assertEquals("method", logMethod.kind)
+
+        val statusGetter = byName["status"]
+        assertNotNull(statusGetter, "status getter should be extracted as class method")
+        assertEquals("method", statusGetter.kind)
+
+        val callEdges = edges.filter { it.sourceNodeId == processMethod.nodeId && it.edgeType == "CALLS" }
+        assertTrue(callEdges.any { it.targetNodeId.contains("logMessage") })
+    }
+
+    @Test
+    fun testPythonDunderMethodsPreserved() {
+        val pyCode = """
+            class ResourceContext:
+                def __init__(self, name: str):
+                    self.name = name
+
+                def __enter__(self):
+                    self._setup()
+                    return self
+
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    self._teardown()
+
+                def _setup(self):
+                    pass
+
+                def _teardown(self):
+                    pass
+
+                def execute(self):
+                    return self.name
+        """.trimIndent()
+
+        val (nodes, edges, topLevelCount) = PolyglotAstExtractor.extractFile(
+            projectId = "py_dunder_proj",
+            relPath = "context.py",
+            sourceText = pyCode
+        )
+
+        assertEquals(1, topLevelCount)
+
+        val names = nodes.map { it.name }.toSet()
+        assertTrue(names.contains("ResourceContext"))
+        assertTrue(names.contains("__init__"), "__init__ magic method must be preserved")
+        assertTrue(names.contains("__enter__"), "__enter__ magic method must be preserved")
+        assertTrue(names.contains("__exit__"), "__exit__ magic method must be preserved")
+        assertTrue(names.contains("execute"), "public execute method must be preserved")
+        assertFalse(names.contains("_setup"), "private _setup helper should be filtered out")
+        assertFalse(names.contains("_teardown"), "private _teardown helper should be filtered out")
+
+        val byName = nodes.associateBy { it.name }
+        val enterNode = byName["__enter__"]
+        assertNotNull(enterNode)
+        assertEquals("context.py:ResourceContext.__enter__", enterNode.qualifiedName)
+    }
 }
