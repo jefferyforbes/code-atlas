@@ -18,27 +18,39 @@ class NativeSqliteStatement(
 
     fun bindString(index: Int, value: String) {
         val s = requireStmt()
-        sqlite3_bind_text(s, index, value, -1, SQLITE_TRANSIENT)
+        val rc = sqlite3_bind_text(s, index, value, -1, SQLITE_TRANSIENT)
+        checkBindOk(rc, index)
     }
 
     fun bindInt(index: Int, value: Int) {
         val s = requireStmt()
-        sqlite3_bind_int(s, index, value)
+        val rc = sqlite3_bind_int(s, index, value)
+        checkBindOk(rc, index)
     }
 
     fun bindLong(index: Int, value: Long) {
         val s = requireStmt()
-        sqlite3_bind_int64(s, index, value)
+        val rc = sqlite3_bind_int64(s, index, value)
+        checkBindOk(rc, index)
     }
 
     fun bindDouble(index: Int, value: Double) {
         val s = requireStmt()
-        sqlite3_bind_double(s, index, value)
+        val rc = sqlite3_bind_double(s, index, value)
+        checkBindOk(rc, index)
     }
 
     fun bindNull(index: Int) {
         val s = requireStmt()
-        sqlite3_bind_null(s, index)
+        val rc = sqlite3_bind_null(s, index)
+        checkBindOk(rc, index)
+    }
+
+    private fun checkBindOk(rc: Int, index: Int) {
+        if (rc != SQLITE_OK) {
+            val err = sqlite3_errmsg(db)?.toKString() ?: "Error $rc"
+            throw RuntimeException("SQLite bind failed at index $index ($rc): $err")
+        }
     }
 
     fun step(): Boolean {
@@ -49,7 +61,8 @@ class NativeSqliteStatement(
             SQLITE_DONE -> false
             else -> {
                 val err = sqlite3_errmsg(db)?.toKString() ?: "Error $rc"
-                throw RuntimeException("SQLite step failed ($rc): $err")
+                val sqlText = sqlite3_sql(s)?.toKString() ?: ""
+                throw RuntimeException("SQLite step failed ($rc) on statement [$sqlText]: $err")
             }
         }
     }

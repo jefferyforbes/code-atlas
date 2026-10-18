@@ -14,6 +14,19 @@ object PlatformFiles {
 
     fun delete(path: String): Boolean = unlink(path) == 0
 
+    fun deleteRecursively(path: String): Boolean {
+        if (!exists(path)) return true
+        if (isDirectory(path)) {
+            val entries = listDirectory(path)
+            for (entry in entries) {
+                val full = if (path.endsWith("/")) "$path$entry" else "$path/$entry"
+                deleteRecursively(full)
+            }
+            return rmdir(path) == 0
+        }
+        return unlink(path) == 0
+    }
+
     fun isDirectory(path: String): Boolean = memScoped {
         val sb = alloc<stat>()
         if (stat(path, sb.ptr) == 0) {
@@ -64,9 +77,9 @@ object PlatformFiles {
     fun readBytes(path: String): ByteArray {
         val file = fopen(path, "rb") ?: return ByteArray(0)
         try {
-            fseek(file, 0L, SEEK_END)
+            fseek(file, 0, SEEK_END)
             val len = ftell(file)
-            fseek(file, 0L, SEEK_SET)
+            fseek(file, 0, SEEK_SET)
             if (len <= 0) return ByteArray(0)
             val bytes = ByteArray(len.toInt())
             bytes.usePinned { pinned ->
@@ -86,17 +99,24 @@ object PlatformFiles {
             mkdirs(parent)
         }
         val file = fopen(path, "wb") ?: return false
+        var success = false
         try {
             val bytes = content.encodeToByteArray()
             if (bytes.isNotEmpty()) {
-                bytes.usePinned { pinned ->
+                val written = bytes.usePinned { pinned ->
                     fwrite(pinned.addressOf(0), 1u, bytes.size.toULong(), file)
                 }
+                success = (written == bytes.size.toULong())
+            } else {
+                success = true
             }
-            return true
         } finally {
-            fclose(file)
+            val closeRc = fclose(file)
+            if (closeRc != 0) {
+                success = false
+            }
         }
+        return success
     }
 
     fun writeBytes(path: String, bytes: ByteArray): Boolean {
@@ -105,16 +125,23 @@ object PlatformFiles {
             mkdirs(parent)
         }
         val file = fopen(path, "wb") ?: return false
+        var success = false
         try {
             if (bytes.isNotEmpty()) {
-                bytes.usePinned { pinned ->
+                val written = bytes.usePinned { pinned ->
                     fwrite(pinned.addressOf(0), 1u, bytes.size.toULong(), file)
                 }
+                success = (written == bytes.size.toULong())
+            } else {
+                success = true
             }
-            return true
         } finally {
-            fclose(file)
+            val closeRc = fclose(file)
+            if (closeRc != 0) {
+                success = false
+            }
         }
+        return success
     }
 
     fun listDirectory(dirPath: String): List<String> {
@@ -180,10 +207,20 @@ object PlatformFiles {
     }
 
     fun canonicalPath(path: String): String = memScoped {
-        val resolved = realpath(path, null) ?: return path.replace('\\', '/')
-        val result = resolved.toKString().replace('\\', '/')
-        free(resolved)
-        result
+        val resolved = realpath(path, null)
+        if (resolved != null) {
+            val result = resolved.toKString().replace('\\', '/')
+            free(resolved)
+            return result
+        }
+        val normalized = path.replace('\\', '/')
+        val parent = parentOf(normalized)
+        if (parent.isNotEmpty() && parent != normalized) {
+            val canonParent = canonicalPath(parent)
+            val name = fileName(normalized)
+            return if (canonParent == "/") "/$name" else "$canonParent/$name"
+        }
+        return normalized
     }
 
     fun userHome(): String {

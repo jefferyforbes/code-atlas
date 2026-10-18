@@ -84,8 +84,8 @@ class ArchitectureRemediationEngineTest {
             assertTrue(rx.verified, "Prescription must be verified via AST validation")
             assertFalse(rx.applied, "Dry-run must not apply to disk")
             assertNotNull(rx.diffPreview)
-            assertTrue(rx.diffPreview!!.contains("ProjectSettings.kt"))
-            assertTrue(rx.diffPreview!!.contains("ExtraConfig.kt"))
+            assertTrue(rx.diffPreview.contains("ProjectSettings.kt"))
+            assertTrue(rx.diffPreview.contains("ExtraConfig.kt"))
 
             // Verify disk was untouched
             assertEquals(initialContent, PlatformFiles.readText(filePath))
@@ -561,6 +561,58 @@ class ArchitectureRemediationEngineTest {
             val applyRx = applyReport.prescriptions.first()
             assertTrue(applyRx.verified)
             assertTrue(applyRx.applied, "apply mode must set applied = true")
+        } finally {
+            store.close()
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testExtractHeaderAndImportsIgnoresSqlFromAndBodyImports() {
+        val tmpDir = makeTempDir()
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val filePath = "$tmpDir/MultiDecl.kt"
+            val content = """
+                package com.example.service
+
+                import kotlin.collections.List
+
+                class PrimaryService {
+                    fun query(): String {
+                        return ""${'"'}
+                            SELECT id, name
+                            FROM users
+                            WHERE active = 1
+                        ""${'"'}
+                    }
+                }
+
+                class SecondaryService {
+                    fun run() {
+                        val x = 1
+                    }
+                }
+            """.trimIndent()
+            PlatformFiles.writeText(filePath, content)
+
+            val indexer = WorkspaceIndexer(tmpDir, store)
+            indexer.indexWorkspace("test_proj")
+
+            val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir, store = store)
+            val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
+
+            val report = engine.planAndRemediate(
+                projectId = "test_proj",
+                dryRun = false,
+                splitBoost003 = true,
+                makePrivateBoost003 = false
+            )
+            assertTrue(report.prescriptions.isNotEmpty())
+            val spawnedSecondary = PlatformFiles.readText("$tmpDir/SecondaryService.kt")
+            assertFalse(spawnedSecondary.contains("FROM users"), "Spawned file imports must not capture FROM from inside SQL string")
+            assertTrue(spawnedSecondary.contains("import kotlin.collections.List"))
         } finally {
             store.close()
             cleanDir(tmpDir)

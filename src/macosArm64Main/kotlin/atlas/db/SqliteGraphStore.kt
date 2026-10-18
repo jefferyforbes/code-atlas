@@ -137,12 +137,12 @@ class SqliteGraphStore(val dbPath: String) {
             CREATE INDEX IF NOT EXISTS idx_annotations_node ON node_annotations(project_id, node_id);
 
             CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-                node_id UNINDEXED,
-                project_id UNINDEXED,
+                node_id,
+                project_id,
                 name,
                 qualified_name,
                 signature,
-                file_id
+                file_id UNINDEXED
             );
 
             CREATE TABLE IF NOT EXISTS figma_documents (
@@ -737,9 +737,16 @@ class SqliteGraphStore(val dbPath: String) {
                 }
 
                 if (oldNodes.isNotEmpty()) {
+                    val delFts = scope.prepare("DELETE FROM nodes_fts WHERE rowid IN (SELECT rowid FROM nodes WHERE file_id = ?);")
+                    delFts.bindString(1, fileId)
+                    delFts.step()
+
+                    val delFtsByFile = scope.prepare("DELETE FROM nodes_fts WHERE file_id = ?;")
+                    delFtsByFile.bindString(1, fileId)
+                    delFtsByFile.step()
+
                     val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-                    val delFts = scope.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
-                    val delEdges = scope.prepare("DELETE FROM edges WHERE source_node_id = ?;")
+                    val delEdges = scope.prepare("DELETE FROM edges WHERE project_id = ? AND (source_node_id = ? OR target_node_id = ?);")
                     val delNodes = scope.prepare("DELETE FROM nodes WHERE file_id = ?;")
 
                     for (nodeId in oldNodes) {
@@ -748,14 +755,11 @@ class SqliteGraphStore(val dbPath: String) {
                         delVocab.bindString(1, nodeId)
                         delVocab.step()
 
-                        delFts.reset()
-                        delFts.clearBindings()
-                        delFts.bindString(1, nodeId)
-                        delFts.step()
-
                         delEdges.reset()
                         delEdges.clearBindings()
-                        delEdges.bindString(1, nodeId)
+                        delEdges.bindString(1, projectId)
+                        delEdges.bindString(2, nodeId)
+                        delEdges.bindString(3, nodeId)
                         delEdges.step()
                     }
                     delNodes.bindString(1, fileId)
@@ -865,9 +869,16 @@ class SqliteGraphStore(val dbPath: String) {
                 }
 
                 if (oldNodes.isNotEmpty()) {
+                    val delFts = scope.prepare("DELETE FROM nodes_fts WHERE rowid IN (SELECT rowid FROM nodes WHERE file_id = ?);")
+                    delFts.bindString(1, fileId)
+                    delFts.step()
+
+                    val delFtsByFile = scope.prepare("DELETE FROM nodes_fts WHERE file_id = ?;")
+                    delFtsByFile.bindString(1, fileId)
+                    delFtsByFile.step()
+
                     val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-                    val delFts = scope.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
-                    val delEdges = scope.prepare("DELETE FROM edges WHERE source_node_id = ? OR target_node_id = ?;")
+                    val delEdges = scope.prepare("DELETE FROM edges WHERE project_id = ? AND (source_node_id = ? OR target_node_id = ?);")
                     val delNodes = scope.prepare("DELETE FROM nodes WHERE file_id = ?;")
 
                     for (nodeId in oldNodes) {
@@ -876,15 +887,11 @@ class SqliteGraphStore(val dbPath: String) {
                         delVocab.bindString(1, nodeId)
                         delVocab.step()
 
-                        delFts.reset()
-                        delFts.clearBindings()
-                        delFts.bindString(1, nodeId)
-                        delFts.step()
-
                         delEdges.reset()
                         delEdges.clearBindings()
-                        delEdges.bindString(1, nodeId)
+                        delEdges.bindString(1, projectId)
                         delEdges.bindString(2, nodeId)
+                        delEdges.bindString(3, nodeId)
                         delEdges.step()
                     }
                     delNodes.bindString(1, fileId)
@@ -903,6 +910,8 @@ class SqliteGraphStore(val dbPath: String) {
                 scope.closeAll()
             }
 
+            deleteComposeNodesForFile(projectId, relPath)
+
             if (recomputeDegrees && oldNodes.isNotEmpty()) {
                 recomputeDegrees(projectId)
             }
@@ -918,7 +927,8 @@ class SqliteGraphStore(val dbPath: String) {
         withSavepoint("sp_upsert_nodes_edges") {
             val scope = StatementScope(db)
             try {
-                val delFts = scope.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
+                val delFts = scope.prepare("DELETE FROM nodes_fts WHERE rowid = (SELECT rowid FROM nodes WHERE node_id = ?);")
+                val delFtsByNodeId = scope.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
                 val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
                 val insNode = scope.prepare(
                     """
@@ -951,8 +961,8 @@ class SqliteGraphStore(val dbPath: String) {
                 )
                 val insFts = scope.prepare(
                     """
-                    INSERT INTO nodes_fts (node_id, project_id, name, qualified_name, signature, file_id)
-                    VALUES (?, ?, ?, ?, ?, ?);
+                    INSERT INTO nodes_fts (rowid, node_id, project_id, name, qualified_name, signature, file_id)
+                    VALUES ((SELECT rowid FROM nodes WHERE node_id = ?), ?, ?, ?, ?, ?, ?);
                     """.trimIndent()
                 )
                 val insVocab = scope.prepare(
@@ -992,11 +1002,6 @@ class SqliteGraphStore(val dbPath: String) {
                 )
 
                 for (node in nodes) {
-                    delFts.reset()
-                    delFts.clearBindings()
-                    delFts.bindString(1, node.nodeId)
-                    delFts.step()
-
                     delVocab.reset()
                     delVocab.clearBindings()
                     delVocab.bindString(1, node.nodeId)
@@ -1032,14 +1037,25 @@ class SqliteGraphStore(val dbPath: String) {
                     insNode.bindDouble(22, node.complexityScore)
                     insNode.step()
 
+                    delFtsByNodeId.reset()
+                    delFtsByNodeId.clearBindings()
+                    delFtsByNodeId.bindString(1, node.nodeId)
+                    delFtsByNodeId.step()
+
+                    delFts.reset()
+                    delFts.clearBindings()
+                    delFts.bindString(1, node.nodeId)
+                    delFts.step()
+
                     insFts.reset()
                     insFts.clearBindings()
                     insFts.bindString(1, node.nodeId)
-                    insFts.bindString(2, node.projectId)
-                    insFts.bindString(3, node.name)
-                    insFts.bindString(4, node.qualifiedName)
-                    insFts.bindString(5, node.signature)
-                    insFts.bindString(6, node.fileId)
+                    insFts.bindString(2, node.nodeId)
+                    insFts.bindString(3, node.projectId)
+                    insFts.bindString(4, node.name)
+                    insFts.bindString(5, node.qualifiedName)
+                    insFts.bindString(6, node.signature)
+                    insFts.bindString(7, node.fileId)
                     insFts.step()
 
                     for (seg in NameSegmentTokenizer.tokenize("${node.name} ${node.qualifiedName}")) {
@@ -1092,6 +1108,7 @@ class SqliteGraphStore(val dbPath: String) {
                 if (orphanEpIds.isNotEmpty()) {
                     val delEpNode = scope.prepare("DELETE FROM nodes WHERE node_id = ?;")
                     for (epId in orphanEpIds) {
+                        delFtsByNodeId.reset(); delFtsByNodeId.clearBindings(); delFtsByNodeId.bindString(1, epId); delFtsByNodeId.step()
                         delFts.reset(); delFts.clearBindings(); delFts.bindString(1, epId); delFts.step()
                         delVocab.reset(); delVocab.clearBindings(); delVocab.bindString(1, epId); delVocab.step()
                         delEpNode.reset(); delEpNode.clearBindings(); delEpNode.bindString(1, epId); delEpNode.step()
@@ -3661,27 +3678,25 @@ class SqliteGraphStore(val dbPath: String) {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """.trimIndent()
             )
+            val updStmt = db.prepare(
+                """
+                UPDATE compose_nodes
+                SET start_line = ?, end_line = ?, violation_mask = ?
+                WHERE node_id = ?;
+                """.trimIndent()
+            )
             try {
                 for (n in nodes) {
                     val prevRank = existingProv[n.nodeId] ?: 0
                     val newRank = provenanceRank(n.provenance)
                     if (preserveHigherProvenance && prevRank > newRank) {
-                        val updStmt = db.prepare(
-                            """
-                            UPDATE compose_nodes
-                            SET start_line = ?, end_line = ?, violation_mask = ?
-                            WHERE node_id = ?;
-                            """.trimIndent()
-                        )
-                        try {
-                            updStmt.bindInt(1, n.startLine)
-                            updStmt.bindInt(2, n.endLine)
-                            updStmt.bindInt(3, n.violationMask)
-                            updStmt.bindString(4, n.nodeId)
-                            updStmt.step()
-                        } finally {
-                            updStmt.close()
-                        }
+                        updStmt.reset()
+                        updStmt.clearBindings()
+                        updStmt.bindInt(1, n.startLine)
+                        updStmt.bindInt(2, n.endLine)
+                        updStmt.bindInt(3, n.violationMask)
+                        updStmt.bindString(4, n.nodeId)
+                        updStmt.step()
                         continue
                     }
                     nodeStmt.reset()
@@ -3708,6 +3723,7 @@ class SqliteGraphStore(val dbPath: String) {
                     nodeStmt.step()
                 }
             } finally {
+                updStmt.close()
                 nodeStmt.close()
             }
 
@@ -3744,6 +3760,22 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun deleteComposeNodesForFile(projectSlug: String, filePath: String) {
         db.withSavepoint("sp_compose_del_file") {
+            val delMetrics = db.prepare(
+                """
+                DELETE FROM compose_trace_metrics
+                WHERE node_id IN (
+                    SELECT node_id FROM compose_nodes WHERE project_slug = ? AND file_path = ?
+                );
+                """.trimIndent()
+            )
+            try {
+                delMetrics.bindString(1, projectSlug)
+                delMetrics.bindString(2, filePath)
+                delMetrics.step()
+            } finally {
+                delMetrics.close()
+            }
+
             val delParams = db.prepare(
                 """
                 DELETE FROM compose_params
@@ -4073,21 +4105,57 @@ class SqliteGraphStore(val dbPath: String) {
         return hops
     }
 
-    fun countPropertyMutations(projectSlug: String, targetSymbolOrNodeId: String): Int {
+    fun countPropertyMutations(
+        projectSlug: String,
+        targetSymbolOrNodeId: String,
+        ownerClassName: String? = null
+    ): Int {
         val cleanSym = targetSymbolOrNodeId.removePrefix("sym:")
-        val stmt = db.prepare(
-            """
-            SELECT COUNT(*) FROM edges
-            WHERE project_id = ?
-              AND (target_node_id = ? OR target_node_id = ? OR target_node_id LIKE ?)
-              AND edge_type = 'MUTATES_PROPERTY';
-            """.trimIndent()
-        )
+        val escSym = cleanSym.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val stmt = if (ownerClassName != null && ownerClassName.isNotEmpty()) {
+            val cleanClass = ownerClassName.substringAfterLast('.').removePrefix("sym:")
+            val escClass = cleanClass.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            val s = db.prepare(
+                """
+                SELECT COUNT(*) FROM edges
+                WHERE project_id = ?
+                  AND edge_type = 'MUTATES_PROPERTY'
+                  AND (
+                    target_node_id = ?
+                    OR target_node_id = ?
+                    OR target_node_id = ?
+                    OR target_node_id LIKE ? ESCAPE '\'
+                    OR target_node_id LIKE ? ESCAPE '\'
+                  );
+                """.trimIndent()
+            )
+            s.bindString(1, projectSlug)
+            s.bindString(2, "sym:$cleanClass.$cleanSym")
+            s.bindString(3, "$cleanClass.$cleanSym")
+            s.bindString(4, targetSymbolOrNodeId)
+            s.bindString(5, "%#$escClass.$escSym")
+            s.bindString(6, "%#$escSym")
+            s
+        } else {
+            val s = db.prepare(
+                """
+                SELECT COUNT(*) FROM edges
+                WHERE project_id = ?
+                  AND edge_type = 'MUTATES_PROPERTY'
+                  AND (
+                    target_node_id = ?
+                    OR target_node_id = ?
+                    OR target_node_id LIKE ? ESCAPE '\'
+                  );
+                """.trimIndent()
+            )
+            s.bindString(1, projectSlug)
+            s.bindString(2, targetSymbolOrNodeId)
+            s.bindString(3, "sym:$cleanSym")
+            s.bindString(4, "%#$escSym")
+            s
+        }
         try {
-            stmt.bindString(1, projectSlug)
-            stmt.bindString(2, targetSymbolOrNodeId)
-            stmt.bindString(3, "sym:$cleanSym")
-            stmt.bindString(4, "%#$cleanSym")
             if (stmt.step()) {
                 return stmt.columnInt(0)
             }

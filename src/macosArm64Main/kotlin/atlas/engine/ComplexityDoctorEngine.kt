@@ -268,6 +268,7 @@ class ComplexityDoctorEngine(
             elseEndIdx
         } else {
             var candidateRetIdx = -1
+            var hasTrailingStatements = false
             for (i in (closeIfIdx + 1)..endIdx) {
                 val trimmed = lines[i].trim()
                 if (trimmed.isEmpty() || trimmed.startsWith("//")) continue
@@ -279,10 +280,11 @@ class ComplexityDoctorEngine(
                 } else if (trimmed == "}") {
                     break
                 } else {
-                    candidateRetIdx = -1
+                    hasTrailingStatements = true
                     break
                 }
             }
+            if (hasTrailingStatements) return null
             if (candidateRetIdx > 0) candidateRetIdx else closeIfIdx
         }
 
@@ -518,7 +520,10 @@ class ComplexityDoctorEngine(
         val topOrs = findTopLevelOperatorPositions(trimmed, "||")
         if (topOrs.isNotEmpty()) {
             val parts = splitAtIndices(trimmed, topOrs, 2)
-            return parts.joinToString(" && ") { invertCondition(it) }
+            return parts.joinToString(" && ") { part ->
+                val inv = invertCondition(part)
+                if (findTopLevelOperatorPositions(inv, "||").isNotEmpty()) "($inv)" else inv
+            }
         }
 
         val topAnds = findTopLevelOperatorPositions(trimmed, "&&")
@@ -527,24 +532,57 @@ class ComplexityDoctorEngine(
             return parts.joinToString(" || ") { invertCondition(it) }
         }
 
-        if (trimmed.contains(" == null")) {
-            return trimmed.replace(" == null", " != null")
+        val eq3Pos = findTopLevelOperatorPositions(trimmed, " === ")
+        if (eq3Pos.size == 1) {
+            val left = trimmed.substring(0, eq3Pos[0]).trim()
+            val right = trimmed.substring(eq3Pos[0] + 5).trim()
+            return "$left !== $right"
         }
-        if (trimmed.contains(" != null")) {
-            return trimmed.replace(" != null", " == null")
+        val neq3Pos = findTopLevelOperatorPositions(trimmed, " !== ")
+        if (neq3Pos.size == 1) {
+            val left = trimmed.substring(0, neq3Pos[0]).trim()
+            val right = trimmed.substring(neq3Pos[0] + 5).trim()
+            return "$left === $right"
         }
-        if (trimmed.contains(" === ")) {
-            return trimmed.replace(" === ", " !== ")
+
+        val eqPos = findTopLevelOperatorPositions(trimmed, " == ")
+        if (eqPos.size == 1) {
+            val left = trimmed.substring(0, eqPos[0]).trim()
+            val right = trimmed.substring(eqPos[0] + 4).trim()
+            return "$left != $right"
         }
-        if (trimmed.contains(" !== ")) {
-            return trimmed.replace(" !== ", " === ")
+        val neqPos = findTopLevelOperatorPositions(trimmed, " != ")
+        if (neqPos.size == 1) {
+            val left = trimmed.substring(0, neqPos[0]).trim()
+            val right = trimmed.substring(neqPos[0] + 4).trim()
+            return "$left == $right"
         }
-        if (trimmed.contains(" == ")) {
-            return trimmed.replace(" == ", " != ")
+
+        val ltePos = findTopLevelOperatorPositions(trimmed, " <= ")
+        if (ltePos.size == 1) {
+            val left = trimmed.substring(0, ltePos[0]).trim()
+            val right = trimmed.substring(ltePos[0] + 4).trim()
+            return "$left > $right"
         }
-        if (trimmed.contains(" != ")) {
-            return trimmed.replace(" != ", " == ")
+        val gtePos = findTopLevelOperatorPositions(trimmed, " >= ")
+        if (gtePos.size == 1) {
+            val left = trimmed.substring(0, gtePos[0]).trim()
+            val right = trimmed.substring(gtePos[0] + 4).trim()
+            return "$left < $right"
         }
+        val ltPos = findTopLevelOperatorPositions(trimmed, " < ")
+        if (ltPos.size == 1) {
+            val left = trimmed.substring(0, ltPos[0]).trim()
+            val right = trimmed.substring(ltPos[0] + 3).trim()
+            return "$left >= $right"
+        }
+        val gtPos = findTopLevelOperatorPositions(trimmed, " > ")
+        if (gtPos.size == 1) {
+            val left = trimmed.substring(0, gtPos[0]).trim()
+            val right = trimmed.substring(gtPos[0] + 3).trim()
+            return "$left <= $right"
+        }
+
         if (trimmed.all { it.isLetterOrDigit() || it == '_' || it == '.' }) {
             return "!$trimmed"
         }

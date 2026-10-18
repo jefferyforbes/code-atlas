@@ -293,10 +293,8 @@ class ComposeStabilityExtractor {
                 violationMask = violationMask or BIT_STAB_001
             }
 
-            // Bit 1: COMPOSE-STAB-002 (Broken @Immutable/@Stable contract on parameter type or file class)
-            if (parsedParams.any { it.stabilityReason.startsWith("BROKEN_STABILITY_CONTRACT") } ||
-                localClassStability.values.any { it.second.startsWith("BROKEN_STABILITY_CONTRACT") }
-            ) {
+            // Bit 1: COMPOSE-STAB-002 (Broken @Immutable/@Stable contract on parameter type)
+            if (parsedParams.any { it.stabilityReason.startsWith("BROKEN_STABILITY_CONTRACT") }) {
                 violationMask = violationMask or BIT_STAB_002
             }
 
@@ -842,10 +840,27 @@ class ComposeStabilityExtractor {
         for (wn in workspaceNodes) {
             if (wn.kind in setOf("class", "interface") && wn.name !in result) {
                 val sig = wn.signature
+                val rawColMatch = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map)<""").find(sig)
+                val hasStable = sig.contains("@Immutable") || sig.contains("@Stable")
                 if (sig.contains("var ")) {
                     val prop = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""").find(sig)?.groupValues?.get(1) ?: "prop"
-                    result[wn.name] = "UNSTABLE" to "MUTABLE_VAR_PROPERTY:$prop"
-                } else if (sig.contains("@Immutable") || sig.contains("@Stable")) {
+                    if (hasStable) {
+                        result[wn.name] = "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:${wn.name}.$prop"
+                    } else {
+                        result[wn.name] = "UNSTABLE" to "MUTABLE_VAR_PROPERTY:$prop"
+                    }
+                } else if (rawColMatch != null) {
+                    val propName = rawColMatch.groupValues[1]
+                    val colType = rawColMatch.groupValues[2]
+                    val matchedByConf = stabilityPatterns.any { it.matches("kotlin.collections.$colType") }
+                    if (matchedByConf) {
+                        result[wn.name] = "STABLE" to "STABILITY_CONFIG_MATCH:kotlin.collections.$colType"
+                    } else if (hasStable) {
+                        result[wn.name] = "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:${wn.name}.$propName"
+                    } else {
+                        result[wn.name] = "UNSTABLE" to "UNSTABLE_COLLECTION_PROPERTY:$propName($colType)"
+                    }
+                } else if (hasStable) {
                     result[wn.name] = "STABLE" to "EXPLICIT_STABLE_ANNOTATION"
                 } else if (sig.contains("data class") && sig.contains('(') && sig.contains(')')) {
                     result[wn.name] = "STABLE" to "WORKSPACE_DATA_CLASS"

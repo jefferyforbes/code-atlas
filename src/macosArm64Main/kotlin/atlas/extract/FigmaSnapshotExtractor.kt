@@ -784,7 +784,7 @@ class FigmaSnapshotExtractor {
                     edges[edgeId] = FigmaEdge(edgeId, fileKey, t.name, target, "VARIABLE_ALIAS_OF", "alias")
                 }
             } else if (t.value is JsonObject) {
-                for ((_, modeVal) in (t.value as JsonObject)) {
+                for ((_, modeVal) in t.value) {
                     val str = (modeVal as? JsonPrimitive)?.content
                     if (str != null && str.startsWith("{") && str.endsWith("}")) {
                         isAlias = true
@@ -803,7 +803,8 @@ class FigmaSnapshotExtractor {
             val modesJson = if (t.value is JsonObject) {
                 t.value.toString()
             } else {
-                "{\"default\":\"${(t.value as? JsonPrimitive)?.content ?: ""}\"}"
+                val contentStr = (t.value as? JsonPrimitive)?.content ?: ""
+                JsonObject(mapOf("default" to JsonPrimitive(contentStr))).toString()
             }
 
             val codeWeb = t.codeSyntaxWeb ?: "var(--${t.name.replace('/', '-').replace('.', '-')})"

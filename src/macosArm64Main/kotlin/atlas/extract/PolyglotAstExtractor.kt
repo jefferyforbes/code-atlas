@@ -17,7 +17,7 @@ class PolyglotAstExtractor {
         )
 
         private val KT_PKG_RE = Regex("""^\s*package\s+([a-zA-Z0-9_.]+)""", RegexOption.MULTILINE)
-        private val KT_IMP_RE = Regex("""^\s*import\s+([a-zA-Z0-9_.]+)""", RegexOption.MULTILINE)
+        private val KT_IMP_RE = Regex("""^\s*import\s+([a-zA-Z0-9_.*]+)""", RegexOption.MULTILINE)
         private val KT_DECL_RE = Regex(
             """^(?<indent>[ \t]*)(?<annotations>(?:@[A-Za-z0-9_]+(?:\((?:[^()]|\([^()]*\))*\))?\s*)*)""" +
             """(?<modifiers>(?:(?:public|internal|private|protected|open|abstract|sealed|data|value|inline|suspend|expect|actual|override|companion|fun|final|inner|enum|annotation|operator|infix|tailrec|external)\s+)*)""" +
@@ -38,11 +38,13 @@ class PolyglotAstExtractor {
             RegexOption.MULTILINE
         )
 
-        private val RS_USE_RE = Regex("""^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([a-zA-Z0-9_:]+)""", RegexOption.MULTILINE)
+        private val RS_USE_RE = Regex("""^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([a-zA-Z0-9_:*]+)""", RegexOption.MULTILINE)
         private val RS_DECL_RE = Regex(
             """^(?<indent>[ \t]*)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?<kw>struct|enum|trait|fn|type|mod)\s+(?<name>[A-Za-z0-9_]+)""",
             RegexOption.MULTILINE
         )
+
+        data class ScopeEntry(val name: String, val startLine: Int, val endLine: Int, val kind: String = "")
 
         private val CPP_INC_RE = Regex("""^\s*#include\s+[<"]([^>"]+)[>"]""", RegexOption.MULTILINE)
         private val CPP_DECL_RE = Regex(
@@ -457,17 +459,17 @@ class PolyglotAstExtractor {
             val moduleId = ModuleBoundaryDetector.resolveModuleId(relPath, knownModules)
             val sourceSet = SemioticLayerClassifier.detectSourceSet(relPath)
 
+            val maskedText = maskCommentsAndStrings(sourceText, lang)
             val (baseNodes, baseEdges, topLevelCount) = when (lang) {
-                "kotlin" -> extractKotlin(projectId, relPath, sourceText, moduleId, sourceSet)
-                "swift" -> extractSwift(projectId, relPath, sourceText, moduleId, sourceSet)
-                "python" -> extractPython(projectId, relPath, sourceText, moduleId, sourceSet)
-                "typescript", "javascript" -> extractTypeScript(projectId, relPath, sourceText, moduleId, sourceSet)
-                "rust" -> extractRust(projectId, relPath, sourceText, moduleId, sourceSet)
-                "cpp" -> extractCpp(projectId, relPath, sourceText, moduleId, sourceSet)
+                "kotlin" -> extractKotlin(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "swift" -> extractSwift(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "python" -> extractPython(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "typescript", "javascript" -> extractTypeScript(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "rust" -> extractRust(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "cpp" -> extractCpp(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
                 else -> return Triple(emptyList(), emptyList(), 0)
             }
 
-            val maskedText = maskCommentsAndStrings(sourceText, lang)
             val extractedUrls = UrlTargetResolver.extractCodeRoutesAndUrls(sourceText, maskedText, lang)
             if (extractedUrls.isEmpty()) {
                 return Triple(baseNodes, baseEdges, topLevelCount)
@@ -492,22 +494,20 @@ class PolyglotAstExtractor {
                         .minByOrNull { it.startLine - item.lineNumber }
                 } else null
 
-                val sourceNode = annotatedChild ?: directEnclosing ?: run {
-                    if (fileScopeNode == null) {
-                        val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relPath)
-                        val totalLines = sourceText.lines().size.coerceAtLeast(1)
-                        val created = GraphNode(
-                            nodeId = "$fileId#file", projectId = projectId, fileId = fileId,
-                            name = relPath.substringAfterLast('/'), qualifiedName = relPath,
-                            kind = "file_scope", signature = relPath, startLine = 1, endLine = totalLines,
-                            moduleId = moduleId, sourceSet = sourceSet, semioticLayer = semLayer,
-                            archLayer = archLayer, isTestDouble = false, isTopLevel = false
-                        )
-                        fileScopeNode = created
-                        finalNodes.add(created)
-                    }
-                    fileScopeNode!!
-                }
+                val sourceNode: GraphNode = annotatedChild ?: directEnclosing ?: (fileScopeNode ?: run {
+                    val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relPath)
+                    val totalLines = sourceText.lines().size.coerceAtLeast(1)
+                    val created = GraphNode(
+                        nodeId = "$fileId#file", projectId = projectId, fileId = fileId,
+                        name = relPath.substringAfterLast('/'), qualifiedName = relPath,
+                        kind = "file_scope", signature = relPath, startLine = 1, endLine = totalLines,
+                        moduleId = moduleId, sourceSet = sourceSet, semioticLayer = semLayer,
+                        archLayer = archLayer, isTestDouble = false, isTopLevel = false
+                    )
+                    fileScopeNode = created
+                    finalNodes.add(created)
+                    created
+                })
 
                 val targetId = if (item.isHttpEndpointRoute) {
                     "$projectId:endpoint#${item.canonicalRouteOrUrl}"
@@ -686,11 +686,15 @@ class PolyglotAstExtractor {
             return tokens.any { it in kws }
         }
 
-        private fun findBlockEndLine(lines: List<String>, startLine: Int): Int {
+        private fun findBlockEndLine(
+            lines: List<String>,
+            startLine: Int,
+            precomputedCleanLines: List<String>? = null
+        ): Int {
             if (startLine > lines.size) return lines.size
 
             val startIdx = startLine - 1
-            val cleanLines = cleanLinesFrom(lines, startIdx)
+            val cleanLines = precomputedCleanLines ?: cleanLinesFrom(lines, 0)
 
             var depth = 0
             var started = false
@@ -699,9 +703,8 @@ class PolyglotAstExtractor {
             var parenDepth = 0
             var bracketDepth = 0
 
-            for (relativeIdx in cleanLines.indices) {
-                val idx = startIdx + relativeIdx
-                val clean = cleanLines[relativeIdx]
+            for (idx in startIdx until cleanLines.size) {
+                val clean = cleanLines[idx]
 
                 if (!seenKeyword) {
                     if (hasDeclarationKeyword(clean)) {
@@ -765,16 +768,16 @@ class PolyglotAstExtractor {
                         trimmed.endsWith("&") ||
                         trimmed.endsWith("|")
 
-                    var lookAheadRelative = relativeIdx + 1
-                    while (lookAheadRelative < cleanLines.size && cleanLines[lookAheadRelative].trim().isEmpty()) {
-                        lookAheadRelative++
+                    var lookAhead = idx + 1
+                    while (lookAhead < cleanLines.size && cleanLines[lookAhead].trim().isEmpty()) {
+                        lookAhead++
                     }
 
-                    if (lookAheadRelative >= cleanLines.size) {
+                    if (lookAhead >= cleanLines.size) {
                         return idx + 1
                     }
 
-                    val nextClean = cleanLines[lookAheadRelative]
+                    val nextClean = cleanLines[lookAhead]
                     val nextTrimmed = nextClean.trim()
                     val nextIsContinuation = nextTrimmed.startsWith(".") ||
                         nextTrimmed.startsWith("?.") ||
@@ -823,16 +826,16 @@ class PolyglotAstExtractor {
                         trimmed.endsWith("&") ||
                         trimmed.endsWith("|")
 
-                    var lookAheadRelative = relativeIdx + 1
-                    while (lookAheadRelative < cleanLines.size && cleanLines[lookAheadRelative].trim().isEmpty()) {
-                        lookAheadRelative++
+                    var lookAhead = idx + 1
+                    while (lookAhead < cleanLines.size && cleanLines[lookAhead].trim().isEmpty()) {
+                        lookAhead++
                     }
 
-                    if (lookAheadRelative >= cleanLines.size) {
+                    if (lookAhead >= cleanLines.size) {
                         return idx + 1
                     }
 
-                    val nextClean = cleanLines[lookAheadRelative]
+                    val nextClean = cleanLines[lookAhead]
                     val nextTrimmed = nextClean.trim()
 
                     val nextIsContinuation = nextTrimmed.startsWith(".") ||
@@ -858,7 +861,7 @@ class PolyglotAstExtractor {
                                 return idx + 1
                             }
                             val baseIndent = lines[startLine - 1].takeWhile { it == ' ' || it == '\t' }.length
-                            val nextRaw = lines[startIdx + lookAheadRelative]
+                            val nextRaw = lines[lookAhead]
                             val nextIndent = nextRaw.takeWhile { it == ' ' || it == '\t' }.length
                             if (nextIndent <= baseIndent) {
                                 return idx + 1
@@ -1410,14 +1413,16 @@ class PolyglotAstExtractor {
         }
 
         private fun extractKotlin(
-            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String
+            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
+            precomputedMaskedText: String? = null
         ): Triple<List<GraphNode>, List<GraphEdge>, Int> {
             val fileId = "$projectId:$relPath"
             val nodes = mutableListOf<GraphNode>()
             val edges = mutableListOf<GraphEdge>()
             val lines = sourceText.lines()
-            val maskedText = maskCommentsAndStrings(sourceText, "kotlin")
+            val maskedText = precomputedMaskedText ?: maskCommentsAndStrings(sourceText, "kotlin")
             val maskedLines = maskedText.lines()
+            val cleanLines = cleanLinesFrom(lines, 0)
 
             val pkgMatch = KT_PKG_RE.find(maskedText)
             val pkgName = pkgMatch?.groupValues?.get(1) ?: relPath.replace('/', '.')
@@ -1425,7 +1430,6 @@ class PolyglotAstExtractor {
                 Pair(match.groupValues[1], maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
             }.toList()
 
-            data class ScopeEntry(val name: String, val startLine: Int, val endLine: Int)
             val scopeStack = mutableListOf<ScopeEntry>()
 
             var topLevelCount = 0
@@ -1443,7 +1447,6 @@ class PolyglotAstExtractor {
                     kw == "object" && "companion" in modTokens -> "Companion"
                     else -> continue
                 }
-                if (name == "Companion") continue
 
                 val matchStartLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
                 val declStartOffset = if (modifiers.isNotEmpty() && modifiersGroup != null) {
@@ -1452,7 +1455,7 @@ class PolyglotAstExtractor {
                     kwGroup.range.first
                 }
                 val startLine = maskedText.substring(0, declStartOffset).count { it == '\n' } + 1
-                val endLine = findBlockEndLine(lines, startLine)
+                val endLine = findBlockEndLine(lines, startLine, cleanLines)
 
                 while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
                     scopeStack.removeAt(scopeStack.size - 1)
@@ -1468,9 +1471,8 @@ class PolyglotAstExtractor {
                     Pair("$fileId#$name", "$pkgName.$name")
                 }
 
-                val sigLine = if (startLine <= lines.size) stripLeadingInlineAnnotations(lines[startLine - 1]) else name
-
                 val annTokens = Regex("""@([A-Za-z0-9_]+)""").findAll(annotations).map { it.groupValues[1] }.toList()
+                val sigLine = if (startLine <= lines.size) stripLeadingInlineAnnotations(lines[startLine - 1]) else name
                 val kind = when {
                     "expect" in modTokens -> "expect_decl"
                     "actual" in modTokens -> "actual_decl"
@@ -1532,7 +1534,7 @@ class PolyglotAstExtractor {
                     }
                 }
 
-                if (kw in setOf("class", "interface", "object", "enum")) {
+                if (kw in setOf("class", "interface", "object", "enum", "fun")) {
                     scopeStack.add(ScopeEntry(name, startLine, endLine))
                 }
             }
@@ -1573,14 +1575,17 @@ class PolyglotAstExtractor {
         }
 
         private fun extractSwift(
-            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String
+            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
+            precomputedMaskedText: String? = null
         ): Triple<List<GraphNode>, List<GraphEdge>, Int> {
             val fileId = "$projectId:$relPath"
             val nodes = mutableListOf<GraphNode>()
             val edges = mutableListOf<GraphEdge>()
             val lines = sourceText.lines()
-            val maskedText = maskCommentsAndStrings(sourceText, "swift")
+            val maskedText = precomputedMaskedText ?: maskCommentsAndStrings(sourceText, "swift")
             val maskedLines = maskedText.lines()
+            val cleanLines = cleanLinesFrom(lines, 0)
+            val scopeStack = mutableListOf<ScopeEntry>()
 
             val imports = SWIFT_IMP_RE.findAll(maskedText).map { match ->
                 Pair(match.groupValues[1], maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
@@ -1592,13 +1597,23 @@ class PolyglotAstExtractor {
                 val kw = match.groups["kw"]?.value ?: "class"
                 val name = match.groups["name"]?.value ?: continue
 
-                val isTopLevel = indent.isEmpty()
-                if (isTopLevel && kw != "extension") topLevelCount++
                 val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                val endLine = findBlockEndLine(lines, startLine)
+                val endLine = findBlockEndLine(lines, startLine, cleanLines)
+
+                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
+                    scopeStack.removeAt(scopeStack.size - 1)
+                }
+                val enclosingPrefix = scopeStack.joinToString(".") { it.name }
+                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
+                    Pair("$fileId#$enclosingPrefix.$name", "$relPath:$enclosingPrefix.$name")
+                } else {
+                    Pair("$fileId#$name", "$relPath:$name")
+                }
+
+                val isTopLevel = indent.isEmpty() && scopeStack.isEmpty()
+                if (isTopLevel && kw != "extension") topLevelCount++
                 val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-                val nodeId = "$fileId#$name"
 
                 val description = if (isTopLevel) extractDocDescription(lines, startLine, "swift") else null
 
@@ -1616,7 +1631,7 @@ class PolyglotAstExtractor {
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = "$relPath:$name", kind = kind,
+                        qualifiedName = qualifiedName, kind = kind,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
@@ -1634,6 +1649,10 @@ class PolyglotAstExtractor {
                             lineNumber = impLine
                         ))
                     }
+                }
+
+                if (kw in setOf("class", "struct", "protocol", "actor", "enum", "func", "extension")) {
+                    scopeStack.add(ScopeEntry(name, startLine, endLine))
                 }
             }
 
@@ -1663,14 +1682,17 @@ class PolyglotAstExtractor {
         private val TS_ARROW_OR_FN_RE = Regex("""=\s*(?:async\s*)?(?:function\b|(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]+)?=>)""")
 
         private fun extractTypeScript(
-            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String
+            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
+            precomputedMaskedText: String? = null
         ): Triple<List<GraphNode>, List<GraphEdge>, Int> {
             val fileId = "$projectId:$relPath"
             val nodes = mutableListOf<GraphNode>()
             val edges = mutableListOf<GraphEdge>()
             val lines = sourceText.lines()
-            val maskedText = maskCommentsAndStrings(sourceText, "typescript")
+            val maskedText = precomputedMaskedText ?: maskCommentsAndStrings(sourceText, "typescript")
             val maskedLines = maskedText.lines()
+            val cleanLines = cleanLinesFrom(lines, 0)
+            val scopeStack = mutableListOf<ScopeEntry>()
 
             val imports = mutableListOf<Pair<String, Int>>()
             for (m in TS_IMP_RE.findAll(maskedText)) {
@@ -1691,7 +1713,18 @@ class PolyglotAstExtractor {
                 val name = match.groups["name"]?.value ?: continue
 
                 val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                val endLine = findBlockEndLine(lines, startLine)
+                val endLine = findBlockEndLine(lines, startLine, cleanLines)
+
+                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
+                    scopeStack.removeAt(scopeStack.size - 1)
+                }
+                val enclosingPrefix = scopeStack.joinToString(".") { it.name }
+                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
+                    Pair("$fileId#$enclosingPrefix.$name", "$relPath:$enclosingPrefix.$name")
+                } else {
+                    Pair("$fileId#$name", "$relPath:$name")
+                }
+
                 val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
                 val declHeaderSlice = maskedLines.subList(startLine - 1, minOf(maskedLines.size, minOf(endLine, startLine + 2))).joinToString(" ")
                 val kind = when {
@@ -1703,11 +1736,10 @@ class PolyglotAstExtractor {
                     else -> "class"
                 }
 
-                val isTopLevel = indent.isEmpty()
+                val isTopLevel = indent.isEmpty() && scopeStack.isEmpty()
                 if (!isTopLevel && kind == "variable") continue
                 if (isTopLevel && kind !in setOf("typealias", "variable")) topLevelCount++
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-                val nodeId = "$fileId#$name"
 
                 val description = if (isTopLevel && kind in setOf("class", "interface", "function", "enum")) {
                     extractDocDescription(lines, startLine, "typescript")
@@ -1726,7 +1758,7 @@ class PolyglotAstExtractor {
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = "$relPath:$name", kind = kind,
+                        qualifiedName = qualifiedName, kind = kind,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
@@ -1744,6 +1776,10 @@ class PolyglotAstExtractor {
                             lineNumber = impLine
                         ))
                     }
+                }
+
+                if (kind in setOf("class", "interface", "function", "enum")) {
+                    scopeStack.add(ScopeEntry(name, startLine, endLine))
                 }
             }
 
@@ -1771,14 +1807,17 @@ class PolyglotAstExtractor {
         }
 
         private fun extractRust(
-            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String
+            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
+            precomputedMaskedText: String? = null
         ): Triple<List<GraphNode>, List<GraphEdge>, Int> {
             val fileId = "$projectId:$relPath"
             val nodes = mutableListOf<GraphNode>()
             val edges = mutableListOf<GraphEdge>()
             val lines = sourceText.lines()
-            val maskedText = maskCommentsAndStrings(sourceText, "rust")
+            val maskedText = precomputedMaskedText ?: maskCommentsAndStrings(sourceText, "rust")
             val maskedLines = maskedText.lines()
+            val cleanLines = cleanLinesFrom(lines, 0)
+            val scopeStack = mutableListOf<ScopeEntry>()
 
             val imports = RS_USE_RE.findAll(maskedText).map { match ->
                 val sym = match.groupValues[1].substringAfterLast("::")
@@ -1800,13 +1839,23 @@ class PolyglotAstExtractor {
                     else -> "class"
                 }
 
-                val isTopLevel = indent.isEmpty()
-                if (isTopLevel && kind !in setOf("typealias", "module")) topLevelCount++
                 val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                val endLine = findBlockEndLine(lines, startLine)
+                val endLine = findBlockEndLine(lines, startLine, cleanLines)
+
+                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
+                    scopeStack.removeAt(scopeStack.size - 1)
+                }
+                val enclosingPrefix = scopeStack.joinToString("::") { it.name }
+                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
+                    Pair("$fileId#$enclosingPrefix::$name", "$relPath:$enclosingPrefix::$name")
+                } else {
+                    Pair("$fileId#$name", "$relPath:$name")
+                }
+
+                val isTopLevel = indent.isEmpty() && scopeStack.isEmpty()
+                if (isTopLevel && kind !in setOf("typealias", "module")) topLevelCount++
                 val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-                val nodeId = "$fileId#$name"
 
                 val description = if (isTopLevel && kind in setOf("class", "interface", "enum", "function")) {
                     extractDocDescription(lines, startLine, "rust")
@@ -1825,7 +1874,7 @@ class PolyglotAstExtractor {
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = "$relPath:$name", kind = kind,
+                        qualifiedName = qualifiedName, kind = kind,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
@@ -1843,6 +1892,10 @@ class PolyglotAstExtractor {
                             lineNumber = impLine
                         ))
                     }
+                }
+
+                if (kw in setOf("struct", "enum", "trait", "fn", "mod")) {
+                    scopeStack.add(ScopeEntry(name, startLine, endLine))
                 }
             }
 
@@ -1870,14 +1923,17 @@ class PolyglotAstExtractor {
         }
 
         private fun extractCpp(
-            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String
+            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
+            precomputedMaskedText: String? = null
         ): Triple<List<GraphNode>, List<GraphEdge>, Int> {
             val fileId = "$projectId:$relPath"
             val nodes = mutableListOf<GraphNode>()
             val edges = mutableListOf<GraphEdge>()
             val lines = sourceText.lines()
-            val maskedText = maskCommentsAndStrings(sourceText, "cpp")
+            val maskedText = precomputedMaskedText ?: maskCommentsAndStrings(sourceText, "cpp")
             val maskedLines = maskedText.lines()
+            val cleanLines = cleanLinesFrom(lines, 0)
+            val scopeStack = mutableListOf<ScopeEntry>()
 
             val imports = CPP_INC_RE.findAll(sourceText).mapNotNull { match ->
                 val lineIdx = sourceText.substring(0, match.range.first).count { it == '\n' }
@@ -1904,13 +1960,24 @@ class PolyglotAstExtractor {
                     else -> "class"
                 }
 
-                val isTopLevel = indent.isEmpty()
-                if (isTopLevel && kind != "namespace") topLevelCount++
                 val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                val endLine = findBlockEndLine(lines, startLine)
+                val endLine = findBlockEndLine(lines, startLine, cleanLines)
+
+                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
+                    scopeStack.removeAt(scopeStack.size - 1)
+                }
+                val enclosingPrefix = scopeStack.joinToString("::") { it.name }
+                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
+                    Pair("$fileId#$enclosingPrefix::$name", "$relPath:$enclosingPrefix::$name")
+                } else {
+                    Pair("$fileId#$name", "$relPath:$name")
+                }
+
+                val isInsideClassOrStruct = scopeStack.any { it.kind in setOf("class", "struct") }
+                val isTopLevel = indent.isEmpty() && !isInsideClassOrStruct
+                if (isTopLevel && kind != "namespace") topLevelCount++
                 val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-                val nodeId = "$fileId#$name"
                 if (!seenNodeIds.add(nodeId)) continue
 
                 val description = if (isTopLevel && kind in setOf("class", "struct", "enum")) {
@@ -1920,7 +1987,7 @@ class PolyglotAstExtractor {
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = "$relPath:$name", kind = kind,
+                        qualifiedName = qualifiedName, kind = kind,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
@@ -1937,6 +2004,10 @@ class PolyglotAstExtractor {
                         ))
                     }
                 }
+
+                if (kind in setOf("class", "struct", "namespace")) {
+                    scopeStack.add(ScopeEntry(name, startLine, endLine, kind))
+                }
             }
 
             for (match in CPP_FUNC_RE.findAll(maskedText)) {
@@ -1947,14 +2018,16 @@ class PolyglotAstExtractor {
 
                 val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
                 // Skip constructor if a class/struct with the same name already exists at or enclosing this line
-                if (nodes.any { it.name == shortName && it.kind in setOf("class", "struct") }) continue
+                if (nodes.any { it.name == shortName && it.kind in setOf("class", "struct") && startLine in it.startLine..it.endLine }) continue
 
-                val isTopLevel = indent.isEmpty()
+                val endLine = findBlockEndLine(lines, startLine, cleanLines)
+                val enclosingClass = nodes.firstOrNull { it.kind in setOf("class", "struct") && startLine > it.startLine && startLine < it.endLine }
+                val qualifiedCppName = if (rawName.contains("::")) rawName else if (enclosingClass != null) "${enclosingClass.name}::$rawName" else rawName
+                val isTopLevel = indent.isEmpty() && enclosingClass == null && !rawName.contains("::")
                 if (isTopLevel) topLevelCount++
-                val endLine = findBlockEndLine(lines, startLine)
                 val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else shortName
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, shortName)
-                val nodeId = "$fileId#$shortName"
+                val nodeId = "$fileId#$qualifiedCppName"
                 if (!seenNodeIds.add(nodeId)) continue
 
                 val description = if (isTopLevel) {
@@ -1974,7 +2047,7 @@ class PolyglotAstExtractor {
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = shortName,
-                        qualifiedName = "$relPath:$rawName", kind = "function",
+                        qualifiedName = "$relPath:$qualifiedCppName", kind = "function",
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
@@ -2041,14 +2114,16 @@ class PolyglotAstExtractor {
         }
 
         private fun extractPython(
-            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String
+            projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
+            precomputedMaskedText: String? = null
         ): Triple<List<GraphNode>, List<GraphEdge>, Int> {
             val fileId = "$projectId:$relPath"
             val nodes = mutableListOf<GraphNode>()
             val edges = mutableListOf<GraphEdge>()
             val lines = sourceText.lines()
-            val maskedText = maskCommentsAndStrings(sourceText, "python")
+            val maskedText = precomputedMaskedText ?: maskCommentsAndStrings(sourceText, "python")
             val maskedLines = maskedText.lines()
+            val scopeStack = mutableListOf<ScopeEntry>()
 
             val imports = PY_IMP_RE.findAll(maskedText).map { match ->
                 val mod = match.groupValues[1].ifEmpty { match.groupValues[2] }
@@ -2062,14 +2137,25 @@ class PolyglotAstExtractor {
                 val name = match.groups["name"]?.value ?: continue
 
                 if (name.startsWith("_")) continue
-                val isTopLevel = indent.isEmpty()
-                if (isTopLevel) topLevelCount++
 
                 val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
                 val endLine = findPythonBlockEndLine(lines, maskedLines, startLine)
+
+                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
+                    scopeStack.removeAt(scopeStack.size - 1)
+                }
+                val enclosingPrefix = scopeStack.joinToString(".") { it.name }
+                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
+                    Pair("$fileId#$enclosingPrefix.$name", "$relPath:$enclosingPrefix.$name")
+                } else {
+                    Pair("$fileId#$name", "$relPath:$name")
+                }
+
+                val isTopLevel = indent.isEmpty() && scopeStack.isEmpty()
+                if (isTopLevel) topLevelCount++
+
                 val sigLine = buildPythonHeaderSignature(lines, maskedLines, startLine, endLine)
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-                val nodeId = "$fileId#$name"
 
                 val headerEndLine = findPythonHeaderEndLine(maskedLines, startLine, endLine)
                 val description = if (isTopLevel) {
@@ -2090,7 +2176,7 @@ class PolyglotAstExtractor {
                 nodes.add(
                     GraphNode(
                         nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = "$relPath:$name", kind = kind,
+                        qualifiedName = qualifiedName, kind = kind,
                         signature = sigLine, startLine = startLine, endLine = endLine,
                         moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
                         archLayer = arch, isTestDouble = isTd,
@@ -2108,6 +2194,10 @@ class PolyglotAstExtractor {
                             lineNumber = impLine
                         ))
                     }
+                }
+
+                if ("class" in kw || "def" in kw) {
+                    scopeStack.add(ScopeEntry(name, startLine, endLine))
                 }
             }
 

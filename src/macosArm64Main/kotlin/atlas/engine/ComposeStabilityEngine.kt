@@ -7,6 +7,7 @@ import atlas.model.ComposeDoctorReport
 import atlas.model.ComposeNodeRecord
 import atlas.model.ComposeParamRecord
 import atlas.model.ComposeQueryResult
+import atlas.util.PlatformFiles
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -412,7 +413,8 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
     fun runDoctor(
         projectSlug: String,
         target: String? = null,
-        limit: Int = 10
+        limit: Int = 10,
+        workspaceRoot: String? = null
     ): ComposeDoctorReport {
         val violatingNodes = store.listComposeNodes(projectSlug, onlyViolating = true)
             .let { list ->
@@ -465,21 +467,23 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
                     when {
                         reason.startsWith("MUTABLE_VAR_PROPERTY:") || reason.startsWith("BROKEN_STABILITY_CONTRACT:") -> {
                             val propName = reason.substringAfterLast(':').substringAfterLast('.')
-                            val mutationCount = store.countPropertyMutations(projectSlug, propName)
-                            val writeSiteSafe = mutationCount == 0
                             val className = p.typeSignature.substringBefore('<').substringAfterLast('.')
-                            val (before, after, rationale) = if (writeSiteSafe) {
-                                Triple(
-                                    "data class $className(\n    var $propName: String\n)",
-                                    "@Immutable\ndata class $className(\n    val $propName: String\n)",
-                                    "Property '$propName' on '$className' has 0 write-site mutations (MUTATES_PROPERTY = 0); safe to convert 'var' -> 'val'."
-                                )
+                            val mutationCount = store.countPropertyMutations(projectSlug, propName, className)
+                            val writeSiteSafe = mutationCount == 0
+                            var before = if (writeSiteSafe) {
+                                "data class $className(\n    var $propName: String\n)"
                             } else {
-                                Triple(
-                                    "state.$propName = updatedValue",
-                                    "state = state.copy($propName = updatedValue)",
-                                    "Property '$propName' on '$className' has $mutationCount active write-site mutation(s) in the call graph; refactor mutations to immutable .copy(...) before converting 'var' -> 'val'."
-                                )
+                                "state.$propName = updatedValue"
+                            }
+                            var after = if (writeSiteSafe) {
+                                "@Immutable\ndata class $className(\n    val $propName: String\n)"
+                            } else {
+                                "state = state.copy($propName = updatedValue)"
+                            }
+                            val rationale = if (writeSiteSafe) {
+                                "Property '$propName' on '$className' has 0 write-site mutations (MUTATES_PROPERTY = 0); safe to convert 'var' -> 'val'."
+                            } else {
+                                "Property '$propName' on '$className' has $mutationCount active write-site mutation(s) in the call graph; refactor mutations to immutable .copy(...) before converting 'var' -> 'val'."
                             }
                             val classNode = store.listNodes(projectSlug).firstOrNull {
                                 (it.name == className || it.qualifiedName.endsWith(".$className")) &&
@@ -489,7 +493,52 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
                                 val f = it.fileId
                                 if (f.contains(':')) f.substringAfter(':') else f
                             } ?: node.filePath
-                            val targetLine = classNode?.startLine ?: node.startLine
+                            var targetLine = classNode?.startLine ?: node.startLine
+
+                            if (workspaceRoot != null && writeSiteSafe) {
+                                val fullPath = if (targetFilePath.startsWith("/")) targetFilePath else "$workspaceRoot/$targetFilePath"
+                                if (PlatformFiles.exists(fullPath)) {
+                                    val content = PlatformFiles.readText(fullPath)
+                                    val lines = content.lines()
+                                    val searchStart = if (classNode != null && classNode.startLine in 1..lines.size) classNode.startLine - 1 else 0
+                                    val searchEnd = if (classNode != null && classNode.endLine >= classNode.startLine) classNode.endLine.coerceAtMost(lines.size) else lines.size
+                                    var matchedIdx = -1
+                                    val varRegex = Regex("""\bvar\s+${Regex.escape(propName)}\b""")
+                                    for (i in searchStart until searchEnd) {
+                                        if (varRegex.containsMatchIn(lines[i])) {
+                                            matchedIdx = i
+                                            break
+                                        }
+                                    }
+                                    if (matchedIdx == -1) {
+                                        for (i in lines.indices) {
+                                            if (varRegex.containsMatchIn(lines[i])) {
+                                                matchedIdx = i
+                                                break
+                                            }
+                                        }
+                                    }
+                                    if (matchedIdx != -1) {
+                                        targetLine = matchedIdx + 1
+                                        val lineText = lines[matchedIdx]
+                                        val occurrences = content.split(lineText).size - 1
+                                        if (occurrences == 1) {
+                                            before = lineText
+                                            after = lineText.replaceFirst(varRegex, "val $propName")
+                                        } else {
+                                            val startSlice = (matchedIdx - 2).coerceAtLeast(0)
+                                            val sliceBefore = lines.subList(startSlice, matchedIdx + 1).joinToString("\n")
+                                            val sliceLines = lines.subList(startSlice, matchedIdx).toMutableList()
+                                            sliceLines.add(lineText.replaceFirst(varRegex, "val $propName"))
+                                            val sliceAfter = sliceLines.joinToString("\n")
+                                            if (content.split(sliceBefore).size - 1 == 1) {
+                                                before = sliceBefore
+                                                after = sliceAfter
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             candidates.add(
                                 RawCandidate(
@@ -547,6 +596,42 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
                             )
                         }
                         else -> {
+                            var before = "interface ${p.typeSignature}"
+                            var after = "@Stable\ninterface ${p.typeSignature}"
+                            val typeName = p.typeSignature.substringBefore('<').substringAfterLast('.').trim()
+                            val classNode = store.listNodes(projectSlug).firstOrNull {
+                                (it.name == typeName || it.qualifiedName.endsWith(".$typeName")) &&
+                                    it.kind in setOf("class", "data class", "value class", "interface")
+                            }
+                            val targetFilePath = classNode?.let {
+                                val f = it.fileId
+                                if (f.contains(':')) f.substringAfter(':') else f
+                            } ?: node.filePath
+                            var targetLine = classNode?.startLine ?: node.startLine
+
+                            if (workspaceRoot != null) {
+                                val fullPath = if (targetFilePath.startsWith("/")) targetFilePath else "$workspaceRoot/$targetFilePath"
+                                if (PlatformFiles.exists(fullPath)) {
+                                    val content = PlatformFiles.readText(fullPath)
+                                    val lines = content.lines()
+                                    val searchIdx = if (classNode != null && classNode.startLine in 1..lines.size) classNode.startLine - 1 else -1
+                                    val declRegex = Regex("""\b(interface|class|data\s+class|value\s+class)\s+${Regex.escape(typeName)}\b""")
+                                    val matchedIdx = if (searchIdx != -1 && declRegex.containsMatchIn(lines[searchIdx])) {
+                                        searchIdx
+                                    } else {
+                                        lines.indexOfFirst { declRegex.containsMatchIn(it) }
+                                    }
+                                    if (matchedIdx != -1) {
+                                        targetLine = matchedIdx + 1
+                                        val lineText = lines[matchedIdx]
+                                        if (content.split(lineText).size - 1 == 1) {
+                                            before = lineText
+                                            after = "@Immutable\n$lineText"
+                                        }
+                                    }
+                                }
+                            }
+
                             candidates.add(
                                 RawCandidate(
                                     priorityScore = computePriority(1.4),
@@ -554,13 +639,13 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
                                     ruleId = "COMPOSE-STAB-001",
                                     fixStrategy = "IMMUTABLE_ANNOTATION",
                                     writeSiteSafe = true,
-                                    targetNodeId = node.nodeId,
-                                    filePath = node.filePath,
-                                    line = node.startLine,
+                                    targetNodeId = classNode?.nodeId ?: node.nodeId,
+                                    filePath = targetFilePath,
+                                    line = targetLine,
                                     downstreamCascadeCount = cascadeCount,
                                     rationale = "Annotate '${p.typeSignature}' with @Immutable or @Stable after verifying all properties are read-only.",
-                                    beforeSnippet = "interface ${p.typeSignature}",
-                                    afterSnippet = "@Stable\ninterface ${p.typeSignature}"
+                                    beforeSnippet = before,
+                                    afterSnippet = after
                                 )
                             )
                         }
@@ -576,7 +661,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
                         scoringMode = nodeMode,
                         ruleId = "COMPOSE-STATE-001",
                         fixStrategy = "HOIST_EFFECT",
-                        writeSiteSafe = true,
+                        writeSiteSafe = false,
                         targetNodeId = node.nodeId,
                         filePath = node.filePath,
                         line = node.startLine,
@@ -596,7 +681,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
                         scoringMode = nodeMode,
                         ruleId = "COMPOSE-PERF-001",
                         fixStrategy = "KEY_INSERTION",
-                        writeSiteSafe = true,
+                        writeSiteSafe = false,
                         targetNodeId = node.nodeId,
                         filePath = node.filePath,
                         line = node.startLine,

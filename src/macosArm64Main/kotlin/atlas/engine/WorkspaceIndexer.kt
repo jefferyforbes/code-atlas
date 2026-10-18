@@ -93,7 +93,7 @@ class WorkspaceIndexer(
 
         val changedNodes = mutableListOf<GraphNode>()
         val markdownQueue = mutableListOf<Pair<String, String>>()
-        val unchangedPlanQueue = mutableListOf<Pair<String, String>>()
+        val unchangedMarkdownQueue = mutableListOf<Pair<String, String>>()
         val pendingKotlinComposeFiles = mutableListOf<Triple<String, String, List<GraphEdge>>>()
         val pendingRawEdges = mutableMapOf<String, List<GraphEdge>>()
         var codeFilesIndexed = 0
@@ -127,7 +127,7 @@ class WorkspaceIndexer(
             val cached = cachedFiles[relStr]
             val mtimeUnchanged = cached != null && abs(cached.second - mtime) < 1e-6
             val rawBytes: ByteArray by lazy { PlatformFiles.readBytes(filePath) }
-            val sha256 = if (mtimeUnchanged) cached!!.first else Sha256.digest(rawBytes)
+            val sha256 = if (cached != null && abs(cached.second - mtime) < 1e-6) cached.first else Sha256.digest(rawBytes)
             val isUnchanged = !effectiveForce && (mtimeUnchanged || (cached != null && cached.first == sha256))
 
             if (ext == ".md") {
@@ -149,9 +149,7 @@ class WorkspaceIndexer(
                     )
                     filesIndexed++
                 } else {
-                    if (relStr.startsWith("plans/") || relStr.contains("/plans/")) {
-                        unchangedPlanQueue.add(Pair(relStr, rawBytes.decodeToString()))
-                    }
+                    unchangedMarkdownQueue.add(Pair(relStr, rawBytes.decodeToString()))
                     filesSkipped++
                 }
                 continue
@@ -201,7 +199,7 @@ class WorkspaceIndexer(
                 val matchesSubpath = normalizedSubpaths.any { cleanSp ->
                     indexedRel == cleanSp || indexedRel.startsWith("$cleanSp/")
                 }
-                if (!matchesSubpath) continue
+                if (!matchesSubpath && PlatformFiles.exists("$root/$indexedRel")) continue
             }
             if (indexedRel !in validDiskFiles) {
                 store.deleteFileRecord(projectId, indexedRel, recomputeDegrees = false)
@@ -379,23 +377,23 @@ class WorkspaceIndexer(
             projectId, combinedNodes
         )
 
-        // When code files were incrementally re-indexed or deleted, also re-evaluate plans/*.md
-        // so PLAN_SCOPES_FILE edges link against newly added or updated code symbols.
+        // When code files were incrementally re-indexed or deleted, also re-evaluate markdown files
+        // so PLAN_SCOPES_FILE, codespan, and wikilink edges link against newly added or updated code symbols.
         if (codeFilesIndexed > 0 || filesDeleted > 0) {
             val queuedRels = markdownQueue.map { it.first }.toSet()
-            for ((relPlan, planText) in unchangedPlanQueue) {
-                if (relPlan !in queuedRels) {
-                    store.deleteOutgoingEdgesForFile(projectId, "$projectId:$relPlan")
-                    markdownQueue.add(Pair(relPlan, planText))
+            for ((relMd, mdText) in unchangedMarkdownQueue) {
+                if (relMd !in queuedRels) {
+                    store.deleteOutgoingEdgesForFile(projectId, "$projectId:$relMd")
+                    markdownQueue.add(Pair(relMd, mdText))
                 }
             }
             if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
                 for (indexedRel in cachedFiles.keys) {
-                    if ((indexedRel.startsWith("plans/") || indexedRel.contains("/plans/")) && indexedRel.endsWith(".md") && indexedRel !in markdownQueue.map { it.first }) {
-                        val fullPlanPath = "$root/$indexedRel"
-                        if (PlatformFiles.exists(fullPlanPath)) {
+                    if (indexedRel.endsWith(".md") && indexedRel !in markdownQueue.map { it.first }) {
+                        val fullMdPath = "$root/$indexedRel"
+                        if (PlatformFiles.exists(fullMdPath)) {
                             store.deleteOutgoingEdgesForFile(projectId, "$projectId:$indexedRel")
-                            markdownQueue.add(Pair(indexedRel, PlatformFiles.readText(fullPlanPath)))
+                            markdownQueue.add(Pair(indexedRel, PlatformFiles.readText(fullMdPath)))
                         }
                     }
                 }
