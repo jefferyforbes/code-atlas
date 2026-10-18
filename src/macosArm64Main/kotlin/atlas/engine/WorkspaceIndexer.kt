@@ -458,7 +458,7 @@ class WorkspaceIndexer(
 
         store.upsertNodesAndEdges(
             projectId = projectId,
-            nodes = modNodes + changedNodes.distinctBy { it.nodeId } + docNodes + endpointNodes,
+            nodes = modNodes + changedNodes.distinctBy { it.nodeId } + docNodes.distinctBy { it.nodeId } + endpointNodes,
             edges = modEdges + resolvedEdges + kmpEdges + docEdges
         )
         store.setProjectMetadata(projectId, "extractor_version", PolyglotAstExtractor.EXTRACTOR_VERSION)

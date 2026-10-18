@@ -2116,5 +2116,181 @@ class EngineAndMcpTest {
             PlatformFiles.deleteRecursively(tmpDir)
         }
     }
+
+    @Test
+    fun testVaultAndSkillTagExtraction() {
+        val markdownText = """
+            ---
+            title: Strategy and Architecture Note
+            tags:
+              - sdlc/architecture
+              - multi-agent
+            tag: single-facet
+            ---
+            # Strategic Architecture Overview
+            This document outlines #sdlc/planning and #sdlc/testing.
+            Here is some masked code: `#not-a-tag` and:
+            ```kotlin
+            val fake = "#fake-code-tag"
+            ```
+            Ignored hex colors: #FFFFFF and #1A73E8.
+            ## Headings with hash #ignored-heading-hash
+            Wikilink reference: [[Note#anchor-ref]].
+        """.trimIndent()
+
+        val (nodes, edges) = VaultPlanBridge.extractMarkdownAndPlans(
+            projectId = "test-proj",
+            relPath = "vault/architecture.md",
+            markdownText = markdownText,
+            indexedNodes = emptyList()
+        )
+
+        val nodeIds = nodes.map { it.nodeId }
+        assertTrue(nodeIds.contains("test-proj:tag#sdlc/architecture"))
+        assertTrue(nodeIds.contains("test-proj:tag#multi-agent"))
+        assertTrue(nodeIds.contains("test-proj:tag#single-facet"))
+        assertTrue(nodeIds.contains("test-proj:tag#sdlc/planning"))
+        assertTrue(nodeIds.contains("test-proj:tag#sdlc/testing"))
+
+        assertFalse(nodeIds.any { it.contains("not-a-tag") })
+        assertFalse(nodeIds.any { it.contains("fake-code-tag") })
+        assertFalse(nodeIds.any { it.contains("FFFFFF") })
+        assertFalse(nodeIds.any { it.contains("1A73E8") })
+        assertFalse(nodeIds.any { it.contains("ignored-heading-hash") })
+        assertFalse(nodeIds.any { it.contains("anchor-ref") })
+
+        val taggedEdges = edges.filter { it.edgeType == "TAGGED_WITH" }
+        assertEquals(5, taggedEdges.size)
+        assertTrue(taggedEdges.all { it.sourceNodeId == "test-proj:vault/architecture.md#architecture" })
+        assertTrue(taggedEdges.any { it.targetNodeId == "test-proj:tag#sdlc/architecture" })
+    }
+
+    @Test
+    fun testSkillTriadExtraction() {
+        val skillMd = """
+            ---
+            name: architect
+            description: Turn validated requirements into an implementation-ready technical design via an autonomous Multi-Agent Swarm with Lead Architect scoring, Champion-Challenger synthesis, and recursive learning calibration. Triggered natively by /boost or /architect.
+            tags:
+              - sdlc/architecture
+              - technical-design
+            ---
+            # Architect
+            Decomposes requirements. For planning, see [plan](../plan/SKILL.md).
+        """.trimIndent()
+
+        val (nodes, edges) = VaultPlanBridge.extractMarkdownAndPlans(
+            projectId = "agent-os",
+            relPath = "skills/architect/SKILL.md",
+            markdownText = skillMd,
+            indexedNodes = emptyList()
+        )
+
+        val skillNode = nodes.firstOrNull { it.kind == "skill" }
+        assertNotNull(skillNode)
+        assertEquals("agent-os:skill#architect", skillNode.nodeId)
+        assertEquals("architect", skillNode.name)
+        assertEquals("skill#architect", skillNode.qualifiedName)
+        assertEquals("skills", skillNode.moduleId)
+        assertEquals("pragmatic", skillNode.semioticLayer)
+        assertEquals("infrastructure", skillNode.archLayer)
+
+        val cmdNodes = nodes.filter { it.kind == "slash_command" }
+        val cmdIds = cmdNodes.map { it.nodeId }
+        assertTrue(cmdIds.contains("agent-os:cmd#/architect"))
+        assertTrue(cmdIds.contains("agent-os:cmd#/boost"))
+
+        val triggerEdges = edges.filter { it.edgeType == "TRIGGERS_SKILL" }
+        assertEquals(2, triggerEdges.size)
+        assertTrue(triggerEdges.any { it.sourceNodeId == "agent-os:cmd#/architect" && it.targetNodeId == skillNode.nodeId })
+        assertTrue(triggerEdges.any { it.sourceNodeId == "agent-os:cmd#/boost" && it.targetNodeId == skillNode.nodeId })
+
+        val depEdges = edges.filter { it.edgeType == "DEPENDS_ON_SKILL" }
+        assertEquals(1, depEdges.size)
+        assertEquals(skillNode.nodeId, depEdges[0].sourceNodeId)
+        assertEquals("agent-os:skill#plan", depEdges[0].targetNodeId)
+
+        val tagEdges = edges.filter { it.edgeType == "TAGGED_WITH" }
+        assertEquals(2, tagEdges.size)
+        assertTrue(tagEdges.any { it.targetNodeId == "agent-os:tag#sdlc/architecture" })
+        assertTrue(tagEdges.any { it.targetNodeId == "agent-os:tag#technical-design" })
+    }
+
+    @Test
+    fun testGodNodesExcludesTagsAndSkills() {
+        val dbPath = "/tmp/test_atlas_god_nodes_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            store.upsertFileRecord(
+                projectId = "p",
+                relPath = "src/OrderService.kt",
+                language = "kotlin",
+                moduleId = ":core",
+                sourceSet = "main",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                sha256 = "sha_order",
+                mtime = 1.0,
+                loc = 50,
+                topLevelDeclCount = 1
+            )
+
+            val codeNode = GraphNode(
+                nodeId = "p:src/OrderService.kt#OrderService",
+                projectId = "p",
+                fileId = "p:src/OrderService.kt",
+                name = "OrderService",
+                qualifiedName = "com.example.OrderService",
+                kind = "class",
+                inDegree = 2,
+                outDegree = 1
+            )
+            val tagNode = GraphNode(
+                nodeId = "p:tag#sdlc/architecture",
+                projectId = "p",
+                fileId = "p:tags",
+                name = "sdlc/architecture",
+                qualifiedName = "tag#sdlc/architecture",
+                kind = "tag",
+                inDegree = 50,
+                outDegree = 0
+            )
+            val skillNode = GraphNode(
+                nodeId = "p:skill#architect",
+                projectId = "p",
+                fileId = "p:skills/architect/SKILL.md",
+                name = "architect",
+                qualifiedName = "skill#architect",
+                kind = "skill",
+                inDegree = 30,
+                outDegree = 5
+            )
+            val cmdNode = GraphNode(
+                nodeId = "p:cmd#/architect",
+                projectId = "p",
+                fileId = "p:skills/architect/SKILL.md",
+                name = "/architect",
+                qualifiedName = "cmd#/architect",
+                kind = "slash_command",
+                inDegree = 20,
+                outDegree = 1
+            )
+
+            store.upsertNodesAndEdges(
+                projectId = "p",
+                nodes = listOf(codeNode, tagNode, skillNode, cmdNode),
+                edges = emptyList()
+            )
+
+            val godNodes = store.getGodNodes("p", topN = 10)
+            assertEquals(1, godNodes.size)
+            assertEquals(codeNode.nodeId, godNodes[0].nodeId)
+            assertFalse(godNodes.any { it.kind == "tag" || it.kind == "skill" || it.kind == "slash_command" })
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }
 

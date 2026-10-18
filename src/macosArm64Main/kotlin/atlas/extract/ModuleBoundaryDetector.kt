@@ -216,7 +216,9 @@ class ModuleBoundaryDetector {
                 }
             }
 
-            val allFiles = PlatformFiles.listFilesRecursively(projectRoot)
+            val allFiles = PlatformFiles.listFilesRecursively(projectRoot) { dirName ->
+                dirName in setOf(".git", ".gradle", ".idea", ".venv", "venv", "node_modules", "build", "dist", ".agents", ".agent", ".atlas")
+            }
             val buildEntries = mutableListOf<Triple<String, String, String>>()
             for (filePath in allFiles) {
                 val fileName = PlatformFiles.fileName(filePath)
