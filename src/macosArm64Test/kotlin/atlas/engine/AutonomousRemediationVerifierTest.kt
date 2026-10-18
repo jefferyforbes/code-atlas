@@ -289,7 +289,7 @@ class AutonomousRemediationVerifierTest {
                 put("dry_run", true)
             }
 
-            val res = server.callTool("codegraph_audit", toolArgs)
+            val res = server.callTool("atlas_audit", toolArgs)
             assertTrue(res["valid"]?.jsonPrimitive?.booleanOrNull == true)
             assertEquals("COMPLETED", res["phase"]?.jsonPrimitive?.contentOrNull)
             server.close()

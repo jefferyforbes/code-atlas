@@ -1,6 +1,7 @@
 package atlas.cli
 
 import atlas.engine.FigmaDesignAuditor
+import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkspaceInitEngine
 import atlas.extract.FigmaSnapshotExtractor
 import atlas.extract.UrlTargetResolver
@@ -105,6 +106,7 @@ class CodeGraphCli {
             var hookTypeArg = "pre-commit"
             var isDryRun = false
             var forceFlag = false
+            var legacyToolsFlag = false
 
             var idx = 0
             while (idx < argv.size) {
@@ -136,17 +138,19 @@ class CodeGraphCli {
                         command = "query"
                         action = "shortest_path"
                     }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "fix" || arg == "remedy" || arg == "remediate" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" || arg == "init" -> {
+                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "fix" || arg == "remedy" || arg == "remediate" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" || arg == "init" || arg == "migrate-tools" || arg == "migrate_tools" -> {
                         command = when (arg) {
                             "dead_code" -> "dead-code"
                             "record_memory" -> "record-memory"
                             "verify_remediation" -> "verify-remediation"
                             "remedy", "remediate" -> "fix"
+                            "migrate_tools" -> "migrate-tools"
                             else -> arg
                         }
                     }
                     arg == "--compose" -> isComposeAuditFlag = true
                     arg == "--complexity" -> isComplexityFlag = true
+                    arg == "--legacy-tools" -> legacyToolsFlag = true
                     (arg == "--threshold" || arg == "--max-cognitive") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> thresholdArg = argv[++idx].toIntOrNull()
                     arg.startsWith("--threshold=") -> thresholdArg = arg.substringAfter('=').toIntOrNull()
                     arg.startsWith("--max-cognitive=") -> thresholdArg = arg.substringAfter('=').toIntOrNull()
@@ -331,6 +335,15 @@ class CodeGraphCli {
                 }
 
                 when (command) {
+                    "migrate-tools" -> {
+                        return runMigrateToolsCommand(
+                            server = server,
+                            paths = paths,
+                            target = target,
+                            applyRemediation = applyRemediation,
+                            isJson = isJson
+                        )
+                    }
                     "serve-mcp" -> {
                         server.serveStdio()
                         return 0
@@ -357,7 +370,7 @@ class CodeGraphCli {
                             put("project", project)
                             putJsonArray("targets") { seedList.forEach { add(it) } }
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val data = loadSpilledData(res)
                         val text = if (isJson) {
                             jsonPretty.encodeToString(data)
@@ -373,6 +386,22 @@ class CodeGraphCli {
                     }
                     "audit" -> {
                         val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
+                        if (legacyToolsFlag) {
+                            val scanPaths = if (filterPaths.isNotEmpty()) filterPaths else listOf(server.workspaceRoot)
+                            val report = ToolMigrationEngine.scanAndMigrate(scanPaths, apply = false)
+                            if (isJson) {
+                                println(jsonPretty.encodeToString(report))
+                            } else {
+                                val passed = report.totalOccurrences == 0
+                                val sample = if (report.matches.isNotEmpty()) {
+                                    val s = report.matches.take(5).joinToString("; ") { "${it.legacyTool} in ${it.file}:${it.line}" }
+                                    " top=[$s]"
+                                } else ""
+                                val text = "[Audit Legacy Tools] passed=$passed occurrences=${report.totalOccurrences} files=${report.filesAffected}$sample"
+                                println(truncateSummary(text, false))
+                            }
+                            return if (report.totalOccurrences == 0) 0 else 1
+                        }
                         val toolArgs = buildJsonObject {
                             put("action", "verify_architecture")
                             put("project", project)
@@ -385,7 +414,7 @@ class CodeGraphCli {
                             if (!outcome.isNullOrBlank()) put("outcome", outcome)
                             if (!note.isNullOrBlank()) put("note", note)
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val data = loadSpilledData(res)
                         val bViolations = (data["single_declaration_violations"] ?: data["singleDeclarationViolations"])?.jsonArray?.size ?: 0
                         val lInversions = (data["layer_inversions"] ?: data["layerInversions"])?.jsonArray?.size ?: 0
@@ -403,6 +432,22 @@ class CodeGraphCli {
                     }
                     "fix" -> {
                         val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
+                        if (legacyToolsFlag || ruleIdArg == "LEGACY-TOOLS" || ruleIdArg == "MIGRATE-TOOLS") {
+                            val scanPaths = if (filterPaths.isNotEmpty()) filterPaths else listOf(server.workspaceRoot)
+                            val report = ToolMigrationEngine.scanAndMigrate(scanPaths, apply = applyRemediation)
+                            if (isJson) {
+                                println(jsonPretty.encodeToString(report))
+                            } else {
+                                val mode = if (applyRemediation) "applied" else "dry-run"
+                                val sample = if (report.matches.isNotEmpty()) {
+                                    val s = report.matches.take(5).joinToString("; ") { "${it.legacyTool} in ${it.file}:${it.line}" }
+                                    " top=[$s]"
+                                } else ""
+                                val text = "[Fix Legacy Tools] mode=$mode occurrences=${report.totalOccurrences} files=${report.filesAffected}$sample"
+                                println(truncateSummary(text, false))
+                            }
+                            return if (applyRemediation || report.totalOccurrences == 0) 0 else 1
+                        }
                         val toolArgs = buildJsonObject {
                             put("action", "remedy_architecture")
                             put("project", project)
@@ -416,7 +461,7 @@ class CodeGraphCli {
                             if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg)
                             put("limit", limit)
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val data = loadSpilledData(res)
                         val total = data["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
                         val bCount = data["boost003_count"]?.jsonPrimitive?.intOrNull ?: 0
@@ -483,7 +528,7 @@ class CodeGraphCli {
                                 putJsonArray("targets") { filterPaths.forEach { add(it) } }
                             }
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val data = loadSpilledData(res)
                         val count = data["dead_code_count"]?.jsonPrimitive?.intOrNull ?: 0
                         val names = data["dead_nodes"]?.jsonArray?.mapNotNull { it.jsonObject["name"]?.jsonPrimitive?.content } ?: emptyList()
@@ -504,7 +549,7 @@ class CodeGraphCli {
                             if (!outcome.isNullOrBlank()) put("outcome", outcome)
                             if (!note.isNullOrBlank()) put("note", note)
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val text = if (isJson) {
                             jsonPretty.encodeToString(res)
                         } else {
@@ -529,7 +574,7 @@ class CodeGraphCli {
                             if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg)
                             put("dry_run", !applyRemediation)
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val data = loadSpilledData(res)
                         val valid = data["valid"]?.jsonPrimitive?.booleanOrNull ?: false
                         val phase = data["phase"]?.jsonPrimitive?.content ?: "UNKNOWN"
@@ -553,7 +598,7 @@ class CodeGraphCli {
                             if (!outcome.isNullOrBlank()) put("outcome", outcome)
                             if (!note.isNullOrBlank()) put("note", note)
                         }
-                        val res = server.callTool("codegraph_query", toolArgs)
+                        val res = server.callTool("atlas_query", toolArgs)
                         val data = if (isJson) loadSpilledData(res) else res
                         if (isJson) {
                             println(jsonPretty.encodeToString(data))
@@ -885,7 +930,7 @@ class CodeGraphCli {
                         put("depth", if (depth <= 2) 5 else depth)
                         put("strong_skipping", strongSkipping)
                     }
-                    val res = server.callTool("codegraph_query", toolArgs)
+                    val res = server.callTool("atlas_query", toolArgs)
                     val data = loadSpilledData(res)
                     if (isJson) {
                         println(jsonPretty.encodeToString(data))
@@ -911,7 +956,7 @@ class CodeGraphCli {
                         if (!compilerReportsDir.isNullOrBlank()) put("compiler_reports_dir", compilerReportsDir)
                         if (!traceLogPath.isNullOrBlank()) put("trace_log_path", traceLogPath)
                     }
-                    val res = server.callTool("codegraph_audit", toolArgs)
+                    val res = server.callTool("atlas_audit", toolArgs)
                     val data = loadSpilledData(res)
                     val score = data["overall_score"]?.jsonPrimitive?.doubleOrNull ?: 95.0
                     val status = data["status"]?.jsonPrimitive?.content ?: (if (score >= 80.0) "PASS" else "FAIL")
@@ -932,7 +977,7 @@ class CodeGraphCli {
                         put("limit", limit)
                         if (target.isNotEmpty()) putJsonArray("targets") { add(target) }
                     }
-                    val res = server.callTool("codegraph_audit", toolArgs)
+                    val res = server.callTool("atlas_audit", toolArgs)
                     val data = loadSpilledData(res)
 
                     if (applyRemediation) {
@@ -1025,7 +1070,7 @@ class CodeGraphCli {
                         put("project", project)
                         putJsonArray("targets") { seedList.forEach { add(it) } }
                     }
-                    val res = server.callTool("codegraph_audit", toolArgs)
+                    val res = server.callTool("atlas_audit", toolArgs)
                     val data = loadSpilledData(res)
                     if (isJson) {
                         println(jsonPretty.encodeToString(data))
@@ -1110,7 +1155,7 @@ class CodeGraphCli {
                 if (threshold != null) put("threshold", threshold)
                 if (!testCmd.isNullOrBlank()) put("test_command", testCmd)
             }
-            val res = server.callTool("codegraph_audit", toolArgs)
+            val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)
             val total = data["total_prescriptions"]?.jsonPrimitive?.intOrNull ?: 0
             val verified = data["verified_count"]?.jsonPrimitive?.intOrNull ?: 0
@@ -1155,7 +1200,7 @@ class CodeGraphCli {
                 if (threshold != null) put("threshold", threshold)
                 if (maxCyclomatic != null) put("max_cyclomatic", maxCyclomatic)
             }
-            val res = server.callTool("codegraph_audit", toolArgs)
+            val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)
             val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: true
             val total = data["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
@@ -1187,7 +1232,7 @@ class CodeGraphCli {
                 if (threshold != null) put("threshold", threshold)
                 put("limit", limit)
             }
-            val res = server.callTool("codegraph_query", toolArgs)
+            val res = server.callTool("atlas_query", toolArgs)
             val data = loadSpilledData(res)
             val results = data["results"]?.jsonArray ?: JsonArray(emptyList())
 
@@ -1274,6 +1319,35 @@ class CodeGraphCli {
             return if (result.success) 0 else 1
         }
 
+        private fun runMigrateToolsCommand(
+            server: CodeGraphMcpServer,
+            paths: List<String>,
+            target: String,
+            applyRemediation: Boolean,
+            isJson: Boolean
+        ): Int {
+            val scanPaths = if (paths.isNotEmpty()) {
+                paths
+            } else if (target.isNotEmpty()) {
+                listOf(target)
+            } else {
+                listOf(server.workspaceRoot)
+            }
+            val report = ToolMigrationEngine.scanAndMigrate(scanPaths, apply = applyRemediation)
+            if (isJson) {
+                println(jsonPretty.encodeToString(report))
+            } else {
+                val mode = if (applyRemediation) "applied" else "dry-run"
+                val sample = if (report.matches.isNotEmpty()) {
+                    val s = report.matches.take(5).joinToString("; ") { "${it.legacyTool} in ${it.file}:${it.line}" }
+                    " top=[$s]"
+                } else ""
+                val text = "[Atlas Migrate Tools] mode=$mode occurrences=${report.totalOccurrences} files=${report.filesAffected}$sample"
+                println(truncateSummary(text, false))
+            }
+            return if (applyRemediation || report.totalOccurrences == 0) 0 else 1
+        }
+
         private fun printHelp() {
             println(
                 """
@@ -1292,6 +1366,7 @@ class CodeGraphCli {
                   fix                Remediate architecture violations (BOOST-003 AST split & layer inversions)
                   doctor             Synthesize and apply autonomous remediation prescriptions
                   dead-code          Detect dead code unreferenced across indexed modules
+                  migrate-tools      Detect and optionally migrate deprecated codegraph_* tool calls
                   record-memory      Record execution outcome annotation for a node into work memory
                   verify-remediation Verify and optionally apply autonomous remediation with pre-flight & post-verification checks
                   serve-mcp          Run JSON-RPC 2.0 MCP server over stdio
@@ -1335,6 +1410,7 @@ class CodeGraphCli {
                   --threshold <int>        Cognitive complexity threshold for audit or query (default: 10)
                   --description-mode <m>   Filter mode for description suggestions (domain-only, all, off; default: domain-only)
                   --no-description-check   Disable top-level description suggestions check
+                  --legacy-tools           Audit or fix deprecated codegraph_* tool calls across files
 
                 Query & Compose Options:
                   --target <sym>           Symbol name, node name, URL/deep-link, or ID

@@ -220,26 +220,26 @@ class ComplexityCliTest {
             )
             server.store.upsertNodesAndEdges("proj", listOf(node), emptyList())
 
-            // 1. codegraph_query with action="complexity"
+            // 1. atlas_query with action="complexity"
             val queryArgs = buildJsonObject {
                 put("action", "complexity")
                 put("project", "proj")
                 put("threshold", 10)
             }
-            val queryRes = server.callTool("codegraph_query", queryArgs)
+            val queryRes = server.callTool("atlas_query", queryArgs)
             val queryResults = queryRes["results"]?.jsonArray
             assertEquals(1, queryResults?.size)
             val firstRecord = queryResults?.get(0)?.jsonObject
             assertEquals("execute", firstRecord?.get("name")?.jsonPrimitive?.content)
             assertEquals(12, firstRecord?.get("cognitive")?.jsonPrimitive?.intOrNull)
 
-            // 2. codegraph_audit with action="audit_complexity"
+            // 2. atlas_audit with action="audit_complexity"
             val auditArgs = buildJsonObject {
                 put("action", "audit_complexity")
                 put("project", "proj")
                 put("threshold", 10)
             }
-            val auditRes = server.callTool("codegraph_audit", auditArgs)
+            val auditRes = server.callTool("atlas_audit", auditArgs)
             assertFalse(auditRes["passed"]?.jsonPrimitive?.booleanOrNull ?: true)
             assertEquals(1, auditRes["total_violations"]?.jsonPrimitive?.intOrNull)
             assertEquals(1, auditRes["warning_count"]?.jsonPrimitive?.intOrNull)
@@ -294,7 +294,7 @@ class ComplexityCliTest {
                 put("project", "proj")
                 put("target", "Service")
             }
-            val res = server.callTool("codegraph_query", queryArgs)
+            val res = server.callTool("atlas_query", queryArgs)
             val results = res["results"]?.jsonArray
             assertEquals(1, results?.size)
             assertEquals("doWork", results?.get(0)?.jsonObject?.get("name")?.jsonPrimitive?.content)

@@ -92,7 +92,7 @@ class ComposeCliMcpIntegrationTest {
 
                 // 2. Test MCP sync_index with Compose trace log ingestion
                 val syncRes = server.callTool(
-                    "codegraph_audit",
+                    "atlas_audit",
                     buildJsonObject {
                         put("action", "sync_index")
                         put("project", "shop-kmp")
@@ -102,9 +102,9 @@ class ComposeCliMcpIntegrationTest {
                 assertEquals(2, syncRes["compose_nodes"]?.jsonPrimitive?.intOrNull)
                 assertEquals(1, syncRes["trace_records_ingested"]?.jsonPrimitive?.intOrNull)
 
-                // 3. Test MCP codegraph_query actions: compose_summary, compose_cascade, compose_blame
+                // 3. Test MCP atlas_query actions: compose_summary, compose_cascade, compose_blame
                 val summaryRes = server.callTool(
-                    "codegraph_query",
+                    "atlas_query",
                     buildJsonObject {
                         put("action", "compose_summary")
                         put("project", "shop-kmp")
@@ -114,7 +114,7 @@ class ComposeCliMcpIntegrationTest {
                 assertEquals(0, summaryRes["skippable_count"]?.jsonPrimitive?.intOrNull)
 
                 val cascadeRes = server.callTool(
-                    "codegraph_query",
+                    "atlas_query",
                     buildJsonObject {
                         put("action", "compose_cascade")
                         put("project", "shop-kmp")
@@ -126,7 +126,7 @@ class ComposeCliMcpIntegrationTest {
                 assertEquals("ui.CartList", cascadeArr[0].jsonObject["callee_fqname"]?.jsonPrimitive?.content)
 
                 val blameRes = server.callTool(
-                    "codegraph_query",
+                    "atlas_query",
                     buildJsonObject {
                         put("action", "compose_blame")
                         put("project", "shop-kmp")
@@ -138,9 +138,9 @@ class ComposeCliMcpIntegrationTest {
                 assertEquals("state", blameArr[0].jsonObject["param_name"]?.jsonPrimitive?.content)
                 assertEquals(6, blameArr[0].jsonObject["root_cause_line"]?.jsonPrimitive?.intOrNull)
 
-                // 4. Test MCP codegraph_audit actions: audit_compose, compose_doctor, synthesize_compose_scope
+                // 4. Test MCP atlas_audit actions: audit_compose, compose_doctor, synthesize_compose_scope
                 val auditRes = server.callTool(
-                    "codegraph_audit",
+                    "atlas_audit",
                     buildJsonObject {
                         put("action", "audit_compose")
                         put("project", "shop-kmp")
@@ -154,7 +154,7 @@ class ComposeCliMcpIntegrationTest {
                 assertEquals("CONFIRMED", realityArr[0].jsonObject["classification"]?.jsonPrimitive?.content)
 
                 val doctorRes = server.callTool(
-                    "codegraph_audit",
+                    "atlas_audit",
                     buildJsonObject {
                         put("action", "compose_doctor")
                         put("project", "shop-kmp")
@@ -170,7 +170,7 @@ class ComposeCliMcpIntegrationTest {
                 assertEquals(false, valConv["write_site_safe"]?.jsonPrimitive?.booleanOrNull, "couponCode is mutated in applyDiscount, so writeSiteSafe must be false")
 
                 val scopeRes = server.callTool(
-                    "codegraph_audit",
+                    "atlas_audit",
                     buildJsonObject {
                         put("action", "synthesize_compose_scope")
                         put("project", "shop-kmp")
@@ -259,7 +259,7 @@ class ComposeCliMcpIntegrationTest {
             val server = CodeGraphMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
             try {
                 val summaryEnvelope = server.callTool(
-                    "codegraph_query",
+                    "atlas_query",
                     buildJsonObject {
                         put("action", "compose_summary")
                         put("project", "large-ui")

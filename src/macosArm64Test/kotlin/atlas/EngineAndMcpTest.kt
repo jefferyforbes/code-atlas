@@ -7,6 +7,7 @@ import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
 import atlas.engine.AutonomousRemediationVerifier
 import atlas.engine.ScopeSynthesizer
+import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkspaceIndexer
 import atlas.extract.FigmaSnapshotExtractor
 import atlas.extract.ModuleBoundaryDetector
@@ -15,6 +16,7 @@ import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
@@ -34,6 +36,8 @@ import kotlin.test.assertTrue
 
 @OptIn(ExperimentalForeignApi::class)
 class EngineAndMcpTest {
+
+    private val json = Json { ignoreUnknownKeys = true }
 
     @Test
     fun testVaultPlanBridgeWikilinksCodeSpansAndPlanScope() {
@@ -370,7 +374,7 @@ class EngineAndMcpTest {
             server.store.upsertNodesAndEdges("demo", bulkNodes, bulkEdges)
 
             val impactResp = server.callTool(
-                "codegraph_query",
+                "atlas_query",
                 buildJsonObject {
                     put("action", "impact")
                     put("project", "demo")
@@ -675,7 +679,7 @@ class EngineAndMcpTest {
             server.store.upsertNodesAndEdges("audit_proj", bulkNodes, bulkEdges)
 
             val spill1 = server.callTool(
-                "codegraph_query",
+                "atlas_query",
                 buildJsonObject {
                     put("action", "impact")
                     put("project", "audit_proj")
@@ -684,7 +688,7 @@ class EngineAndMcpTest {
                 }
             )
             val spill2 = server.callTool(
-                "codegraph_query",
+                "atlas_query",
                 buildJsonObject {
                     put("action", "impact")
                     put("project", "audit_proj")
@@ -791,19 +795,49 @@ class EngineAndMcpTest {
                 createdAtEpoch = time(null).toDouble()
             )
 
-            // 1. codegraph_query with action=impact
+            // 1. atlas_query with action=impact (and legacy alias codegraph_query)
             val queryCall = server.processJsonRpcMessage(
-                """{"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"codegraph_query","arguments":{"project":"test_wm","action":"impact","target":"test_wm:src/Service.kt#PaymentService"}}}"""
+                """{"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"atlas_query","arguments":{"project":"test_wm","action":"impact","target":"test_wm:src/Service.kt#PaymentService"}}}"""
             )
             assertNotNull(queryCall)
             assertTrue(queryCall.contains("exclusive lock on payment ledger table"), "Impact response must include active WorkMemory annotations")
 
-            // 2. codegraph_audit with action=synthesize_3d_scope
+            val legacyQueryCall = server.processJsonRpcMessage(
+                """{"jsonrpc":"2.0","id":1011,"method":"tools/call","params":{"name":"codegraph_query","arguments":{"project":"test_wm","action":"impact","target":"test_wm:src/Service.kt#PaymentService"}}}"""
+            )
+            assertNotNull(legacyQueryCall)
+            assertTrue(legacyQueryCall.contains("exclusive lock on payment ledger table"), "Legacy codegraph_query alias must work")
+            val parsedLegacy = json.parseToJsonElement(legacyQueryCall).jsonObject
+            val legacyText = parsedLegacy["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.content ?: ""
+            val legacyData = json.parseToJsonElement(legacyText).jsonObject
+            val deprecation = legacyData["_deprecation"]?.jsonObject
+            assertNotNull(deprecation, "Legacy codegraph_query call must include _deprecation metadata")
+            assertEquals("codegraph_query", deprecation["legacy_tool"]?.jsonPrimitive?.content)
+            assertEquals("atlas_query", deprecation["preferred_tool"]?.jsonPrimitive?.content)
+
+            // 2. atlas_audit with action=synthesize_3d_scope (and legacy alias codegraph_audit)
             val scopeCall = server.processJsonRpcMessage(
-                """{"jsonrpc":"2.0","id":102,"method":"tools/call","params":{"name":"codegraph_audit","arguments":{"project":"test_wm","action":"synthesize_3d_scope","targets":["test_wm:src/Service.kt#PaymentService"]}}}"""
+                """{"jsonrpc":"2.0","id":102,"method":"tools/call","params":{"name":"atlas_audit","arguments":{"project":"test_wm","action":"synthesize_3d_scope","targets":["test_wm:src/Service.kt#PaymentService"]}}}"""
             )
             assertNotNull(scopeCall)
             assertTrue(scopeCall.contains("exclusive lock on payment ledger table"), "3D scope synthesis response must include active WorkMemory annotations")
+            val parsedScope = json.parseToJsonElement(scopeCall).jsonObject
+            val scopeText = parsedScope["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.content ?: ""
+            val scopeData = json.parseToJsonElement(scopeText).jsonObject
+            assertFalse(scopeData.containsKey("_deprecation"), "Canonical atlas_audit must not contain _deprecation metadata")
+
+            val legacyScopeCall = server.processJsonRpcMessage(
+                """{"jsonrpc":"2.0","id":1021,"method":"tools/call","params":{"name":"codegraph_audit","arguments":{"project":"test_wm","action":"synthesize_3d_scope","targets":["test_wm:src/Service.kt#PaymentService"]}}}"""
+            )
+            assertNotNull(legacyScopeCall)
+            assertTrue(legacyScopeCall.contains("exclusive lock on payment ledger table"), "Legacy codegraph_audit alias must work")
+            val parsedLegacyScope = json.parseToJsonElement(legacyScopeCall).jsonObject
+            val legacyScopeText = parsedLegacyScope["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.content ?: ""
+            val legacyScopeData = json.parseToJsonElement(legacyScopeText).jsonObject
+            val scopeDeprecation = legacyScopeData["_deprecation"]?.jsonObject
+            assertNotNull(scopeDeprecation, "Legacy codegraph_audit call must include _deprecation metadata")
+            assertEquals("codegraph_audit", scopeDeprecation["legacy_tool"]?.jsonPrimitive?.content)
+            assertEquals("atlas_audit", scopeDeprecation["preferred_tool"]?.jsonPrimitive?.content)
         } finally {
             server.close()
             PlatformFiles.delete(dbPath)
@@ -1422,7 +1456,7 @@ class EngineAndMcpTest {
                 put("action", "verify_architecture")
                 put("project", "p")
             }
-            val auditRes = server.callTool("codegraph_audit", auditArgs)
+            val auditRes = server.callTool("atlas_audit", auditArgs)
             val auditData = auditRes["data"]?.jsonObject ?: auditRes
             assertTrue(auditData["passed"]?.jsonPrimitive?.boolean == true)
             val suggestionsArray = auditData["description_suggestions"]?.jsonArray
@@ -1436,7 +1470,7 @@ class EngineAndMcpTest {
                 put("project", "p")
                 put("description_mode", "off")
             }
-            val auditOffRes = server.callTool("codegraph_audit", auditOffArgs)
+            val auditOffRes = server.callTool("atlas_audit", auditOffArgs)
             val auditOffData = auditOffRes["data"]?.jsonObject ?: auditOffRes
             val suggestionsOffArray = auditOffData["description_suggestions"]?.jsonArray
                 ?: auditOffData["descriptionSuggestions"]?.jsonArray
@@ -1449,7 +1483,7 @@ class EngineAndMcpTest {
                 put("project", "p")
                 put("description_mode", "domain-only")
             }
-            val checkRes = server.callTool("codegraph_audit", checkArgs)
+            val checkRes = server.callTool("atlas_audit", checkArgs)
             val checkData = checkRes["data"]?.jsonObject ?: checkRes
             assertEquals("domain-only", checkData["mode"]?.jsonPrimitive?.content)
             assertEquals(1, checkData["total_suggestions"]?.jsonPrimitive?.int)
@@ -1756,12 +1790,12 @@ class EngineAndMcpTest {
         val server = CodeGraphMcpServer(workspaceRoot = "/tmp", customDbPath = testDb)
         try {
             val tools = server.toolDefinitions()
-            val queryTool = tools.first { it["name"]?.jsonPrimitive?.content == "codegraph_query" }
+            val queryTool = tools.first { it["name"]?.jsonPrimitive?.content == "atlas_query" }
             val queryProps = queryTool["inputSchema"]?.jsonObject?.get("properties")?.jsonObject
             assertNotNull(queryProps)
             assertTrue(queryProps.containsKey("limit"), "querySchema must contain limit")
 
-            val auditTool = tools.first { it["name"]?.jsonPrimitive?.content == "codegraph_audit" }
+            val auditTool = tools.first { it["name"]?.jsonPrimitive?.content == "atlas_audit" }
             val auditProps = auditTool["inputSchema"]?.jsonObject?.get("properties")?.jsonObject
             assertNotNull(auditProps)
             assertTrue(auditProps.containsKey("limit"), "auditSchema must contain limit")
@@ -1955,6 +1989,145 @@ class EngineAndMcpTest {
                 result.details.any { it.contains("exit code 1") },
                 "Failed test log must report exit code 1 (decoded), not 256. Details: ${result.details}"
             )
+        } finally {
+            PlatformFiles.deleteRecursively(tmpDir)
+        }
+    }
+
+    @Test
+    fun testToolMigrationEngineScanAndMigrate() {
+        val pid = getpid()
+        val tmpDir = "/tmp/test_migration_engine_$pid"
+        PlatformFiles.mkdirs(tmpDir)
+        try {
+            val mdFile = "$tmpDir/plan.md"
+            val ktFile = "$tmpDir/Task.kt"
+            PlatformFiles.writeText(
+                mdFile,
+                """
+                # Plan
+                Run `codegraph_query` to find symbols.
+                Run `codegraph_audit` to verify scope.
+                """.trimIndent()
+            )
+            PlatformFiles.writeText(
+                ktFile,
+                """
+                // Call codegraph_query for callers
+                val cmd = "codegraph_query"
+                """.trimIndent()
+            )
+
+            // 1. Dry run
+            val dryReport = ToolMigrationEngine.scanAndMigrate(tmpDir, apply = false)
+            assertEquals(4, dryReport.totalOccurrences)
+            assertEquals(2, dryReport.filesAffected)
+            assertFalse(dryReport.applied)
+
+            // Content remains unmodified
+            assertTrue(PlatformFiles.readText(mdFile).contains("codegraph_query"))
+            assertTrue(PlatformFiles.readText(mdFile).contains("codegraph_audit"))
+            assertTrue(PlatformFiles.readText(ktFile).contains("codegraph_query"))
+
+            // 2. Apply migration
+            val applyReport = ToolMigrationEngine.scanAndMigrate(tmpDir, apply = true)
+            assertEquals(4, applyReport.totalOccurrences)
+            assertEquals(2, applyReport.filesAffected)
+            assertTrue(applyReport.applied)
+
+            // Content migrated
+            val mdContent = PlatformFiles.readText(mdFile)
+            val ktContent = PlatformFiles.readText(ktFile)
+            assertFalse(mdContent.contains("codegraph_query"))
+            assertFalse(mdContent.contains("codegraph_audit"))
+            assertTrue(mdContent.contains("atlas_query"))
+            assertTrue(mdContent.contains("atlas_audit"))
+            assertFalse(ktContent.contains("codegraph_query"))
+            assertTrue(ktContent.contains("atlas_query"))
+
+            // 3. Rescan is clean
+            val cleanReport = ToolMigrationEngine.scanAndMigrate(tmpDir, apply = false)
+            assertEquals(0, cleanReport.totalOccurrences)
+            assertEquals(0, cleanReport.filesAffected)
+        } finally {
+            PlatformFiles.deleteRecursively(tmpDir)
+        }
+    }
+
+    @Test
+    fun testCliMigrateToolsAndAuditFlag() {
+        val pid = getpid()
+        val tmpDir = "/tmp/test_migration_cli_$pid"
+        PlatformFiles.mkdirs(tmpDir)
+        try {
+            val planFile = "$tmpDir/workflow.md"
+            PlatformFiles.writeText(planFile, "Step 1: invoke codegraph_query\nStep 2: invoke codegraph_audit\n")
+
+            // Dry-run via CLI returns exit code 1 because unmigrated occurrences found
+            val dryCode = CodeGraphCli.run(arrayOf("migrate-tools", "--path", tmpDir))
+            assertEquals(1, dryCode, "migrate-tools dry-run must return 1 when unmigrated occurrences exist")
+
+            // audit --legacy-tools returns 1
+            val auditCode = CodeGraphCli.run(arrayOf("audit", "--legacy-tools", "--path", tmpDir))
+            assertEquals(1, auditCode, "audit --legacy-tools must return 1 when deprecated tool calls exist")
+
+            // Apply via CLI returns exit code 0
+            val applyCode = CodeGraphCli.run(arrayOf("migrate-tools", "--path", tmpDir, "--apply"))
+            assertEquals(0, applyCode, "migrate-tools with --apply must return 0")
+
+            // audit --legacy-tools now returns 0
+            val cleanAuditCode = CodeGraphCli.run(arrayOf("audit", "--legacy-tools", "--path", tmpDir))
+            assertEquals(0, cleanAuditCode, "audit --legacy-tools must pass (0) when all legacy calls are migrated")
+
+            val migratedContent = PlatformFiles.readText(planFile)
+            assertTrue(migratedContent.contains("atlas_query"))
+            assertTrue(migratedContent.contains("atlas_audit"))
+            assertFalse(migratedContent.contains("codegraph_query"))
+            assertFalse(migratedContent.contains("codegraph_audit"))
+        } finally {
+            PlatformFiles.deleteRecursively(tmpDir)
+        }
+    }
+
+    @Test
+    fun testMcpMigrateToolsAction() {
+        val pid = getpid()
+        val tmpDir = "/tmp/test_migration_mcp_$pid"
+        PlatformFiles.mkdirs(tmpDir)
+        try {
+            val planFile = "$tmpDir/test_mcp.md"
+            PlatformFiles.writeText(planFile, "Use codegraph_query for blast radius.\n")
+
+            val server = CodeGraphMcpServer(workspaceRoot = tmpDir)
+            try {
+                // Call atlas_audit with action=migrate_tools (dry-run)
+                val dryCall = server.processJsonRpcMessage(
+                    """{"jsonrpc":"2.0","id":2001,"method":"tools/call","params":{"name":"atlas_audit","arguments":{"project":"test_p","action":"migrate_tools","path":"$tmpDir","apply":false}}}"""
+                )
+                assertNotNull(dryCall)
+                val parsedDry = json.parseToJsonElement(dryCall).jsonObject
+                val dryText = parsedDry["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.content ?: ""
+                val dryData = json.parseToJsonElement(dryText).jsonObject
+                assertEquals(1, dryData["totalOccurrences"]?.jsonPrimitive?.int)
+                assertFalse(dryData["applied"]?.jsonPrimitive?.boolean ?: true)
+
+                // Call atlas_audit with action=migrate_tools (apply=true)
+                val applyCall = server.processJsonRpcMessage(
+                    """{"jsonrpc":"2.0","id":2002,"method":"tools/call","params":{"name":"atlas_audit","arguments":{"project":"test_p","action":"migrate_tools","path":"$tmpDir","apply":true}}}"""
+                )
+                assertNotNull(applyCall)
+                val parsedApply = json.parseToJsonElement(applyCall).jsonObject
+                val applyText = parsedApply["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.content ?: ""
+                val applyData = json.parseToJsonElement(applyText).jsonObject
+                assertEquals(1, applyData["totalOccurrences"]?.jsonPrimitive?.int)
+                assertTrue(applyData["applied"]?.jsonPrimitive?.boolean ?: false)
+
+                val updated = PlatformFiles.readText(planFile)
+                assertTrue(updated.contains("atlas_query"))
+                assertFalse(updated.contains("codegraph_query"))
+            } finally {
+                server.close()
+            }
         } finally {
             PlatformFiles.deleteRecursively(tmpDir)
         }

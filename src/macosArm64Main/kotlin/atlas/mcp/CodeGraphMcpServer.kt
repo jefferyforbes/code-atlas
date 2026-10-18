@@ -9,6 +9,7 @@ import atlas.engine.ComplexityDoctorEngine
 import atlas.engine.ComposeStabilityEngine
 import atlas.engine.FigmaDesignAuditor
 import atlas.engine.ScopeSynthesizer
+import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkMemoryStore
 import atlas.engine.WorkspaceIndexer
 import atlas.extract.UrlTargetResolver
@@ -179,6 +180,7 @@ class CodeGraphMcpServer(
                         add("verify_remediation")
                         add("audit_complexity")
                         add("complexity_doctor")
+                        add("migrate_tools")
                     }
                     put("description", "Audit, synthesis, Compose compliance, complexity audit, learning, or indexing action to execute.")
                 }
@@ -345,12 +347,12 @@ class CodeGraphMcpServer(
 
         return listOf(
             buildJsonObject {
-                put("name", "codegraph_query")
+                put("name", "atlas_query")
                 put("description", "Query indexed polyglot AST symbols, callers, callees, blast radius, Compose stability, or live source slices.")
                 put("inputSchema", querySchema)
             },
             buildJsonObject {
-                put("name", "codegraph_audit")
+                put("name", "atlas_audit")
                 put("description", "Audit architectural layers, Compose Gate 1 compliance, Doctor fixes, or synthesize 3D scopes.")
                 put("inputSchema", auditSchema)
             },
@@ -425,12 +427,26 @@ class CodeGraphMcpServer(
 
     private fun callToolDirect(name: String, arguments: JsonObject): JsonObject {
         val project = arguments["project"]?.jsonPrimitive?.content ?: "organisation"
-        val payload = when (name) {
-            "codegraph_query", "atlas_query" -> handleQuery(arguments)
-            "codegraph_audit", "atlas_audit" -> handleAudit(arguments)
+        val rawPayload = when (name) {
+            "atlas_query", "codegraph_query" -> handleQuery(arguments)
+            "atlas_audit", "codegraph_audit" -> handleAudit(arguments)
             "figma_audit" -> handleFigmaAudit(arguments)
             "figma_scope" -> handleFigmaScope(arguments)
             else -> throw IllegalArgumentException("Unknown MCP tool: $name")
+        }
+        val payload = if (name == "codegraph_query" || name == "codegraph_audit") {
+            val preferred = if (name == "codegraph_query") "atlas_query" else "atlas_audit"
+            buildJsonObject {
+                putJsonObject("_deprecation") {
+                    put("deprecated", true)
+                    put("legacy_tool", name)
+                    put("preferred_tool", preferred)
+                    put("message", "Tool '$name' is deprecated and has been renamed to '$preferred'. Please update tool calls to '$preferred'.")
+                }
+                rawPayload.forEach { (k, v) -> put(k, v) }
+            }
+        } else {
+            rawPayload
         }
         return enforceSpillover(project, payload)
     }
@@ -598,7 +614,7 @@ class CodeGraphMcpServer(
                     }
                 }
             }
-            else -> throw IllegalArgumentException("Unsupported codegraph_query action: $action")
+            else -> throw IllegalArgumentException("Unsupported atlas_query action: $action")
         }
     }
 
@@ -799,9 +815,22 @@ class CodeGraphMcpServer(
                 }
                 json.encodeToJsonElement(report).jsonObject
             }
+            "migrate_tools", "check_legacy_tools" -> {
+                val apply = args["apply"]?.jsonPrimitive?.booleanOrNull ?: false
+                val scanPaths = if (targets.isNotEmpty()) {
+                    targets
+                } else {
+                    val p = args["path"]?.jsonPrimitive?.contentOrNull
+                        ?: args["file_path"]?.jsonPrimitive?.contentOrNull
+                        ?: workspaceRoot
+                    listOf(p)
+                }
+                val report = ToolMigrationEngine.scanAndMigrate(scanPaths, apply = apply)
+                json.encodeToJsonElement(report).jsonObject
+            }
             "figma_audit" -> handleFigmaAudit(args)
             "figma_scope" -> handleFigmaScope(args)
-            else -> throw IllegalArgumentException("Unsupported codegraph_audit action: $action")
+            else -> throw IllegalArgumentException("Unsupported atlas_audit action: $action")
         }
     }
 
