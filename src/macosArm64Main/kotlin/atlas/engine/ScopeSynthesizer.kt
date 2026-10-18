@@ -31,7 +31,7 @@ class ScopeSynthesizer(private val store: SqliteGraphStore) {
                             store.getNodesForFile(projectId, codeLink.filePathSuffix)
                         }
                         else -> {
-                            listOfNotNull(store.getNode(projectId, cleanTarget))
+                            store.resolveNodesByUrlOrRoute(projectId, cleanTarget)
                         }
                     }
                 }

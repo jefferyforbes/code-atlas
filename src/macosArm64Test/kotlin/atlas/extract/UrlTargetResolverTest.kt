@@ -172,6 +172,7 @@ class UrlTargetResolverTest {
             )
             val fullFigmaUrl = "https://www.figma.com/design/abcFigmaKey123/Checkout-Design?node-id=304-335&t=abcd"
             assertEquals("CheckoutHeader", store.queryFigmaNodeById(fullFigmaUrl, "304-335")?.name)
+            assertEquals(1, store.findFigmaShortestPath(fullFigmaUrl, "304-335", "304-335").size)
             val auditor = FigmaDesignAuditor(store)
             assertEquals(fileKey, auditor.audit(fullFigmaUrl).fileKey)
             assertEquals(1, auditor.synthesizeFigmaScope("acme", fullFigmaUrl, emptyList()).scopedNodesCount)
@@ -181,4 +182,51 @@ class UrlTargetResolverTest {
             rmdir(tmpDir)
         }
     }
+
+    @Test
+    fun testExtractCodeRoutesAndEndpointGraphSynthesis() {
+        val source = """
+            package com.acme
+            // Commented out URL https://commented.example.com/api/v1/ignored and route "/api/v1/commented"
+            const val ORDERS_BASE_URL = "https://orders.internal.service/api/v1/orders"
+            interface OrderApiClient {
+                @GET("/api/v1/orders/{id}")
+                suspend fun fetchOrder(id: String): String
+            }
+            fun registerRoutes() {
+                get("/api/v1/orders/{orderId}") {
+                    val upstream = client.get("https://billing.internal.service/v2/invoices")
+                }
+            }
+        """.trimIndent()
+        val masked = source.lines().joinToString("\n") { line ->
+            if (line.trimStart().startsWith("//")) " ".repeat(line.length) else line
+        }
+        val extracted = UrlTargetResolver.extractCodeRoutesAndUrls(source, masked, "kotlin")
+        val canonicals = extracted.map { it.canonicalRouteOrUrl }.toSet()
+        assertTrue("/api/v1/orders/{param}" in canonicals)
+        assertTrue("https://orders.internal.service/api/v1/orders" in canonicals)
+        assertTrue("https://billing.internal.service/v2/invoices" in canonicals)
+        assertFalse(canonicals.any { it.contains("ignored") || it.contains("commented") })
+
+        val tmpDir = "/tmp/atlas_pr4_test_${getpid()}_${Random.nextInt(100000, 999999)}"
+        PlatformFiles.mkdirs("$tmpDir/src/main/kotlin/com/acme")
+        val store = SqliteGraphStore("$tmpDir/atlas.db")
+        try {
+            PlatformFiles.writeText("$tmpDir/src/main/kotlin/com/acme/Orders.kt", source)
+            WorkspaceIndexer(tmpDir, store).indexWorkspace("acme")
+            val epNode = store.getNode("acme", "/api/v1/orders/999")
+            assertNotNull(epNode, "Expected canonical endpoint node for /api/v1/orders/999")
+            assertEquals("endpoint", epNode.kind)
+            assertEquals("/api/v1/orders/{param}", epNode.name)
+            val resolved = store.resolveNodesByUrlOrRoute("acme", "/api/v1/orders/999")
+            assertTrue(resolved.any { it.name == "fetchOrder" })
+            assertTrue(resolved.any { it.name == "registerRoutes" })
+        } finally {
+            store.close()
+            for (f in PlatformFiles.listFilesRecursively(tmpDir)) PlatformFiles.delete(f)
+            rmdir(tmpDir)
+        }
+    }
 }
+

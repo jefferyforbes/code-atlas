@@ -523,12 +523,14 @@ class SqliteGraphStore(val dbPath: String) {
                     var insertedCount = 0
                     for (edge in edges) {
                         if (edge.edgeType == "CONTAINS") continue
-                        val targetSym = if (edge.targetNodeId.startsWith("sym:")) {
-                            edge.targetNodeId
-                        } else if (!edge.targetNodeId.startsWith("$projectId:")) {
-                            "sym:${edge.targetNodeId}"
-                        } else {
-                            continue
+                        val targetSym = when {
+                            edge.targetNodeId.startsWith("sym:") -> edge.targetNodeId
+                            edge.targetNodeId.startsWith("$projectId:endpoint#") ||
+                                edge.targetNodeId.startsWith("$projectId:url_ref#") ||
+                                edge.targetNodeId.startsWith("endpoint#") ||
+                                edge.targetNodeId.startsWith("url_ref#") -> edge.targetNodeId
+                            !edge.targetNodeId.startsWith("$projectId:") -> "sym:${edge.targetNodeId}"
+                            else -> continue
                         }
                         insStmt.reset()
                         insStmt.clearBindings()
@@ -591,7 +593,14 @@ class SqliteGraphStore(val dbPath: String) {
                 val confidence = stmt.columnDouble(5)
                 val provenance = stmt.columnString(6)
                 val lineNumber = stmt.columnInt(7)
-                val normalizedTarget = if (targetSym.startsWith("sym:")) targetSym else "sym:$targetSym"
+                val normalizedTarget = when {
+                    targetSym.startsWith("sym:") ||
+                        targetSym.startsWith("$projId:endpoint#") ||
+                        targetSym.startsWith("$projId:url_ref#") ||
+                        targetSym.startsWith("endpoint#") ||
+                        targetSym.startsWith("url_ref#") -> targetSym
+                    else -> "sym:$targetSym"
+                }
                 val finalEdgeId = rawEdgeId.ifEmpty {
                     "$sourceNodeId:${edgeType.lowercase()}:${normalizedTarget.removePrefix("sym:")}:$lineNumber"
                 }
@@ -663,7 +672,7 @@ class SqliteGraphStore(val dbPath: String) {
             """
             DELETE FROM edges
             WHERE project_id = ?
-              AND edge_type NOT IN ('PLAN_SCOPES_FILE', 'WIKILINK_REFS', 'CODE_SPAN_REFS');
+              AND edge_type NOT IN ('PLAN_SCOPES_FILE', 'WIKILINK_REFS', 'CODE_SPAN_REFS', 'URL_REFS');
             """.trimIndent()
         )
         try {
@@ -672,6 +681,27 @@ class SqliteGraphStore(val dbPath: String) {
         } finally {
             stmt.close()
         }
+    }
+
+    fun ensureVirtualFileRecord(projectId: String, virtualRelPath: String = "__endpoints__"): String {
+        val fileId = "$projectId:$virtualRelPath"
+        val stmt = db.prepare(
+            """
+            INSERT OR IGNORE INTO files (
+                file_id, project_id, rel_path, language, module_id, source_set,
+                semiotic_layer, arch_layer, sha256, mtime, loc, top_level_decl_count
+            ) VALUES (?, ?, ?, 'virtual', 'endpoints', 'main', 'syntactic', 'interface', 'virtual', 0.0, 0, 0);
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, fileId)
+            stmt.bindString(2, projectId)
+            stmt.bindString(3, virtualRelPath)
+            stmt.step()
+        } finally {
+            stmt.close()
+        }
+        return fileId
     }
 
     fun upsertFileRecord(
@@ -946,6 +976,8 @@ class SqliteGraphStore(val dbPath: String) {
                         OR (
                           target_node_id NOT LIKE 'vault_ref#%'
                           AND target_node_id NOT LIKE '%:vault_ref#%'
+                          AND target_node_id NOT LIKE 'url_ref#%'
+                          AND target_node_id NOT LIKE '%:url_ref#%'
                           AND target_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
                         )
                       );
@@ -1031,6 +1063,33 @@ class SqliteGraphStore(val dbPath: String) {
                 sweepOrphanEdges.bindString(2, projectId)
                 sweepOrphanEdges.bindString(3, projectId)
                 sweepOrphanEdges.step()
+
+                val selectOrphanEndpoints = scope.prepare(
+                    """
+                    SELECT node_id FROM nodes
+                    WHERE project_id = ?
+                      AND kind = 'endpoint'
+                      AND file_id = ?
+                      AND node_id NOT IN (SELECT target_node_id FROM edges WHERE project_id = ?)
+                      AND node_id NOT IN (SELECT source_node_id FROM edges WHERE project_id = ?);
+                    """.trimIndent()
+                )
+                selectOrphanEndpoints.bindString(1, projectId)
+                selectOrphanEndpoints.bindString(2, "$projectId:__endpoints__")
+                selectOrphanEndpoints.bindString(3, projectId)
+                selectOrphanEndpoints.bindString(4, projectId)
+                val orphanEpIds = mutableListOf<String>()
+                while (selectOrphanEndpoints.step()) {
+                    orphanEpIds.add(selectOrphanEndpoints.columnString(0))
+                }
+                if (orphanEpIds.isNotEmpty()) {
+                    val delEpNode = scope.prepare("DELETE FROM nodes WHERE node_id = ?;")
+                    for (epId in orphanEpIds) {
+                        delFts.reset(); delFts.clearBindings(); delFts.bindString(1, epId); delFts.step()
+                        delVocab.reset(); delVocab.clearBindings(); delVocab.bindString(1, epId); delVocab.step()
+                        delEpNode.reset(); delEpNode.clearBindings(); delEpNode.bindString(1, epId); delEpNode.step()
+                    }
+                }
 
                 recomputeDegrees(projectId)
             } finally {
@@ -1135,6 +1194,30 @@ class SqliteGraphStore(val dbPath: String) {
             val fileNodes = getNodesForFile(projectId, codeLink.filePathSuffix)
             return fileNodes.firstOrNull { it.kind !in setOf("file", "file_scope", "module") }
                 ?: fileNodes.firstOrNull()
+        }
+
+        if (UrlTargetResolver.isHttpRouteCandidate(target, hasExplicitRouteCall = false)) {
+            val canonRoute = UrlTargetResolver.normalizeRouteTemplate(target)
+            val epNodeId = "$projectId:endpoint#$canonRoute"
+            val epStmt = db.prepare(
+                """
+                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                       is_test_double, in_degree, out_degree, description, is_top_level,
+                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+                FROM nodes
+                WHERE project_id = ? AND (node_id = ? OR name = ?)
+                LIMIT 1;
+                """.trimIndent()
+            )
+            try {
+                epStmt.bindString(1, projectId)
+                epStmt.bindString(2, epNodeId)
+                epStmt.bindString(3, canonRoute)
+                if (epStmt.step()) return rowToNode(epStmt)
+            } finally {
+                epStmt.close()
+            }
         }
 
         val escapedTarget = target
@@ -1562,7 +1645,7 @@ class SqliteGraphStore(val dbPath: String) {
                    is_test_double, in_degree, out_degree, description, is_top_level,
                    cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
             FROM nodes
-            WHERE project_id = ? AND kind NOT IN ('file', 'module', 'plan_contract', 'obsidian_note')
+            WHERE project_id = ? AND kind NOT IN ('file', 'file_scope', 'module', 'plan_contract', 'obsidian_note', 'endpoint', 'url_ref')
             ORDER BY (in_degree * 2 + out_degree) DESC, in_degree DESC
             LIMIT ?;
             """.trimIndent()
@@ -1578,6 +1661,95 @@ class SqliteGraphStore(val dbPath: String) {
             stmt.close()
         }
         return results
+    }
+
+    fun resolveNodesByUrlOrRoute(projectId: String, rawUrlOrRoute: String, limit: Int = 25): List<GraphNode> {
+        val trimmed = rawUrlOrRoute.trim().trim('\'', '"')
+        if (trimmed.isEmpty()) return emptyList()
+
+        val codeLink = UrlTargetResolver.parseCodeLocationUrl(trimmed)
+        if (codeLink != null) {
+            return if (codeLink.startLine != null || codeLink.symbolFragment != null) {
+                listOfNotNull(getNode(projectId, trimmed))
+            } else {
+                getNodesForFile(projectId, codeLink.filePathSuffix)
+            }
+        }
+
+        val matchedNodes = LinkedHashMap<String, GraphNode>()
+        val canonRoute = if (UrlTargetResolver.isHttpRouteCandidate(trimmed, hasExplicitRouteCall = true) || trimmed.startsWith("/")) {
+            UrlTargetResolver.normalizeRouteTemplate(trimmed)
+        } else {
+            val pathFromUrl = UrlTargetResolver.extractPathFromHttpUrl(trimmed)
+            if (pathFromUrl != null && UrlTargetResolver.isHttpRouteCandidate(pathFromUrl, hasExplicitRouteCall = false)) {
+                UrlTargetResolver.normalizeRouteTemplate(pathFromUrl)
+            } else null
+        }
+
+        if (canonRoute != null) {
+            val epNodeId = "$projectId:endpoint#$canonRoute"
+            getNode(projectId, epNodeId)?.let { matchedNodes[it.nodeId] = it }
+            val escRoute = canonRoute.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            val epStmt = db.prepare(
+                """
+                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                       is_test_double, in_degree, out_degree, description, is_top_level,
+                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+                FROM nodes
+                WHERE project_id = ? AND kind = 'endpoint'
+                  AND (node_id = ? OR name = ? OR name LIKE ? ESCAPE '\')
+                ORDER BY (name = ?) DESC, in_degree DESC
+                LIMIT ?;
+                """.trimIndent()
+            )
+            try {
+                epStmt.bindString(1, projectId)
+                epStmt.bindString(2, epNodeId)
+                epStmt.bindString(3, canonRoute)
+                epStmt.bindString(4, "%$escRoute%")
+                epStmt.bindString(5, canonRoute)
+                epStmt.bindInt(6, limit)
+                while (epStmt.step()) {
+                    val n = rowToNode(epStmt)
+                    matchedNodes[n.nodeId] = n
+                }
+            } finally {
+                epStmt.close()
+            }
+        }
+
+        val canonUrl = UrlTargetResolver.normalizeExternalUrl(trimmed)
+        val escUrl = canonUrl.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val edgeStmt = db.prepare(
+            """
+            SELECT DISTINCT n.node_id, n.project_id, n.file_id, n.name, n.qualified_name, n.kind, n.signature,
+                            n.start_line, n.end_line, n.module_id, n.source_set, n.semiotic_layer, n.arch_layer,
+                            n.is_test_double, n.in_degree, n.out_degree, n.description, n.is_top_level,
+                            n.cyclomatic_complexity, n.cognitive_complexity, n.max_nesting_depth, n.complexity_score
+            FROM edges e
+            JOIN nodes n ON n.node_id = e.source_node_id AND n.project_id = e.project_id
+            WHERE e.project_id = ?
+              AND e.edge_type IN ('EXPOSES_ENDPOINT', 'CALLS_ENDPOINT', 'URL_REFS')
+              AND (e.target_node_id = ? OR e.target_node_id = ? OR e.target_node_id LIKE ? ESCAPE '\')
+            LIMIT ?;
+            """.trimIndent()
+        )
+        try {
+            edgeStmt.bindString(1, projectId)
+            edgeStmt.bindString(2, if (canonRoute != null) "$projectId:endpoint#$canonRoute" else "$projectId:url_ref#$canonUrl")
+            edgeStmt.bindString(3, "$projectId:url_ref#$canonUrl")
+            edgeStmt.bindString(4, "%$escUrl%")
+            edgeStmt.bindInt(5, limit)
+            while (edgeStmt.step()) {
+                val n = rowToNode(edgeStmt)
+                matchedNodes[n.nodeId] = n
+            }
+        } finally {
+            edgeStmt.close()
+        }
+
+        return matchedNodes.values.toList()
     }
 
     fun getShortestPath(
@@ -2655,6 +2827,10 @@ class SqliteGraphStore(val dbPath: String) {
         destTarget: String,
         depth: Int = 10
     ): List<FigmaNode> {
+        val fileKey = UrlTargetResolver.parseFigmaUrl(fileKey)?.fileKey
+            ?: UrlTargetResolver.parseFigmaUrl(sourceTarget)?.fileKey
+            ?: UrlTargetResolver.parseFigmaUrl(destTarget)?.fileKey
+            ?: fileKey
         val srcNode = queryFigmaNodeById(fileKey, sourceTarget)
             ?: queryFigmaNodesByName(fileKey, sourceTarget).firstOrNull()
         val dstNode = queryFigmaNodeById(fileKey, destTarget)
