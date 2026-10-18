@@ -115,6 +115,7 @@ class CodeGraphMcpServer(
                         add("compose_cascade")
                         add("compose_blame")
                         add("complexity")
+                        add("url")
                     }
                     put("description", "Query operation to execute against the indexed polyglot code, Compose stability, complexity, and vault graph.")
                 }
@@ -433,6 +434,7 @@ class CodeGraphMcpServer(
                     put("results", json.encodeToJsonElement(matches))
                 }
             }
+            "url" -> return store.searchByUrl(project, target)
             "compose_summary", "compose_cascade", "compose_blame" -> {
                 val mappedAction = action.removePrefix("compose_")
                 val res = composeEngine.queryCompose(
