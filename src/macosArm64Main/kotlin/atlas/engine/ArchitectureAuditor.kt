@@ -327,12 +327,28 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
      */
     fun detectDeadCode(projectId: String, pathPrefixes: List<String>? = null): List<GraphNode> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
-        val entrypointNames = setOf("main", "init", "run", "invoke", "Companion", "onCreate", "onStart")
+        val entrypointNames = setOf(
+            "main", "init", "run", "invoke", "Companion", "onCreate", "onStart",
+            "close", "dispose", "destroy", "shutdown", "stop"
+        )
         val excludedKinds = setOf(
             "module", "markdown_doc", "markdown_note", "plan_contract", "expect_decl", "actual_decl",
-            "typealias", "namespace", "variable", "composable", "file_scope", "endpoint", "url_ref"
+            "typealias", "namespace", "variable", "composable", "file_scope", "endpoint", "url_ref", "enum"
         )
-        return store.listNodes(projectId)
+        val allNodes = store.listNodes(projectId)
+        val containersWithActiveChildren = mutableSetOf<String>()
+        val nodesByFile = allNodes.groupBy { it.fileId }
+        for ((_, fileNodes) in nodesByFile) {
+            val containers = fileNodes.filter { it.kind in setOf("class", "object", "interface", "struct") }
+            val activeChildren = fileNodes.filter { it.inDegree > 0 }
+            for (container in containers) {
+                if (activeChildren.any { it.nodeId != container.nodeId && it.startLine >= container.startLine && it.endLine <= container.endLine }) {
+                    containersWithActiveChildren.add(container.nodeId)
+                }
+            }
+        }
+
+        return allNodes
             .filter { node ->
                 val relFile = node.fileId.substringAfter(':')
                 matchesAnyPrefix(relFile, prefixes) &&
@@ -348,7 +364,8 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
                     !node.name.endsWith("Server") &&
                     !node.signature.contains("override ") &&
                     !node.signature.contains("@Preview") &&
-                    !node.signature.contains("@Test")
+                    !node.signature.contains("@Test") &&
+                    node.nodeId !in containersWithActiveChildren
             }
             .sortedWith(compareBy({ it.fileId }, { it.startLine }))
     }

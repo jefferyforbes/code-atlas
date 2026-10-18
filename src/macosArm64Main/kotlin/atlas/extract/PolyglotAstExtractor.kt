@@ -80,6 +80,64 @@ class PolyglotAstExtractor {
             "override", "private", "protected", "public", "internal", "operator", "infix", "tailrec", "external"
         )
 
+        private val LOCAL_VAL_COLON_RE = Regex("""(?:val|var)\s+([A-Za-z0-9_$]+)\s*:\s*([A-Z][A-Za-z0-9_$.]*)""")
+        private val LOCAL_VAL_ASSIGN_RE = Regex("""(?:val|var)\s+([A-Za-z0-9_$]+)\s*=\s*([A-Z][A-Za-z0-9_$.]*)\s*(?:<[^>]+>)?\s*\(""")
+        private val KOTLIN_PRIMITIVE_TYPES = setOf(
+            "String", "Int", "Long", "Double", "Float", "Boolean", "Byte", "Short", "Char", "Any", "Unit", "Nothing"
+        )
+        private val COMMON_CONSTRUCTORS = setOf(
+            "listOf", "setOf", "mapOf", "mutableListOf", "mutableSetOf", "mutableMapOf",
+            "buildList", "buildSet", "buildMap", "emptyList", "emptySet", "emptyMap",
+            "arrayOf", "byteArrayOf", "intArrayOf"
+        )
+
+        private fun scoreReceiverCandidate(
+            cand: GraphNode,
+            receiver: String?,
+            srcFileId: String,
+            srcNode: GraphNode?
+        ): Double {
+            if (receiver.isNullOrBlank()) return 0.0
+            val clean = receiver.trim()
+
+            val candSimpleName = cand.fileId.substringAfterLast('/').substringBeforeLast('.')
+            val qn = cand.qualifiedName
+
+            if (clean == "this") {
+                return if (cand.fileId == srcFileId) 100.0 else 0.0
+            }
+            if (clean == "super") {
+                return if (cand.fileId == srcFileId) 90.0 else 0.0
+            }
+
+            if (candSimpleName.equals(clean, ignoreCase = true) ||
+                qn.contains(".$clean.", ignoreCase = true) ||
+                qn.endsWith(".$clean", ignoreCase = true) ||
+                cand.name.equals(clean, ignoreCase = true)
+            ) {
+                return 100.0
+            }
+
+            if (qn.contains(clean, ignoreCase = true) || cand.signature.contains(clean, ignoreCase = true)) {
+                return 60.0
+            }
+
+            val recTokens = NameSegmentTokenizer.tokenize(clean).toSet()
+            if (recTokens.isEmpty()) return 0.0
+
+            val candTokens = (
+                NameSegmentTokenizer.tokenize(candSimpleName) +
+                NameSegmentTokenizer.tokenize(cand.name) +
+                NameSegmentTokenizer.tokenize(qn)
+            ).toSet()
+
+            val matchCount = recTokens.count { it in candTokens }
+            if (matchCount == 0) return 0.0
+
+            val fraction = matchCount.toDouble() / recTokens.size
+            return fraction * 40.0
+        }
+
         fun supportedLanguage(ext: String): String = EXT_MAP[ext.lowercase()] ?: ""
 
         /**
@@ -1539,22 +1597,63 @@ class PolyglotAstExtractor {
                 }
             }
 
+            val fileVarTypes = mutableMapOf<String, String>()
+            for (m in LOCAL_VAL_COLON_RE.findAll(maskedText)) {
+                val varName = m.groupValues[1]
+                val typeName = m.groupValues[2].substringAfterLast('.').substringBefore('<').trim()
+                if (varName.isNotEmpty() && typeName.isNotEmpty() && typeName !in KOTLIN_PRIMITIVE_TYPES) {
+                    fileVarTypes[varName] = typeName
+                }
+            }
+            for (m in LOCAL_VAL_ASSIGN_RE.findAll(maskedText)) {
+                val varName = m.groupValues[1]
+                val typeName = m.groupValues[2].substringAfterLast('.').substringBefore('<').trim()
+                if (varName.isNotEmpty() && typeName.isNotEmpty() && typeName !in KOTLIN_PRIMITIVE_TYPES && typeName !in COMMON_CONSTRUCTORS) {
+                    fileVarTypes[varName] = typeName
+                }
+            }
+
             for (node in nodes) {
                 val childRanges = nodes
                     .filter { it.nodeId != node.nodeId && it.startLine >= node.startLine && it.endLine <= node.endLine && (it.startLine > node.startLine || it.endLine < node.endLine) }
                     .map { it.startLine..it.endLine }
                 val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
+                val localReceiverTypes = fileVarTypes.toMutableMap()
+                for (m in LOCAL_VAL_COLON_RE.findAll(body)) {
+                    val varName = m.groupValues[1]
+                    val typeName = m.groupValues[2].substringAfterLast('.').substringBefore('<').trim()
+                    if (varName.isNotEmpty() && typeName.isNotEmpty() && typeName !in KOTLIN_PRIMITIVE_TYPES) {
+                        localReceiverTypes[varName] = typeName
+                    }
+                }
+                for (m in LOCAL_VAL_ASSIGN_RE.findAll(body)) {
+                    val varName = m.groupValues[1]
+                    val typeName = m.groupValues[2].substringAfterLast('.').substringBefore('<').trim()
+                    if (varName.isNotEmpty() && typeName.isNotEmpty() && typeName !in KOTLIN_PRIMITIVE_TYPES && typeName !in COMMON_CONSTRUCTORS) {
+                        localReceiverTypes[varName] = typeName
+                    }
+                }
                 val seenCallees = mutableSetOf<String>()
                 for (callMatch in CALL_RE.findAll(body)) {
                     val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
-                    val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
+                    val resolvedType = if (!receiver.isNullOrEmpty()) localReceiverTypes[receiver] else null
+                    val targetSym = when {
+                        resolvedType != null -> "$resolvedType.$callee"
+                        !receiver.isNullOrEmpty() -> "$receiver.$callee"
+                        else -> callee
+                    }
+                    val provenance = when {
+                        resolvedType != null -> "CALL_RECEIVER:$receiver;type=$resolvedType"
+                        !receiver.isNullOrEmpty() -> "CALL_RECEIVER:$receiver"
+                        else -> "INFERRED_CALL"
+                    }
                     if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
                             edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
                             sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
-                            provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
+                            provenance = provenance, confidence = 0.85, lineNumber = callLine
                         ))
                     }
                 }
@@ -2277,30 +2376,33 @@ class PolyglotAstExtractor {
                             val srcModId = srcNode?.moduleId ?: ""
                             val fileImports = importsByFile[srcFileId] ?: emptySet()
 
-                            // Priority 0: Candidate matching receiver in qualifiedName, file name, or signature
-                            val receiverMatches = if (receiver != null) {
-                                candidates.filter { cand ->
-                                    cand.qualifiedName.contains(receiver, ignoreCase = true) ||
-                                        cand.fileId.substringAfterLast('/').substringBeforeLast('.').equals(receiver, ignoreCase = true) ||
-                                        cand.signature.contains(receiver, ignoreCase = true)
-                                }
+                            // Priority 0: Candidate matching receiver via semantic receiver scoring
+                            val scoredCandidates = if (receiver != null) {
+                                candidates.map { cand -> cand to scoreReceiverCandidate(cand, receiver, srcFileId, srcNode) }
                             } else emptyList()
 
+                            val maxReceiverScore = scoredCandidates.maxOfOrNull { it.second } ?: 0.0
+                            val receiverMatches = if (maxReceiverScore > 0.0) {
+                                scoredCandidates.filter { it.second == maxReceiverScore }.map { it.first }
+                            } else emptyList()
+
+                            val candidatePool = if (receiverMatches.isNotEmpty()) receiverMatches else candidates
+
                             // Priority 1: Same file
-                            val sameFile = candidates.filter { it.fileId == srcFileId }
+                            val sameFile = candidatePool.filter { it.fileId == srcFileId }
                             // Priority 2: Explicitly imported symbol or wildcard package
-                            val imported = candidates.filter { cand ->
+                            val imported = candidatePool.filter { cand ->
                                 val qn = cand.qualifiedName
                                 val pkg = qn.substringBeforeLast('.', "")
                                 qn in fileImports || "$pkg.*" in fileImports || fileImports.any { imp -> qn.endsWith(".$imp") }
                             }
                             // Priority 3: Same module
-                            val sameModule = if (srcModId.isNotEmpty()) candidates.filter { it.moduleId == srcModId } else emptyList()
+                            val sameModule = if (srcModId.isNotEmpty()) candidatePool.filter { it.moduleId == srcModId } else emptyList()
 
                             val chosenPool = when {
-                                receiverMatches.isNotEmpty() -> receiverMatches
                                 sameFile.isNotEmpty() -> sameFile
                                 imported.isNotEmpty() -> imported
+                                receiverMatches.isNotEmpty() -> receiverMatches
                                 sameModule.isNotEmpty() -> sameModule
                                 else -> candidates
                             }
@@ -2310,7 +2412,7 @@ class PolyglotAstExtractor {
                             ).first()
                             targetId = chosen.nodeId
 
-                            if (chosenPool.size > 1 && edge.provenance == "INFERRED_CALL") {
+                            if (chosenPool.size > 1 && edge.provenance.startsWith("INFERRED_CALL")) {
                                 conf = minOf(conf, 0.75)
                             }
                         }

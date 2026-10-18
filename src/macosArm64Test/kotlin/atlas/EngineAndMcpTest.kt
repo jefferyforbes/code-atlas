@@ -934,6 +934,101 @@ class EngineAndMcpTest {
     }
 
     @Test
+    fun testDeadCodeExcludesContainersWithActiveChildrenLifecycleMethodsAndEnums() {
+        val dbPath = "/tmp/test_dead_code_containers_${getpid()}_${time(null)}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val containerNode = GraphNode(
+                nodeId = "p:src/Extractor.kt#ComplexityExtractor",
+                projectId = "p",
+                fileId = "p:src/Extractor.kt",
+                name = "ComplexityExtractor",
+                qualifiedName = "atlas.extract.ComplexityExtractor",
+                kind = "object",
+                startLine = 10,
+                endLine = 50,
+                inDegree = 0
+            )
+            val activeChildFn = GraphNode(
+                nodeId = "p:src/Extractor.kt#calculate",
+                projectId = "p",
+                fileId = "p:src/Extractor.kt",
+                name = "calculate",
+                qualifiedName = "atlas.extract.ComplexityExtractor.calculate",
+                kind = "function",
+                startLine = 15,
+                endLine = 30,
+                inDegree = 3
+            )
+            val closeLifecycleFn = GraphNode(
+                nodeId = "p:src/Store.kt#close",
+                projectId = "p",
+                fileId = "p:src/Store.kt",
+                name = "close",
+                qualifiedName = "atlas.db.Store.close",
+                kind = "function",
+                startLine = 20,
+                endLine = 25,
+                inDegree = 0
+            )
+            val enumTypeNode = GraphNode(
+                nodeId = "p:src/Extractor.kt#ScopeType",
+                projectId = "p",
+                fileId = "p:src/Extractor.kt",
+                name = "ScopeType",
+                qualifiedName = "atlas.extract.ComplexityExtractor.ScopeType",
+                kind = "enum",
+                startLine = 35,
+                endLine = 45,
+                inDegree = 0
+            )
+            val trulyDeadFn = GraphNode(
+                nodeId = "p:src/Dead.kt#deadHelper",
+                projectId = "p",
+                fileId = "p:src/Dead.kt",
+                name = "deadHelper",
+                qualifiedName = "atlas.dead.deadHelper",
+                kind = "function",
+                startLine = 5,
+                endLine = 10,
+                inDegree = 0
+            )
+
+            val callerNode = GraphNode(
+                nodeId = "p:src/Store.kt#main",
+                projectId = "p",
+                fileId = "p:src/Store.kt",
+                name = "main",
+                qualifiedName = "atlas.db.Store.main",
+                kind = "function",
+                startLine = 1,
+                endLine = 5
+            )
+            val callEdge = GraphEdge(
+                edgeId = "edge1",
+                projectId = "p",
+                sourceNodeId = callerNode.nodeId,
+                targetNodeId = activeChildFn.nodeId,
+                edgeType = "CALLS"
+            )
+
+            store.upsertNodesAndEdges(
+                projectId = "p",
+                nodes = listOf(containerNode, activeChildFn, closeLifecycleFn, enumTypeNode, trulyDeadFn, callerNode),
+                edges = listOf(callEdge)
+            )
+            val auditor = ArchitectureAuditor(store)
+            val deadNodes = auditor.detectDeadCode("p")
+            assertEquals(1, deadNodes.size, "Only truly dead helper should be flagged")
+            assertEquals("deadHelper", deadNodes[0].name)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
     fun testVaultPlanBridgeGlobAndDirectoryScoping() {
         val nodeService = GraphNode(
             nodeId = "p:src/services/deep/PaymentService.kt#PaymentService",
