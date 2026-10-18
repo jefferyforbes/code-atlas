@@ -6,7 +6,8 @@
 
 *Sub-15ms Cold-Start &middot; Ahead-Of-Time Native Binary &middot; Zero Runtime Dependencies &middot; Model Context Protocol (MCP)*
 
-[![Version](https://img.shields.io/badge/version-0.5.1-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
+[![Version](https://img.shields.io/badge/version-0.5.2-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
+[![Changelog](https://img.shields.io/badge/changelog-Keep%20a%20Changelog-orange.svg)](CHANGELOG.md)
 [![Kotlin](https://img.shields.io/badge/Kotlin_Native-2.2.0-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/native-overview.html)
 [![macOS](https://img.shields.io/badge/macOS-Apple_Silicon_(arm64)-000000?logo=apple&logoColor=white)](https://apple.com)
 [![Startup](https://img.shields.io/badge/Cold_Start-~3ms-00C853)](https://github.com/jefferyforbes/code-atlas)
@@ -338,6 +339,12 @@ Atlas is backed by an automated native test suite executing 210+ assertions acro
 # Run all native unit and integration tests
 ./gradlew macosArm64Test
 ```
+
+---
+
+## Releases & Changelog
+
+Atlas follows [Semantic Versioning](https://semver.org/). See [CHANGELOG.md](CHANGELOG.md) for full release notes, migration guides, and historical version comparisons.
 
 ---
 
