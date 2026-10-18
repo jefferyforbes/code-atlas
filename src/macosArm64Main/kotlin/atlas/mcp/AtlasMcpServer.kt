@@ -391,7 +391,7 @@ class AtlasMcpServer(
         traceLogPath = traceLogPath
     )
 
-    private fun resolveServerForProject(projectId: String): AtlasMcpServer {
+    fun resolveServerForProject(projectId: String): AtlasMcpServer {
         if (customDbPath != null || projectId.isEmpty()) return this
         val localStats = store.getStats(projectId)
         if (localStats.files > 0) return this

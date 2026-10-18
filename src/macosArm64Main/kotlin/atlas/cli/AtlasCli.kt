@@ -162,7 +162,9 @@ class AtlasCli {
                     arg == "--workspace" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> workspace = argv[++idx]
                     arg == "--db" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> customDb = argv[++idx]
                     arg == "--cache-profile" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> cacheProfile = argv[++idx]
-                    (arg == "--target" || arg == "--from") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> target = argv[++idx]
+                    (arg == "--target" || arg == "--from" || arg == "--symbol") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> target = argv[++idx]
+                    arg.startsWith("--target=") -> target = arg.substringAfter('=')
+                    arg.startsWith("--symbol=") -> target = arg.substringAfter('=')
                     arg == "--url" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> {
                         target = argv[++idx]
                         action = "url"
@@ -349,7 +351,12 @@ class AtlasCli {
                         return 0
                     }
                     "index" -> {
-                        val res = server.indexWorkspace(project, subpaths = if (paths.isNotEmpty()) paths else null, force = forceIndex)
+                        val effectiveServer = server.resolveServerForProject(project)
+                        val expandedPaths = paths.map {
+                            val home = PlatformFiles.userHome()
+                            if (it.startsWith("~")) it.replaceFirst("~", home) else it
+                        }
+                        val res = effectiveServer.indexWorkspace(project, subpaths = if (expandedPaths.isNotEmpty()) expandedPaths else null, force = forceIndex)
                         val text = if (isJson) {
                             jsonPretty.encodeToString(res)
                         } else {

@@ -1234,6 +1234,9 @@ class SqliteGraphStore(val dbPath: String) {
             .replace("\\", "\\\\")
             .replace("%", "\\%")
             .replace("_", "\\_")
+        val cleanHashTarget = target.removePrefix("#")
+        val tagTarget = "tag#$cleanHashTarget"
+        val projTarget = "$projectId:$target"
         val stmt = db.prepare(
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
@@ -1243,13 +1246,17 @@ class SqliteGraphStore(val dbPath: String) {
             FROM nodes
             WHERE project_id = ? AND (
                 node_id = ?
+                OR node_id = ?
                 OR qualified_name = ?
+                OR qualified_name = ?
+                OR name = ?
                 OR name = ?
                 OR file_id = ?
                 OR file_id LIKE ? ESCAPE '\'
                 OR file_id LIKE ? ESCAPE '\'
             )
             ORDER BY (node_id = ?) DESC,
+                     (node_id = ?) DESC,
                      (qualified_name = ?) DESC,
                      (name = ?) DESC,
                      in_degree DESC
@@ -1259,14 +1266,18 @@ class SqliteGraphStore(val dbPath: String) {
         try {
             stmt.bindString(1, projectId)
             stmt.bindString(2, target)
-            stmt.bindString(3, target)
+            stmt.bindString(3, projTarget)
             stmt.bindString(4, target)
-            stmt.bindString(5, target)
-            stmt.bindString(6, "%:$escapedTarget")
-            stmt.bindString(7, "%/$escapedTarget")
+            stmt.bindString(5, tagTarget)
+            stmt.bindString(6, target)
+            stmt.bindString(7, cleanHashTarget)
             stmt.bindString(8, target)
-            stmt.bindString(9, target)
-            stmt.bindString(10, target)
+            stmt.bindString(9, "%:$escapedTarget")
+            stmt.bindString(10, "%/$escapedTarget")
+            stmt.bindString(11, target)
+            stmt.bindString(12, projTarget)
+            stmt.bindString(13, target)
+            stmt.bindString(14, target)
             if (stmt.step()) {
                 return rowToNode(stmt)
             }
@@ -1655,7 +1666,7 @@ class SqliteGraphStore(val dbPath: String) {
                    is_test_double, in_degree, out_degree, description, is_top_level,
                    cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
             FROM nodes
-            WHERE project_id = ? AND kind NOT IN ('file', 'file_scope', 'module', 'plan_contract', 'obsidian_note', 'endpoint', 'url_ref')
+            WHERE project_id = ? AND kind NOT IN ('file', 'file_scope', 'module', 'plan_contract', 'obsidian_note', 'endpoint', 'url_ref', 'tag', 'skill', 'slash_command')
             ORDER BY (in_degree * 2 + out_degree) DESC, in_degree DESC
             LIMIT ?;
             """.trimIndent()

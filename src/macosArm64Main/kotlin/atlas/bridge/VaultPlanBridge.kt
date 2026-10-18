@@ -23,27 +23,52 @@ object VaultPlanBridge {
         val fileId = "$projectId:$relPath"
         val normRel = relPath.replace('\\', '/')
         val isPlan = normRel.startsWith("plans/") || normRel.contains("/plans/")
+        val isSkill = normRel.endsWith("/SKILL.md", ignoreCase = true) ||
+            normRel.equals("SKILL.md", ignoreCase = true) ||
+            (normRel.contains("skills/") && !normRel.contains("/references/") && !normRel.contains("/scripts/") && !normRel.contains("/examples/") && !normRel.contains("/resources/") && (normRel.endsWith("/SKILL.md", ignoreCase = true) || (normRel.endsWith(".md") && !normRel.substringAfter("skills/").contains("/"))))
 
         val stem = normRel.substringAfterLast('/').substringBeforeLast('.')
-        val nodeKind = if (isPlan) "plan_contract" else "obsidian_note"
-        val docNodeId = "$fileId#$stem"
+        val nodeKind = if (isSkill) "skill" else if (isPlan) "plan_contract" else "obsidian_note"
+
+        val nameVal = extractFrontmatterScalar(markdownText, "name")
+        val skillName = if (isSkill) {
+            nameVal.ifEmpty { normRel.substringBeforeLast("/SKILL.md", "").substringAfterLast('/').ifEmpty { stem } }
+        } else ""
+
+        val docNodeId = if (isSkill) "$projectId:skill#$skillName" else "$fileId#$stem"
 
         val statusVal = extractFrontmatterScalar(markdownText, "status").ifEmpty { "active" }
+        val descVal = extractFrontmatterScalar(markdownText, "description")
         val docNode = GraphNode(
             nodeId = docNodeId,
             projectId = projectId,
             fileId = fileId,
-            name = stem,
-            qualifiedName = normRel,
+            name = if (isSkill) skillName else stem,
+            qualifiedName = if (isSkill) "skill#$skillName" else normRel,
             kind = nodeKind,
-            signature = "$nodeKind ($statusVal): $normRel",
+            signature = when {
+                isSkill -> if (descVal.isNotEmpty()) "skill ($skillName): $descVal" else "skill: $normRel"
+                else -> "$nodeKind ($statusVal): $normRel"
+            },
             startLine = 1,
             endLine = markdownText.lines().size.coerceAtLeast(1),
-            moduleId = if (isPlan) "plans" else "vault",
+            moduleId = when {
+                isSkill -> "skills"
+                isPlan -> "plans"
+                else -> "vault"
+            },
             sourceSet = "docs",
-            semioticLayer = if (isPlan) "syntactic" else "semantic",
-            archLayer = "infrastructure"
+            semioticLayer = when {
+                isSkill -> "pragmatic"
+                isPlan -> "syntactic"
+                else -> "semantic"
+            },
+            archLayer = "infrastructure",
+            description = if (isSkill && descVal.isNotEmpty()) descVal else null
         )
+
+        val docNodes = mutableListOf<GraphNode>()
+        docNodes.add(docNode)
 
         val byName = mutableMapOf<String, GraphNode>()
         val byRelFile = mutableMapOf<String, MutableList<GraphNode>>()
@@ -58,6 +83,115 @@ object VaultPlanBridge {
 
         val edges = mutableListOf<GraphEdge>()
         val seenEdges = mutableSetOf<String>()
+
+        val fmTags = extractFrontmatterTags(markdownText)
+        val inlineTags = extractSanitizedInlineTags(markdownText)
+        val allTags = mutableMapOf<String, Int>()
+        for (t in fmTags) {
+            if (t.isNotEmpty() && !allTags.containsKey(t)) {
+                allTags[t] = 1
+            }
+        }
+        for ((t, lineNo) in inlineTags) {
+            if (t.isNotEmpty() && !allTags.containsKey(t)) {
+                allTags[t] = lineNo
+            }
+        }
+
+        for ((cleanTag, lineNo) in allTags) {
+            val tagNodeId = "$projectId:tag#$cleanTag"
+            docNodes.add(
+                GraphNode(
+                    nodeId = tagNodeId,
+                    projectId = projectId,
+                    fileId = fileId,
+                    name = cleanTag,
+                    qualifiedName = "tag#$cleanTag",
+                    kind = "tag",
+                    signature = "tag: #$cleanTag",
+                    startLine = lineNo,
+                    endLine = lineNo,
+                    moduleId = "tags",
+                    sourceSet = "docs",
+                    semioticLayer = "semantic",
+                    archLayer = "infrastructure"
+                )
+            )
+            val eid = "$docNodeId:tagged:$tagNodeId"
+            if (seenEdges.add(eid)) {
+                edges.add(
+                    GraphEdge(
+                        edgeId = eid,
+                        projectId = projectId,
+                        sourceNodeId = docNodeId,
+                        targetNodeId = tagNodeId,
+                        edgeType = "TAGGED_WITH",
+                        provenance = "EXTRACTED_TAG",
+                        confidence = 1.0,
+                        lineNumber = lineNo
+                    )
+                )
+            }
+        }
+
+        if (isSkill) {
+            val cmdSet = mutableSetOf<String>()
+            if (skillName.isNotEmpty()) {
+                cmdSet.add(skillName)
+            }
+            if (descVal.isNotEmpty()) {
+                val slashInDesc = Regex("""(?:^|[^a-zA-Z0-9_./])\/([a-z][a-z0-9_-]{1,30})""")
+                for (m in slashInDesc.findAll(descVal)) {
+                    cmdSet.add(m.groupValues[1])
+                }
+            }
+            val triggeredPattern = Regex("""(?i)triggered(?:\s+natively)?\s+by\s+([^.\n]+)""")
+            for (match in triggeredPattern.findAll(markdownText)) {
+                val textClause = match.groupValues[1]
+                val slashInClause = Regex("""\/([a-z][a-z0-9_-]{1,30})""")
+                for (m in slashInClause.findAll(textClause)) {
+                    cmdSet.add(m.groupValues[1])
+                }
+            }
+
+            for (cmd in cmdSet) {
+                val cleanCmd = cmd.removePrefix("/").trim()
+                if (cleanCmd.isEmpty()) continue
+                val cmdNodeId = "$projectId:cmd#/$cleanCmd"
+                docNodes.add(
+                    GraphNode(
+                        nodeId = cmdNodeId,
+                        projectId = projectId,
+                        fileId = fileId,
+                        name = "/$cleanCmd",
+                        qualifiedName = "cmd#/$cleanCmd",
+                        kind = "slash_command",
+                        signature = "slash_command: /$cleanCmd",
+                        startLine = 1,
+                        endLine = 1,
+                        moduleId = "skills",
+                        sourceSet = "docs",
+                        semioticLayer = "pragmatic",
+                        archLayer = "infrastructure"
+                    )
+                )
+                val eid = "$cmdNodeId:triggers:$docNodeId"
+                if (seenEdges.add(eid)) {
+                    edges.add(
+                        GraphEdge(
+                            edgeId = eid,
+                            projectId = projectId,
+                            sourceNodeId = cmdNodeId,
+                            targetNodeId = docNodeId,
+                            edgeType = "TRIGGERS_SKILL",
+                            provenance = "EXTRACTED_COMMAND",
+                            confidence = 1.0,
+                            lineNumber = 1
+                        )
+                    )
+                }
+            }
+        }
 
         if (isPlan) {
             val scopedFiles = extractScopedFiles(markdownText)
@@ -154,6 +288,41 @@ object VaultPlanBridge {
             if (rawLink.isEmpty() || rawLink.startsWith("#")) continue
             val lineNo = markdownText.take(match.range.first).count { it == '\n' } + 1
 
+            val isSkillRef = rawLink.endsWith("/SKILL.md", ignoreCase = true) ||
+                rawLink.equals("SKILL.md", ignoreCase = true) ||
+                (rawLink.contains("/skills/") && rawLink.endsWith(".md"))
+
+            if (isSkillRef) {
+                val targetSkillName = when {
+                    rawLink.endsWith("/SKILL.md", ignoreCase = true) -> {
+                        rawLink.substringBeforeLast("/SKILL.md").substringAfterLast('/')
+                    }
+                    rawLink.equals("SKILL.md", ignoreCase = true) -> ""
+                    else -> {
+                        rawLink.substringAfterLast('/').substringBeforeLast('.')
+                    }
+                }
+                if (targetSkillName.isNotEmpty() && targetSkillName != skillName) {
+                    val targetSkillId = "$projectId:skill#$targetSkillName"
+                    val eid = "$docNodeId:depends:$targetSkillId:$lineNo"
+                    if (seenEdges.add(eid)) {
+                        edges.add(
+                            GraphEdge(
+                                edgeId = eid,
+                                projectId = projectId,
+                                sourceNodeId = docNodeId,
+                                targetNodeId = targetSkillId,
+                                edgeType = "DEPENDS_ON_SKILL",
+                                provenance = "EXTRACTED_SKILL_DEP",
+                                confidence = 1.0,
+                                lineNumber = lineNo
+                            )
+                        )
+                    }
+                    continue
+                }
+            }
+
             val codeLoc = UrlTargetResolver.parseCodeLocationUrl(rawLink)
             if (codeLoc != null) {
                 val fileCandidates = byRelFile[codeLoc.filePathSuffix]
@@ -203,7 +372,7 @@ object VaultPlanBridge {
             }
         }
 
-        return Pair(listOf(docNode), edges)
+        return Pair(docNodes, edges)
     }
 
     fun extractFrontmatterScalar(markdownText: String, key: String): String {
@@ -278,5 +447,112 @@ object VaultPlanBridge {
         }
         sb.append('$')
         return Regex(sb.toString())
+    }
+
+    fun extractFrontmatterTags(markdownText: String): List<String> {
+        if (!markdownText.startsWith("---")) return emptyList()
+        val parts = markdownText.split("---", limit = 3)
+        if (parts.size < 3) return emptyList()
+        val fmLines = parts[1].lines()
+        val tags = mutableListOf<String>()
+        var inTagsBlock = false
+        for (line in fmLines) {
+            val trimmed = line.trim()
+            val indent = line.length - line.trimStart().length
+            if (indent == 0 && (trimmed.startsWith("tags:") || trimmed.startsWith("tag:"))) {
+                val afterColon = trimmed.substringAfter(':').trim()
+                if (afterColon.startsWith("[") && afterColon.endsWith("]")) {
+                    val items = afterColon.removePrefix("[").removeSuffix("]").split(',')
+                    for (item in items) {
+                        val clean = item.trim().trim('\'', '"').removePrefix("#")
+                        if (clean.isNotEmpty()) tags.add(clean)
+                    }
+                    inTagsBlock = false
+                    continue
+                } else if (afterColon.isNotEmpty()) {
+                    val items = afterColon.trim('\'', '"').split(',')
+                    for (item in items) {
+                        val clean = item.trim().trim('\'', '"').removePrefix("#")
+                        if (clean.isNotEmpty()) tags.add(clean)
+                    }
+                    inTagsBlock = false
+                    continue
+                }
+                inTagsBlock = true
+                continue
+            }
+            if (indent == 0 && trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+                inTagsBlock = false
+            }
+            if (inTagsBlock && (indent == 2 || indent == 4) && trimmed.startsWith("- ")) {
+                val clean = trimmed.removePrefix("- ").trim().trim('\'', '"').removePrefix("#")
+                if (clean.isNotEmpty()) tags.add(clean)
+            }
+        }
+        return tags.distinct()
+    }
+
+    fun extractSanitizedInlineTags(markdownText: String): List<Pair<String, Int>> {
+        var text = markdownText
+        if (text.startsWith("---")) {
+            val endIdx = text.indexOf("\n---", 3)
+            if (endIdx != -1) {
+                val fmLines = text.substring(0, endIdx + 4).count { it == '\n' }
+                val remainder = text.substring(endIdx + 4)
+                text = "\n".repeat(fmLines) + remainder
+            }
+        }
+
+        val codeFenceRe = Regex("""(?s)(```|~~~).*?\1""")
+        text = codeFenceRe.replace(text) { m ->
+            m.value.map { if (it == '\n') '\n' else ' ' }.joinToString("")
+        }
+
+        val inlineCodeRe = Regex("""`[^`\n]+`""")
+        text = inlineCodeRe.replace(text) { m ->
+            " ".repeat(m.value.length)
+        }
+
+        val htmlCommentRe = Regex("""(?s)<!--.*?-->""")
+        text = htmlCommentRe.replace(text) { m ->
+            m.value.map { if (it == '\n') '\n' else ' ' }.joinToString("")
+        }
+
+        val wikiRe = Regex("""\[\[[^\]]+\]\]""")
+        text = wikiRe.replace(text) { m -> " ".repeat(m.value.length) }
+
+        val mdLinkRe = Regex("""\[[^\]]*\]\([^)]+\)""")
+        text = mdLinkRe.replace(text) { m -> " ".repeat(m.value.length) }
+
+        val headingRe = Regex("""(?m)^[ \t]*#{1,6}\s+.*$""")
+        text = headingRe.replace(text) { m -> " ".repeat(m.value.length) }
+
+        val tagRe = Regex("""(?:^|[\s(.,;:!?'"\[\]{}])#([A-Za-z][A-Za-z0-9_/-]{1,60})""")
+        val results = mutableListOf<Pair<String, Int>>()
+
+        var currentLine = 1
+        var lastIdx = 0
+        for (match in tagRe.findAll(text)) {
+            val hashRelIdx = match.value.indexOf('#')
+            val hashIdx = match.range.first + hashRelIdx
+            currentLine += text.substring(lastIdx, hashIdx).count { it == '\n' }
+            lastIdx = hashIdx
+
+            val nextCharIdx = match.range.last + 1
+            if (nextCharIdx < text.length) {
+                val nextChar = text[nextCharIdx]
+                if (nextChar.isLetterOrDigit()) continue
+            }
+
+            val rawTag = match.groupValues[1].trimEnd('/', '-', '_')
+            if (rawTag.length < 2) continue
+
+            val isHex = (rawTag.length == 3 || rawTag.length == 6 || rawTag.length == 8) &&
+                rawTag.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+            if (isHex) continue
+
+            results.add(Pair(rawTag, currentLine))
+        }
+        return results
     }
 }

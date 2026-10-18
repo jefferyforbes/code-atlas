@@ -333,7 +333,8 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         )
         val excludedKinds = setOf(
             "module", "markdown_doc", "markdown_note", "plan_contract", "expect_decl", "actual_decl",
-            "typealias", "namespace", "variable", "composable", "file_scope", "endpoint", "url_ref", "enum"
+            "typealias", "namespace", "variable", "composable", "file_scope", "endpoint", "url_ref", "enum",
+            "tag", "skill", "slash_command", "obsidian_note"
         )
         val allNodes = store.listNodes(projectId)
         val containersWithActiveChildren = mutableSetOf<String>()

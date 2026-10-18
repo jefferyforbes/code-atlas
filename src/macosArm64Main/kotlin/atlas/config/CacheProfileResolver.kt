@@ -75,11 +75,28 @@ object CacheProfileResolver {
     fun resolveProjectWorkspace(defaultWorkspace: String, projectId: String): String {
         if (projectId.isEmpty()) return defaultWorkspace
         val home = PlatformFiles.userHome()
+        val normalizedTarget = projectId.lowercase().replace("_", "-").trim()
+
+        if (normalizedTarget == "agent-os" || normalizedTarget == "agent" || normalizedTarget == "agents") {
+            val agentConfig = "$home/.gemini/config"
+            if (PlatformFiles.isDirectory(agentConfig)) return agentConfig
+        }
+
+        if (normalizedTarget == "vault") {
+            val candidates = listOf(
+                "$home/vault",
+                "$home/Documents/vault",
+                "$home/Obsidian/vault",
+                "$home/Documents/Obsidian Vault"
+            )
+            val found = candidates.firstOrNull { PlatformFiles.isDirectory(it) }
+            if (found != null) return found
+        }
+
         val devRoot = "$home/Development"
         if (!PlatformFiles.isDirectory(devRoot)) return defaultWorkspace
 
         val entries = PlatformFiles.listDirectory(devRoot)
-        val normalizedTarget = projectId.lowercase().replace("_", "-").trim()
         val matchedEntry = entries.firstOrNull { entry ->
             entry.lowercase().replace("_", "-") == normalizedTarget
         } ?: return defaultWorkspace
