@@ -827,22 +827,8 @@ class SqliteGraphStore(val dbPath: String) {
         val updateDeg = db.prepare(
             """
             UPDATE nodes SET
-                in_degree = COALESCE((
-                    SELECT inc.cnt FROM (
-                        SELECT target_node_id, COUNT(*) AS cnt
-                        FROM edges
-                        WHERE project_id = ?
-                        GROUP BY target_node_id
-                    ) inc WHERE inc.target_node_id = nodes.node_id
-                ), 0),
-                out_degree = COALESCE((
-                    SELECT outc.cnt FROM (
-                        SELECT source_node_id, COUNT(*) AS cnt
-                        FROM edges
-                        WHERE project_id = ?
-                        GROUP BY source_node_id
-                    ) outc WHERE outc.source_node_id = nodes.node_id
-                ), 0)
+                in_degree = (SELECT COUNT(*) FROM edges WHERE project_id = ? AND target_node_id = nodes.node_id),
+                out_degree = (SELECT COUNT(*) FROM edges WHERE project_id = ? AND source_node_id = nodes.node_id)
             WHERE project_id = ?;
             """.trimIndent()
         )

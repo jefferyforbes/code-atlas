@@ -27,7 +27,7 @@ class PolyglotAstExtractor {
 
         private val SWIFT_IMP_RE = Regex("""^\s*(?:@\w+\s+)?(?:public\s+|internal\s+)?import\s+([a-zA-Z0-9_.]+)""", RegexOption.MULTILINE)
         private val SWIFT_DECL_RE = Regex(
-            """^(?<indent>[ \t]*)(?:(?:public|private|fileprivate|internal|open|final|actor|indirect|nonisolated|isolated)\s+)*""" +
+            """^(?<indent>[ \t]*)(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|fileprivate|internal|open|final|actor|indirect|nonisolated|isolated|override|static|mutating|class|convenience|required|lazy|weak|unowned)\s+)*""" +
             """(?<kw>struct|class|protocol|actor|enum|func|extension)\s+(?<name>[A-Za-z0-9_]+)""",
             RegexOption.MULTILINE
         )
@@ -35,6 +35,10 @@ class PolyglotAstExtractor {
         private val TS_IMP_RE = Regex("""import\s+(?:type\s+)?(?:(?:\{([^}]+)\})|([A-Za-z0-9_]+))\s+from\s+['"]([^'"]+)['"]""")
         private val TS_DECL_RE = Regex(
             """^(?<indent>[ \t]*)(?:export\s+)?(?:default\s+)?(?:async\s+)?(?<kw>class|interface|type|function|const\s+enum|enum|const|let|var)\s+(?<name>[A-Za-z0-9_]+)""",
+            RegexOption.MULTILINE
+        )
+        private val TS_METHOD_DECL_RE = Regex(
+            """^(?<indent>[ \t]+)(?:(?:public|private|protected|static|async|override|readonly|abstract)\s+)*(?:(?<getter>get|set)\s+)?(?<name>[A-Za-z0-9_$]+)\s*(?:<[^>]+>)?\s*\(""",
             RegexOption.MULTILINE
         )
 
@@ -478,6 +482,30 @@ class PolyglotAstExtractor {
                                         }
                                         if (source[i] == '\n') {
                                             out[i] = '\n'; i++; break
+                                        }
+                                        writeSpaceOrNewline(i)
+                                        i++
+                                    }
+                                } else if (source[i] == '`') {
+                                    out[i] = '`'
+                                    i++
+                                    var innerDepth = 0
+                                    while (i < n) {
+                                        if (source[i] == '\\' && i + 1 < n) {
+                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
+                                        }
+                                        if (source[i] == '$' && i + 1 < n && source[i + 1] == '{') {
+                                            out[i] = ' '; out[i + 1] = ' '; i += 2
+                                            innerDepth++
+                                            while (i < n && innerDepth > 0) {
+                                                if (source[i] == '{') { innerDepth++; out[i] = '{'; i++ }
+                                                else if (source[i] == '}') { innerDepth--; out[i] = if (innerDepth == 0) ' ' else '}'; i++ }
+                                                else { out[i] = source[i]; i++ }
+                                            }
+                                            continue
+                                        }
+                                        if (source[i] == '`') {
+                                            out[i] = '`'; i++; break
                                         }
                                         writeSpaceOrNewline(i)
                                         i++
@@ -1805,18 +1833,54 @@ class PolyglotAstExtractor {
                 }
             }
 
-            var topLevelCount = 0
+            data class TsDeclCandidate(
+                val rangeStart: Int,
+                val indent: String,
+                val kw: String,
+                val name: String,
+                val isMethod: Boolean
+            )
+
+            val declCandidates = mutableListOf<TsDeclCandidate>()
             for (match in TS_DECL_RE.findAll(maskedText)) {
                 val indent = match.groups["indent"]?.value ?: ""
                 val kw = match.groups["kw"]?.value ?: "class"
                 val name = match.groups["name"]?.value ?: continue
+                declCandidates.add(TsDeclCandidate(match.range.first, indent, kw, name, isMethod = false))
+            }
+            val tsMethodStopwords = setOf("if", "while", "for", "switch", "catch", "function", "return", "throw", "new", "typeof", "instanceof")
+            for (match in TS_METHOD_DECL_RE.findAll(maskedText)) {
+                val indent = match.groups["indent"]?.value ?: ""
+                val name = match.groups["name"]?.value ?: continue
+                if (name in tsMethodStopwords) continue
+                declCandidates.add(TsDeclCandidate(match.range.first, indent, "method", name, isMethod = true))
+            }
+            declCandidates.sortBy { it.rangeStart }
 
-                val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                val endLine = findBlockEndLine(lines, startLine, cleanLines)
+            var topLevelCount = 0
+            val seenStartOffsets = mutableSetOf<Int>()
+            for (candidate in declCandidates) {
+                if (!seenStartOffsets.add(candidate.rangeStart)) continue
+                val indent = candidate.indent
+                val kw = candidate.kw
+                val name = candidate.name
 
+                val startLine = maskedText.substring(0, candidate.rangeStart).count { it == '\n' } + 1
                 while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
                     scopeStack.removeAt(scopeStack.size - 1)
                 }
+
+                if (candidate.isMethod && scopeStack.isEmpty()) {
+                    continue
+                }
+
+                val hasBrace = (startLine - 1 until minOf(cleanLines.size, startLine + 3)).any { cleanLines[it].contains('{') }
+                val endLine = if (hasBrace) {
+                    findBlockEndLine(lines, startLine, cleanLines)
+                } else {
+                    startLine
+                }
+
                 val enclosingPrefix = scopeStack.joinToString(".") { it.name }
                 val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
                     Pair("$fileId#$enclosingPrefix.$name", "$relPath:$enclosingPrefix.$name")
@@ -1827,6 +1891,7 @@ class PolyglotAstExtractor {
                 val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
                 val declHeaderSlice = maskedLines.subList(startLine - 1, minOf(maskedLines.size, minOf(endLine, startLine + 2))).joinToString(" ")
                 val kind = when {
+                    candidate.isMethod -> "method"
                     kw == "function" -> "function"
                     kw in setOf("const", "let", "var") -> if (TS_ARROW_OR_FN_RE.containsMatchIn(declHeaderSlice)) "function" else "variable"
                     kw == "interface" -> "interface"
@@ -1835,7 +1900,7 @@ class PolyglotAstExtractor {
                     else -> "class"
                 }
 
-                val isTopLevel = indent.isEmpty() && scopeStack.isEmpty()
+                val isTopLevel = !candidate.isMethod && indent.isEmpty() && scopeStack.isEmpty()
                 if (!isTopLevel && kind == "variable") continue
                 if (isTopLevel && kind !in setOf("typealias", "variable")) topLevelCount++
                 val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
@@ -2234,8 +2299,13 @@ class PolyglotAstExtractor {
                 val indent = match.groups["indent"]?.value ?: ""
                 val kw = match.groups["kw"]?.value ?: "def"
                 val name = match.groups["name"]?.value ?: continue
-
-                if (name.startsWith("_")) continue
+                val isDunder = name.startsWith("__") && name.endsWith("__")
+                val isAllowedDunder = isDunder && name in setOf(
+                    "__init__", "__enter__", "__exit__", "__call__", "__str__", "__repr__",
+                    "__getitem__", "__setitem__", "__len__", "__iter__", "__next__", "__contains__",
+                    "__aenter__", "__aexit__", "__eq__", "__hash__"
+                )
+                if (name.startsWith("_") && !isAllowedDunder) continue
 
                 val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
                 val endLine = findPythonBlockEndLine(lines, maskedLines, startLine)
