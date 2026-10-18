@@ -6,7 +6,7 @@
 
 *Sub-15ms Cold-Start &middot; Ahead-Of-Time Native Binary &middot; Zero Runtime Dependencies &middot; Model Context Protocol (MCP)*
 
-[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
 [![Kotlin](https://img.shields.io/badge/Kotlin_Native-2.2.0-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/native-overview.html)
 [![macOS](https://img.shields.io/badge/macOS-Apple_Silicon_(arm64)-000000?logo=apple&logoColor=white)](https://apple.com)
 [![Startup](https://img.shields.io/badge/Cold_Start-~3ms-00C853)](https://github.com/jefferyforbes/code-atlas)
@@ -23,14 +23,20 @@ AI coding and design agents waste thousands of prompt tokens repeatedly reading,
 - *"What calls this function or instantiates this component?"*
 - *"If I change this interface or design token, what breaks downstream?"*
 - *"Is this Jetpack Compose composable restartable and skippable, or will it cause cascading recomposition loops?"*
-- *"Does this pull request violate Clean Architecture layers or design system invariants?"*
+- *"Does this pull request violate Clean Architecture layers, complexity limits, or design system invariants?"*
 - *"What files, modules, composable scopes, or canvas regions must be bounded so multiple agents do not collide?"*
+- *"What backend endpoint or Figma design does this URL or code reference link to?"*
 
-**Atlas** solves this by providing a **sub-15ms polyglot AST, Jetpack Compose stability, and design knowledge graph engine** in a single standalone ~3.0 MB binary. Compiled ahead-of-time (AOT) via Kotlin/Native (`macosArm64`), Atlas links directly against system `libsqlite3` (`WAL` + `FTS5` + `R*Tree` + `WITHOUT ROWID`), bypassing the Python virtualenv tax and JVM cold-start latency.
+**Atlas** solves this by providing a **sub-15ms polyglot AST, Jetpack Compose stability, complexity metrics, and design knowledge graph engine** in a single standalone ~3.0 MB binary. Compiled ahead-of-time (AOT) via Kotlin/Native (`macosArm64`), Atlas links directly against system `libsqlite3` (`WAL` + `FTS5` + `R*Tree` + `WITHOUT ROWID`), bypassing the Python virtualenv tax and JVM cold-start latency.
 
 - **v0.3.0 &middot; Figma Atlas (`atlas figma`)**: Indexes Figma document trees and W3C Design Tokens (DTCG), queries 2D spatial layouts via R*Tree bounding boxes, runs 12 deterministic SQL design audits, and synthesizes 3D Concurrency Scopes for design agents.
 - **v0.4.0 &middot; Jetpack Compose & KMP Stability (`atlas compose`)**: Analyzes Kotlin `@Composable` functions via single-pass AST tokenization, infers parameter stability across a 4-state join-semilattice (`STABLE < RUNTIME < UNCERTAIN < UNSTABLE`), evaluates 12 deterministic Compose rules, performs the Kotlin 2.0+ Strong Skipping Reality Check (`SILENT_WASTE` detection), runs write-site verified Compose Doctor remediation previews, detects unreferenced dead code (`atlas dead-code`), and enables path-scoped architecture auditing (`--paths`).
-- **Autonomous Architecture Remediation (`atlas fix`)**: Plans, verifies, and applies automated AST file-splitting diffs for `BOOST-003` Single Declaration Principle compliance, privatizes secondary declarations (`--make-private`), corrects layer classification inversions, and enforces test command rollback guards.
+- **v0.5.0 &middot; URL Knowledge Graph, Polyglot Complexity Engine & Autonomous Remediation**:
+  - **URL & Figma Deep-Link Knowledge Graph (`atlas query --url`)**: Unifies code, documentation, endpoints, and design into an interconnected graph. Automatically extracts polyglot HTTP routes (Spring, Ktor, Express, FastAPI, Flask) into canonical `ENDPOINT` nodes (`endpoint:<METHOD>:<path>`) with producer/consumer edges (`PRODUCES_ENDPOINT`, `CALLS_ENDPOINT`). Resolves Figma canvas deep links (`https://www.figma.com/design/.../?node-id=...`) to Figma nodes and code tokens. Resolves code location links (`file://...#L<line>`, GitHub/GitLab `#L<line>`) to innermost enclosing AST declaration/call spans. Maps Markdown docs and vault plans (`url_ref` edges). Supported via `--url <url>` and MCP `codegraph_query` (`action: "url"`).
+  - **Polyglot Code Complexity Engine (`atlas complexity`)**: Computes cyclomatic complexity, cognitive complexity, max nesting depth, and function length across Kotlin, Swift, TypeScript/JavaScript, Python, Rust, Go, and C++. Includes Gate 1 complexity audits (`atlas complexity audit`) and actionable doctor remediation prescriptions (`atlas complexity doctor`).
+  - **Autonomous Architecture Remediation Engine (`atlas fix`)**: Plans, verifies, and applies automated AST file-splitting diffs for `BOOST-003` Single Declaration Principle compliance, converts unreferenced secondary declarations to private (`--make-private`), corrects layer classification inversions, and verifies test-command rollback guards.
+  - **Top-Level Description Audit (`atlas audit --check-descriptions`)**: Extracts docstrings, KDoc, and JSDoc comments for top-level declarations, persisting coverage to SQLite with actionable suggestions.
+  - **Autonomous Compose Doctor Remediation (`atlas compose doctor --apply`)**: Automated remediation of Compose stability anti-patterns with write-site safety verification and batched Figma graph traversal.
 
 Whether invoked directly from your shell, embedded into git pre-commit hooks, or running as a background **Model Context Protocol (MCP)** server, Atlas provides deterministic codebase and design truth with minimal token consumption.
 
@@ -47,57 +53,65 @@ flowchart TD
         TS["TypeScript & JS (.ts, .tsx, .js)"]
         RUST["Rust (.rs)"]
         CPP["C++ (.cpp, .hpp)"]
+        ROUTES["Polyglot HTTP Routes<br/>(Ktor, Spring, Express, FastAPI, Flask)"]
         DOCS["Obsidian Notes & Plans (.md)"]
-        FIGMA["Figma Snapshots (.json, stdin)"]
+        FIGMA["Figma Snapshots & URLs<br/>(.json, deep links, stdin)"]
         DTCG["W3C DTCG Tokens (.json)"]
         COMPOSE_METRICS["Compose Metrics & Configs<br/>(stability_config.conf, *-composables.txt, @TraceRecomposition)"]
     end
 
     subgraph Engine["Atlas Native Core (AOT macosArm64)"]
         EXTRACT["Polyglot AST Extractor<br/>(Declarations, Calls, Imports, KMP Expect/Actual)"]
+        URL_RESOLVER["URL Target Resolver<br/>(Figma Deep Links, Code Spans, Polyglot Routes)"]
+        COMPLEXITY_EXTRACT["Polyglot Complexity Extractor<br/>(Cyclomatic, Cognitive, Nesting, LOC)"]
         COMPOSE_EXTRACT["Compose Stability Extractor<br/>(Dual-Mode AST, 4-State Join Lattice, 12-Bit Violation Mask)"]
         INDEXER["Workspace Indexer<br/>(Persistent Raw Edges, File Hash Caching, Path Scoping)"]
         MODULES["Gradle & Package Boundary Detector<br/>(Type-Safe Accessors, Projects, Modules)"]
-        BRIDGE["Vault & Plan Bridge<br/>(Wikilinks, Code Spans, Plan Scopes)"]
+        BRIDGE["Vault & Plan Bridge<br/>(Wikilinks, Code Spans, Plan Scopes, URL Refs)"]
         
         FIGMA_EXTRACT["Figma Snapshot Extractor<br/>(Vector Bloat Stripping ~85%, DTCG Token Ingestion)"]
         
-        STORE[("SQLite WAL + FTS5 + R*Tree + WITHOUT ROWID Engine<br/>• Code Nodes, Raw Edges & Symbol Graph<br/>• Compose Nodes, Params & Telemetry (WITHOUT ROWID)<br/>• Figma Nodes, Variables & Spatial R*Tree<br/>• FTS5 BM25 Virtual Index<br/>• Iterative FIFO BFS Path Finder")]
+        STORE[("SQLite WAL + FTS5 + R*Tree + WITHOUT ROWID Engine<br/>• Code Nodes, Raw Edges & Symbol Graph<br/>• Canonical ENDPOINT Nodes & URL Refs<br/>• Function Complexity Metrics & Scores<br/>• Compose Nodes, Params & Telemetry<br/>• Figma Nodes, Variables & Spatial R*Tree<br/>• FTS5 BM25 Virtual Index<br/>• Iterative FIFO BFS Path Finder")]
         
         SYNTH["3D Concurrency Scope Synthesizer<br/>(Code: Files, Modules, Architecture<br/>Figma: Spatial BBox, Components, Tokens<br/>Compose: Composable Functions, Shared Models, Locals)"]
-        AUDIT["Architecture Auditor<br/>(Clean Arch Inversions, BOOST-003, Dead Code Detection)"]
+        AUDIT["Architecture Auditor<br/>(Clean Arch Inversions, BOOST-003, Dead Code, Descriptions)"]
+        REMEDIATION["Architecture Remediation Engine<br/>(AST File-Splitting, --make-private, Verifier)"]
+        COMPLEXITY_DOCTOR["Complexity Doctor Engine<br/>(Gate 1 Thresholds, Hot-Spots, Refactoring Rx)"]
         COMPOSE_ENGINE["Compose Stability Engine<br/>(12-Rule Gate 1 Audit <=95.0, Reality Check, Write-Site Safe Doctor)"]
         FIGMA_AUDIT["Figma Design Auditor<br/>(12 Deterministic SQL Invariants, Gate 1 Maturity)"]
         MEMORY["Experiential Work Memory<br/>(30-Day Exponential Decay)"]
     end
 
     subgraph Interfaces["Zero-Token-Tax Interfaces"]
-        CLI["Out-of-Process CLI<br/>(atlas, atlas figma, atlas compose, atlas dead-code &middot; ≤400B Summary)"]
+        CLI["Out-of-Process CLI<br/>(atlas, atlas figma, atlas compose, atlas complexity, atlas fix &middot; ≤400B Summary)"]
         MCP["Stdio JSON-RPC 2.0 MCP Server<br/>(4 Compound Tools &middot; 32KB Disk Spillover &middot; Project Cache Auto-Resolution)"]
-        CI["Pre-Commit & CI Quality Gate<br/>(Exit Code 0/1 Architecture, Design & Compose Linters)"]
+        CI["Pre-Commit & CI Quality Gate<br/>(Exit Code 0/1 Architecture, Complexity, Design & Compose Linters)"]
     end
 
-    Inputs --> EXTRACT & COMPOSE_EXTRACT & MODULES & BRIDGE & FIGMA_EXTRACT & INDEXER
-    EXTRACT & COMPOSE_EXTRACT & MODULES & BRIDGE & FIGMA_EXTRACT & INDEXER --> STORE
-    STORE --> SYNTH & AUDIT & COMPOSE_ENGINE & FIGMA_AUDIT & MEMORY
-    SYNTH & AUDIT & COMPOSE_ENGINE & FIGMA_AUDIT & MEMORY --> CLI & MCP & CI
+    Inputs --> EXTRACT & URL_RESOLVER & COMPLEXITY_EXTRACT & COMPOSE_EXTRACT & MODULES & BRIDGE & FIGMA_EXTRACT & INDEXER
+    EXTRACT & URL_RESOLVER & COMPLEXITY_EXTRACT & COMPOSE_EXTRACT & MODULES & BRIDGE & FIGMA_EXTRACT & INDEXER --> STORE
+    STORE --> SYNTH & AUDIT & REMEDIATION & COMPLEXITY_DOCTOR & COMPOSE_ENGINE & FIGMA_AUDIT & MEMORY
+    SYNTH & AUDIT & REMEDIATION & COMPLEXITY_DOCTOR & COMPOSE_ENGINE & FIGMA_AUDIT & MEMORY --> CLI & MCP & CI
 ```
 
 ### Key Pillars
 
 1. **Polyglot AST Extraction**: Native AST tokenization for Kotlin (including `@Composable`, KMP `expect`/`actual` pairs), Swift, Python, TypeScript/JavaScript, Rust, and C++ with 0 LLM token cost.
-2. **Jetpack Compose & KMP Stability Engine (`atlas compose`)**: Single-pass comment/string-masked Kotlin AST extractor inferring `@Composable` skippability, parameter stability over a 4-state join-semilattice (`STABLE < RUNTIME < UNCERTAIN < UNSTABLE`), `stability_config.conf` glob matching, Compose Compiler report ingestion, and `@TraceRecomposition` runtime telemetry.
-3. **12 Deterministic Compose Invariant Audits**: Evaluates unstable parameters, unremembered state declarations, raw collections, mutable state parameters, uncollected flows, modifier order, slot lambda conventions, heavy recomposition allocations, repeated derived state, hardcoded UI strings, and Compose layer inversions.
-4. **Strong Skipping Reality Check & Compose Doctor**: Detects `SILENT_WASTE` where Strong Skipping marks composables skippable but unstable instance churn triggers silent recompositions. Compose Doctor produces prioritized, write-site verified (`MUTATES_PROPERTY` safe) `before`/`after` remediation diffs.
-5. **Workspace Indexer & Raw Edge Persistence**: Persists raw unresolved symbol edges (`raw_symbol_edges`) across incremental runs so unchanged callers automatically link to newly added callees (`BUG-01`), with in-memory file caching and no-op short-circuiting.
-6. **Dead Code Detection & Path-Scoped Audits**: Identifies unreferenced production declarations (`atlas dead-code`) and supports targeted path filtering (`--paths`) in `atlas audit` and MCP tools for fast PR-scoped verification.
-7. **Sub-5ms Graph Traversal**: Iterative FIFO Breadth-First Search (BFS) computes directed shortest paths, caller trees, callee cones, and blast radii across 15,000+ edges in milliseconds.
-8. **3D Concurrency Scope Synthesis**: Synthesizes exact 3D boundaries (`files`, `modules`, `architecture`, `composable_functions`, `shared_state_models`, `composition_locals`) for multi-agent orchestration (`/architect`, `/plan`, `/teamwork`), preventing merge collisions.
-9. **Figma Spatial AST & 2D R\*Tree Indexing**: Parses Figma document node trees, stores geometric bounds into an SQLite `rtree` virtual table, and executes spatial overlap / containment queries (`--bounds x1,x2,y1,y2`) in $<1$ ms.
-10. **Vector Bloat Stripping & W3C DTCG Token Ingestion**: Strips heavy SVG vector path and bezier payloads (~85% reduction) during ingestion, imports DTCG design token bundles, and resolves alias DAGs with cycle detection.
-11. **12 Deterministic SQL Design Invariant Audits**: Evaluates AutoLayout geometry, static containers, default 100px frame heights, accessibility touch targets ($\ge 48\times 48\,\text{dp}$), negative coordinates, child width amputation, zero emojis, unbound token ratios, detached gym specimens, 2D canvas topology, and WCAG AA contrast ratios.
-12. **Clean Architecture & `BOOST-003` Auditor**: Enforces Clean Architecture layer boundaries (flagging illegal Domain $\to$ UI or Domain $\to$ concrete Data references) and the Single Declaration Principle (Rule 6: at most 1 top-level declaration per production file).
-13. **Autonomous Architecture Remediation Engine (`atlas fix`)**: Synthesizes verified AST file-splitting diffs for `BOOST-003` Single Declaration Principle violations (extracting secondary declarations into dedicated files with preserved package headers, imports, annotations, and KDoc), converts unreferenced secondary declarations to private (`--make-private`), corrects layer classification inversions, and automatically re-indexes modified files with rollback protection on test suite failures.
+2. **URL & Figma Deep-Link Knowledge Graph (`atlas query --url`)**: Unifies code, documentation, endpoints, and design into an interconnected graph. Automatically extracts polyglot HTTP routes (Spring, Ktor, Express, FastAPI, Flask) into canonical `ENDPOINT` nodes (`endpoint:<METHOD>:<path>`) with producer/consumer edges (`PRODUCES_ENDPOINT`, `CALLS_ENDPOINT`). Resolves Figma canvas deep links (`https://www.figma.com/design/.../?node-id=...`) to Figma nodes and code tokens. Resolves code location links (`file://...#L<line>`, GitHub/GitLab `#L<line>`) to innermost enclosing AST declaration/call spans. Maps Markdown docs and vault plans (`url_ref` edges). Supported via `--url <url>` and MCP `codegraph_query` (`action: "url"`).
+3. **Polyglot Code Complexity Engine (`atlas complexity`)**: Extracts cyclomatic complexity, cognitive complexity, max nesting depth, and function length across Kotlin, Swift, TypeScript/JavaScript, Python, Rust, Go, and C++. Enforces Gate 1 complexity thresholds (`atlas complexity audit`) and delivers actionable doctor remediation prescriptions (`atlas complexity doctor`).
+4. **Jetpack Compose & KMP Stability Engine (`atlas compose`)**: Single-pass comment/string-masked Kotlin AST extractor inferring `@Composable` skippability, parameter stability over a 4-state join-semilattice (`STABLE < RUNTIME < UNCERTAIN < UNSTABLE`), `stability_config.conf` glob matching, Compose Compiler report ingestion, and `@TraceRecomposition` runtime telemetry.
+5. **12 Deterministic Compose Invariant Audits**: Evaluates unstable parameters, unremembered state declarations, raw collections, mutable state parameters, uncollected flows, modifier order, slot lambda conventions, heavy recomposition allocations, repeated derived state, hardcoded UI strings, and Compose layer inversions.
+6. **Strong Skipping Reality Check & Compose Doctor**: Detects `SILENT_WASTE` where Strong Skipping marks composables skippable but unstable instance churn triggers silent recompositions. Compose Doctor produces prioritized, write-site verified (`MUTATES_PROPERTY` safe) `before`/`after` remediation diffs, executable directly with `--apply`.
+7. **Workspace Indexer & Raw Edge Persistence**: Persists raw unresolved symbol edges (`raw_symbol_edges`) across incremental runs so unchanged callers automatically link to newly added callees (`BUG-01`), with in-memory file caching and no-op short-circuiting.
+8. **Dead Code Detection & Path-Scoped Audits**: Identifies unreferenced production declarations (`atlas dead-code`) and supports targeted path filtering (`--paths`) in `atlas audit` and MCP tools for fast PR-scoped verification.
+9. **Sub-5ms Graph Traversal**: Iterative FIFO Breadth-First Search (BFS) computes directed shortest paths, caller trees, callee cones, and blast radii across 15,000+ edges in milliseconds.
+10. **3D Concurrency Scope Synthesis**: Synthesizes exact 3D boundaries (`files`, `modules`, `architecture`, `composable_functions`, `shared_state_models`, `composition_locals`) for multi-agent orchestration (`/architect`, `/plan`, `/teamwork`), preventing merge collisions.
+11. **Figma Spatial AST & 2D R\*Tree Indexing**: Parses Figma document node trees, stores geometric bounds into an SQLite `rtree` virtual table, and executes spatial overlap / containment queries (`--bounds x1,x2,y1,y2`) in $<1$ ms.
+12. **Vector Bloat Stripping & W3C DTCG Token Ingestion**: Strips heavy SVG vector path and bezier payloads (~85% reduction) during ingestion, imports DTCG design token bundles, and resolves alias DAGs with cycle detection.
+13. **12 Deterministic SQL Design Invariant Audits**: Evaluates AutoLayout geometry, static containers, default 100px frame heights, accessibility touch targets ($\ge 48\times 48\,\text{dp}$), negative coordinates, child width amputation, zero emojis, unbound token ratios, detached gym specimens, 2D canvas topology, and WCAG AA contrast ratios.
+14. **Clean Architecture & `BOOST-003` Auditor**: Enforces Clean Architecture layer boundaries (flagging illegal Domain $\to$ UI or Domain $\to$ concrete Data references) and the Single Declaration Principle (Rule 6: at most 1 top-level declaration per production file).
+15. **Autonomous Architecture Remediation Engine (`atlas fix`)**: Synthesizes verified AST file-splitting diffs for `BOOST-003` Single Declaration Principle violations (extracting secondary declarations into dedicated files with preserved package headers, imports, annotations, and KDoc), converts unreferenced secondary declarations to private (`--make-private`), corrects layer classification inversions, and automatically re-indexes modified files with rollback protection on test suite failures.
+16. **Top-Level Description Audit (`atlas audit --check-descriptions`)**: Extracts docstrings, KDoc, and JSDoc comments for top-level declarations, persisting coverage to SQLite with actionable suggestions.
 
 ---
 
@@ -174,6 +188,11 @@ atlas figma --help
   --cache-profile <p>      'enterprise' (user cache) or 'in-repo' (.atlas/)
   --json                   Emit full formatted JSON output
   --summary                Emit compact summary <= 400 bytes (default)
+  --url <url>              Query nodes, endpoints, or spans matching a URL / deep link
+  --threshold <n>          Cognitive complexity threshold for filtering or audit (default: 10)
+  --max-cognitive <n>      Alias for --threshold
+  --max-cyclomatic <n>     Cyclomatic complexity threshold
+  --descriptions <mode>    Doc description audit mode ('domain-only', 'all', 'off')
 ```
 
 ---
@@ -190,16 +209,25 @@ atlas index --project my-project
 # Index specific subdirectories or PR scopes
 atlas index --project my-project --paths shared/ feature/cart/
 
+# Force re-index bypassing file-hash caching
+atlas index --project my-project --force
+
 # Emit full JSON metrics
 atlas index --project my-project --json
 ```
 
 #### 2. `atlas query`
-Query symbols, call hierarchies, blast radii, or graph topologies.
+Query symbols, call hierarchies, blast radii, URLs, or graph topologies.
 
 ```bash
 # General symbol search
 atlas query --action search --target "CartViewModel"
+
+# Query by URL: Figma canvas deep link, code line location, or HTTP route
+atlas query --url "https://www.figma.com/design/LVhI2ueu8A6igT14N8m1MM/App?node-id=42-123"
+atlas query --url "file://src/models/Cart.kt#L45"
+atlas query --url "GET /api/v1/checkout"
+atlas query --url "https://github.com/org/repo/blob/main/src/App.kt#L100"
 
 # Inspect symbol declaration coordinates and live source slice
 atlas query --action symbol --target "ProductCard" --include-source
@@ -236,22 +264,28 @@ atlas synthesize-scope --project my-project --target "CartScreen"
 ```
 
 #### 4. `atlas audit`
-Enforce Clean Architecture layer boundaries, the Single Declaration Principle (`BOOST-003`), active plan collisions, and optionally Jetpack Compose stability. Exits `0` on clean pass and `1` on violations.
+Enforce Clean Architecture layer boundaries, the Single Declaration Principle (`BOOST-003`), active plan collisions, doc descriptions, and optionally Jetpack Compose stability or complexity. Exits `0` on clean pass and `1` on violations.
 
 ```bash
 # Full workspace audit
 atlas audit --project my-project
+
+# Audit top-level doc descriptions (domain-only, all, off)
+atlas audit --project my-project --descriptions domain-only
 
 # Path-scoped audit for targeted PR verification
 atlas audit --project my-project --paths src/macosArm64Main/kotlin/atlas/engine/
 
 # Combined architecture and Compose stability audit
 atlas audit --project my-project --compose
+
+# Combined architecture and Polyglot Complexity audit
+atlas audit --project my-project --complexity --threshold 15
 ```
 
 *Output:*
 ```text
-[Audit] project=my-project passed=true boost003_violations=0 layer_inversions=0 plan_3d_collisions=0
+[Audit] project=my-project passed=true boost003_violations=0 layer_inversions=0 plan_3d_collisions=0 description_suggestions=0
 ```
 
 #### 5. `atlas dead-code`
@@ -324,6 +358,61 @@ atlas fix --project my-project --apply --test-cmd "./gradlew check"
     }
   ]
 }
+```
+
+---
+
+### Polyglot Code Complexity Commands (`atlas complexity`)
+
+Atlas provides a native polyglot code complexity engine that extracts and scores **cyclomatic complexity**, **cognitive complexity**, **maximum nesting depth**, and **lines of code (LOC)** per function across Kotlin, Swift, TypeScript/JavaScript, Python, Rust, Go, and C++.
+
+#### 1. `atlas complexity query`
+Query functions ranked by cognitive or cyclomatic complexity, or inspect complexity metrics for specific symbols.
+
+```bash
+# Query top complex functions across the repository
+atlas query --action complexity --project my-project --limit 10
+
+# Filter functions exceeding a specific cognitive complexity threshold
+atlas query --action complexity --project my-project --threshold 15
+
+# Query complexity for a specific function or target symbol
+atlas query --action complexity --project my-project --target "parsePayload"
+```
+
+*Output:*
+```text
+[Complexity] project=my-project functions=142 top_cognitive=18 avg_cognitive=4.2 over_threshold=3
+```
+
+#### 2. `atlas complexity audit`
+Enforce Gate 1 code complexity thresholds in pre-commit hooks and CI/CD quality gates. Exits `0` on clean pass and `1` when functions exceed specified limits.
+
+```bash
+# Run complexity audit with default cognitive threshold (10)
+atlas audit --complexity --project my-project
+
+# Run complexity audit with custom cognitive threshold and cyclomatic limits
+atlas audit --complexity --project my-project --threshold 15 --max-cyclomatic 10
+
+# Audit specific paths or PR diff scopes
+atlas audit --complexity --project my-project --paths src/macosArm64Main/kotlin/
+```
+
+*Output:*
+```text
+[Complexity Audit] project=my-project passed=true functions=210 over_threshold=0 max_cognitive=9
+```
+
+#### 3. `atlas complexity doctor`
+Generate actionable refactoring prescriptions, decompose nested decision logic, extract helper functions, and flatten control-flow hot-spots.
+
+```bash
+# Preview complexity doctor prescriptions across the project
+atlas doctor --complexity --project my-project --limit 5
+
+# Target doctor refactoring analysis on a specific function
+atlas doctor --complexity --project my-project --target "handleTransaction"
 ```
 
 ---
@@ -423,11 +512,14 @@ atlas compose audit --project android-app --no-strong-skipping
 Synthesize write-site safe automated remediation previews. Verifies that fields are not mutated (`MUTATES_PROPERTY` check) before recommending `@Immutable`, and outputs exact Kotlin `before`/`after` code snippets.
 
 ```bash
-# Generate prioritized Compose stability fixes
+# Generate prioritized Compose stability fixes (preview)
 atlas compose doctor --project android-app --limit 5
 
 # Target a specific composable
 atlas compose doctor --project android-app --target "OrderSummaryCard"
+
+# Apply verified Compose stability fixes directly to disk
+atlas compose doctor --project android-app --apply
 ```
 
 *Output:*
@@ -580,7 +672,7 @@ Atlas exposes a standard **JSON-RPC 2.0 stdio MCP server** with strictly **4 com
 
 ### MCP Tools & Action Taxonomy
 
-1. **`codegraph_query`**: Polyglot code, Compose stability, and graph querying.
+1. **`codegraph_query`**: Polyglot code, Compose stability, complexity, URLs, and graph querying.
    - `search`: Full-text BM25 symbol search.
    - `symbol`: Retrieve declaration coordinates and live source slice.
    - `callers`: Traverse incoming call hierarchy.
@@ -592,15 +684,21 @@ Atlas exposes a standard **JSON-RPC 2.0 stdio MCP server** with strictly **4 com
    - `compose_summary`: Composable skippability, parameters, and violation summary.
    - `compose_cascade`: Downstream recomposition cascade blast radius.
    - `compose_blame`: Upstream root cause trace for unstable types.
+   - `complexity`: Function-level cyclomatic, cognitive, nesting, and length metrics.
+   - `url`: Search Figma deep links, code locations (`file://`, GitHub `#L`), HTTP routes, and URL references.
 
-2. **`codegraph_audit`**: Architectural compliance, Compose audits, scoping, and maintenance.
+2. **`codegraph_audit`**: Architectural compliance, Compose audits, complexity, scoping, and maintenance.
    - `verify_architecture`: Clean Architecture layer verification and `BOOST-003` audit (supports path scoping via `targets`).
    - `remedy_architecture`: Autonomously plan, verify, and optionally commit remediations for `BOOST-003` (AST file-splitting or privatization) and `ARCH-LAYER-INVERSION` violations.
    - `synthesize_3d_scope`: Synthesize 3D Concurrency Scope (`files`, `modules`, `architecture`).
    - `dead_code`: Detect unreferenced production symbols with 0 callers.
+   - `check_descriptions`: Audit top-level declaration docstrings and comments.
+   - `audit_complexity`: Gate 1 polyglot code complexity audit against cognitive and cyclomatic thresholds.
+   - `complexity_doctor`: Refactoring prescriptions and hot-spot remediation recommendations.
    - `audit_compose`: 12-rule Compose Gate 1 audit with Strong Skipping Reality Check.
    - `compose_doctor`: Synthesize write-site safe Compose remediation previews.
    - `synthesize_compose_scope`: Synthesize Compose 3D Concurrency Scope.
+   - `verify_remediation`: Verify replacement snippets against AST rules and test commands before disk mutation.
    - `record_memory`: Store experiential learning outcomes with 30-day exponential decay.
    - `sync_index`: Incrementally re-index files or directories into graph cache.
 
@@ -647,54 +745,66 @@ This repository enforces the **Single Declaration Principle (`BOOST-003`)**: eve
 src/macosArm64Main/kotlin/atlas/
 ├── Main.kt                            # Native CLI process entry point
 ├── bridge/
-│   └── VaultPlanBridge.kt             # Obsidian [[Wikilinks]] & plans/ markdown extraction
+│   └── VaultPlanBridge.kt             # Obsidian [[Wikilinks]], code spans & plans/ markdown URL ref extraction
 ├── cli/
-│   └── CodeGraphCli.kt                # Argument parsing, Figma & Compose routing, summary truncation (≤400B)
+│   └── CodeGraphCli.kt                # Argument parsing, routing (Figma, Compose, Complexity, Fix), ≤400B summaries
 ├── config/
 │   └── CacheProfileResolver.kt        # Enterprise user cache vs in-repo .atlas/ resolution
 ├── db/
 │   ├── NativeSqliteDatabase.kt        # C-interop SQLite3 connection wrapper & savepoints
 │   ├── NativeSqliteStatement.kt       # Compiled prepared statement wrapper
-│   └── SqliteGraphStore.kt            # Schema, FTS5 BM25, 2D Spatial R*Tree, WITHOUT ROWID Compose tables
+│   └── SqliteGraphStore.kt            # Schema, FTS5 BM25, 2D Spatial R*Tree, WITHOUT ROWID Compose & complexity tables
 ├── engine/
-│   ├── ArchitectureAuditor.kt         # Clean Architecture, BOOST-003 & dead code audit rules
+│   ├── ArchitectureAuditor.kt         # Clean Architecture, BOOST-003, doc descriptions & dead code audit rules
+│   ├── ArchitectureRemediationEngine.kt # Autonomous AST file-splitting & privatization engine
+│   ├── AutonomousRemediationVerifier.kt # AST transform & test command verification guard
+│   ├── ComplexityDoctorEngine.kt      # Gate 1 complexity audits & refactoring prescriptions
 │   ├── ComposeStabilityEngine.kt      # 12-rule Compose Gate 1 scoring, Reality Check & write-site safe Doctor
 │   ├── FigmaDesignAuditor.kt          # 12 deterministic SQL design audits & Gate 1 maturity scoring
 │   ├── ScopeSynthesizer.kt            # 3D Concurrency Scope synthesizer (Code, Figma, Compose)
 │   ├── WorkMemoryStore.kt             # 30-day exponential decay work memory
 │   └── WorkspaceIndexer.kt            # Incremental indexer with persistent raw edge re-resolution
 ├── extract/
+│   ├── ComplexityExtractor.kt         # Polyglot cyclomatic, cognitive, nesting & LOC extractor
 │   ├── ComposeStabilityExtractor.kt   # Dual-mode Kotlin Compose AST extractor & 4-state stability lattice
 │   ├── FigmaSnapshotExtractor.kt      # Figma AST streaming parser & ~85% vector bloat stripper
 │   ├── ModuleBoundaryDetector.kt      # Gradle type-safe accessors & KMP expect/actual
 │   ├── NameSegmentTokenizer.kt        # CamelCase & snake_case identifier tokenizer
-│   ├── PolyglotAstExtractor.kt        # Kotlin, Swift, Python, TS, Rust, C++ extractors
-│   └── SemioticLayerClassifier.kt     # FOROALFA semiotic & architectural layer classifier
+│   ├── PolyglotAstExtractor.kt        # Polyglot AST extractor & HTTP route detection (Ktor, Spring, Express, FastAPI)
+│   ├── SemioticLayerClassifier.kt     # FOROALFA semiotic & architectural layer classifier
+│   └── UrlTargetResolver.kt           # Figma deep-links, code span #L<line> & polyglot route normalizer
 ├── mcp/
 │   └── CodeGraphMcpServer.kt          # 4-tool Stdio JSON-RPC 2.0 MCP server with 32KB spillover & cache resolution
 ├── model/                             # Domain data models (BOOST-003 compliant)
-│   ├── Compose3DScope.kt              # Compose 3D Concurrency Scope domain model
-│   ├── ComposeAuditResult.kt          # Compose audit scorecard & violation summaries
-│   ├── ComposeDoctorReport.kt         # Compose Doctor remediation prescriptions
-│   ├── ComposeNodeRecord.kt           # Composable AST node domain model
-│   ├── ComposeParamRecord.kt          # Composable parameter stability record
-│   ├── ComposeQueryResult.kt          # Compose query result model
-│   ├── Figma3DScope.kt                # Figma 3D Concurrency Scope domain model
-│   ├── FigmaAuditResult.kt            # Figma audit scorecard & violation summaries
-│   ├── FigmaDocument.kt               # Figma document metadata
-│   ├── FigmaEdge.kt                   # Figma AST edge model (PARENT_OF, INSTANCE_OF, BINDS_VARIABLE)
-│   ├── FigmaExtractedSnapshot.kt      # Snapshot extractor output bundle
-│   ├── FigmaNode.kt                   # Figma AST node domain model
-│   ├── FigmaSpatialBounds.kt          # 2D bounding box spatial coordinates
-│   ├── FigmaVariable.kt               # Design token & variable definition
-│   ├── FigmaVariableImpact.kt         # Variable downstream blast radius result
-│   ├── FigmaViolation.kt              # Design invariant violation record
-│   ├── GraphNode.kt                   # Code AST graph node
-│   ├── GraphEdge.kt                   # Code AST graph edge
-│   └── ...                            # AuditReport, FileRecord, LiveSourceSlice, etc.
+│   ├── ArchitectureRemediationPrescription.kt # Prescription model for AST transforms
+│   ├── ArchitectureRemediationReport.kt       # Remediation summary report
+│   ├── ComplexityDoctorReport.kt              # Complexity doctor refactoring report
+│   ├── ComplexityScoreRecord.kt               # Function complexity scoring record
+│   ├── ComplexityVector.kt                    # Function complexity metrics vector
+│   ├── ComplexityViolation.kt                 # Threshold violation model
+│   ├── Compose3DScope.kt                      # Compose 3D Concurrency Scope domain model
+│   ├── ComposeAuditResult.kt                  # Compose audit scorecard & violation summaries
+│   ├── ComposeDoctorReport.kt                 # Compose Doctor remediation prescriptions
+│   ├── ComposeNodeRecord.kt                   # Composable AST node domain model
+│   ├── ComposeParamRecord.kt                  # Composable parameter stability record
+│   ├── ComposeQueryResult.kt                  # Compose query result model
+│   ├── DescriptionSuggestion.kt               # Top-level docstring audit recommendation
+│   ├── Figma3DScope.kt                        # Figma 3D Concurrency Scope domain model
+│   ├── FigmaAuditResult.kt                    # Figma audit scorecard & violation summaries
+│   ├── FigmaDocument.kt                       # Figma document metadata
+│   ├── FigmaEdge.kt                           # Figma AST edge model (PARENT_OF, INSTANCE_OF, BINDS_VARIABLE)
+│   ├── FigmaExtractedSnapshot.kt              # Snapshot extractor output bundle
+│   ├── FigmaNode.kt                           # Figma AST node domain model
+│   ├── FigmaSpatialBounds.kt                  # 2D bounding box spatial coordinates
+│   ├── FigmaVariable.kt                       # Design token & variable definition
+│   ├── FigmaVariableImpact.kt                 # Variable downstream blast radius result
+│   ├── FigmaViolation.kt                      # Design invariant violation record
+│   ├── GraphNode.kt                           # Code AST graph node
+│   ├── GraphEdge.kt                           # Code AST graph edge
+│   └── ...                                    # AuditReport, FileRecord, LiveSourceSlice, etc.
 └── util/
-    ├── PlatformFiles.kt               # Pure POSIX filesystem utilities with symlink escape guards
-    └── Sha256.kt                      # Pure Kotlin FIPS 180-4 SHA-256 implementation
+    ├── PlatformFiles.kt                       # Pure POSIX filesystem utilities with symlink escape guards
+    └── Sha256.kt                              # Pure Kotlin FIPS 180-4 SHA-256 implementation
 ```
 
 ---
