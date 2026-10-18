@@ -1069,4 +1069,97 @@ $tq
         assertNotNull(markNode)
         assertEquals(null, markNode.description)
     }
+
+    @Test
+    fun testReceiverDisambiguationTokenOverlapAndExactMatch() {
+        val callerNode = GraphNode(
+            nodeId = "p:src/Caller.kt#execute",
+            projectId = "p",
+            fileId = "p:src/Caller.kt",
+            name = "execute",
+            qualifiedName = "app.Caller.execute",
+            kind = "function",
+            moduleId = ":app"
+        )
+        val complexityDoctorNode = GraphNode(
+            nodeId = "p:src/ComplexityDoctorEngine.kt#runDoctor",
+            projectId = "p",
+            fileId = "p:src/ComplexityDoctorEngine.kt",
+            name = "runDoctor",
+            qualifiedName = "atlas.engine.ComplexityDoctorEngine.runDoctor",
+            kind = "function",
+            moduleId = ":engine"
+        )
+        val composeEngineNode = GraphNode(
+            nodeId = "p:src/ComposeStabilityEngine.kt#runDoctor",
+            projectId = "p",
+            fileId = "p:src/ComposeStabilityEngine.kt",
+            name = "runDoctor",
+            qualifiedName = "atlas.engine.ComposeStabilityEngine.runDoctor",
+            kind = "function",
+            moduleId = ":engine"
+        )
+
+        val rawEdges = listOf(
+            GraphEdge(
+                edgeId = "call1",
+                projectId = "p",
+                sourceNodeId = callerNode.nodeId,
+                targetNodeId = "sym:composeEngine.runDoctor",
+                edgeType = "CALLS",
+                provenance = "CALL_RECEIVER:composeEngine",
+                lineNumber = 10
+            ),
+            GraphEdge(
+                edgeId = "call2",
+                projectId = "p",
+                sourceNodeId = callerNode.nodeId,
+                targetNodeId = "sym:complexityDoctor.runDoctor",
+                edgeType = "CALLS",
+                provenance = "CALL_RECEIVER:complexityDoctor",
+                lineNumber = 11
+            )
+        )
+
+        val resolved = PolyglotAstExtractor.resolveCrossFileEdges(
+            projectId = "p",
+            nodes = listOf(callerNode, complexityDoctorNode, composeEngineNode),
+            rawEdges = rawEdges
+        )
+
+        val composeCall = resolved.firstOrNull { it.edgeId.startsWith("call1->") }
+        assertNotNull(composeCall, "Edge call1 should be resolved")
+        assertEquals(composeEngineNode.nodeId, composeCall.targetNodeId, "composeEngine.runDoctor must resolve to ComposeStabilityEngine.runDoctor")
+
+        val complexityCall = resolved.firstOrNull { it.edgeId.startsWith("call2->") }
+        assertNotNull(complexityCall, "Edge call2 should be resolved")
+        assertEquals(complexityDoctorNode.nodeId, complexityCall.targetNodeId, "complexityDoctor.runDoctor must resolve to ComplexityDoctorEngine.runDoctor")
+    }
+
+    @Test
+    fun testKotlinLocalVariableTypeReceiverResolution() {
+        val src = """
+            package app
+
+            class AuditorClient {
+                val composeEngine: ComposeStabilityEngine = ComposeStabilityEngine()
+
+                fun runAudit() {
+                    composeEngine.runDoctor()
+                    val doctor = ComplexityDoctorEngine()
+                    doctor.runDoctor()
+                }
+            }
+        """.trimIndent()
+
+        val (nodes, rawEdges, _) = PolyglotAstExtractor.extractFile("p", "src/AuditorClient.kt", src)
+        val auditNode = nodes.firstOrNull { it.name == "runAudit" }
+        assertNotNull(auditNode)
+
+        val composeEdge = rawEdges.firstOrNull { it.targetNodeId.contains("ComposeStabilityEngine.runDoctor") }
+        assertNotNull(composeEdge, "Property type inference must map composeEngine.runDoctor to ComposeStabilityEngine.runDoctor")
+
+        val doctorEdge = rawEdges.firstOrNull { it.targetNodeId.contains("ComplexityDoctorEngine.runDoctor") }
+        assertNotNull(doctorEdge, "Local variable assignment must map doctor.runDoctor to ComplexityDoctorEngine.runDoctor")
+    }
 }
