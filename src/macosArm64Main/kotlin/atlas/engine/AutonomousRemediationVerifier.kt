@@ -427,7 +427,8 @@ class AutonomousRemediationVerifier(
             } else {
                 try {
                     val cmd = "cd \"$workspaceRoot\" && $testCommand"
-                    val exitCode = system(cmd)
+                    val rawStatus = system(cmd)
+                    val exitCode = if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
                     if (exitCode != 0) {
                         testsPreserved = false
                         details.add("Test command '$testCommand' failed (exit code $exitCode).")

@@ -55,7 +55,7 @@ class CodeGraphCli {
             }
 
             if (argv.isEmpty() || argv.contains("--help") || argv.contains("-h") ||
-                (argv.size == 1 && (argv[0] == "figma" || argv[0] == "compose"))
+                (argv.size == 1 && (argv[0] == "figma" || argv[0] == "compose" || argv[0] == "complexity" || argv[0] == "help"))
             ) {
                 printHelp()
                 return 0

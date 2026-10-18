@@ -194,8 +194,8 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
             deductions += unboundDeduction
         }
 
-        val rawScore = 95.0 - deductions
-        val score = max(0.0, min(95.0, rawScore))
+        val rawScore = 100.0 - deductions
+        val score = max(0.0, min(100.0, rawScore))
 
         val resultViolations = violations.toMutableList()
         if (score < 80.0) {

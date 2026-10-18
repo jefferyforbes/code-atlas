@@ -32,7 +32,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
     )
 
     companion object {
-        const val GATE1_CEILING: Double = 95.0
+        const val GATE1_CEILING: Double = 100.0
         const val PASS_THRESHOLD: Double = 80.0
         const val PER_RULE_CAP: Double = 25.0
 

@@ -5,6 +5,7 @@ import atlas.cli.CodeGraphCli
 import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
+import atlas.engine.AutonomousRemediationVerifier
 import atlas.engine.ScopeSynthesizer
 import atlas.engine.WorkspaceIndexer
 import atlas.extract.FigmaSnapshotExtractor
@@ -23,6 +24,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import platform.posix.getpid
 import platform.posix.symlink
+import platform.posix.system
 import platform.posix.time
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -1916,6 +1918,44 @@ class EngineAndMcpTest {
             PlatformFiles.delete(dbPath)
             PlatformFiles.delete("$dbPath-wal")
             PlatformFiles.delete("$dbPath-shm")
+            PlatformFiles.deleteRecursively(tmpDir)
+        }
+    }
+
+    @Test
+    fun testComplexitySingleArgHelpExitZero() {
+        val exitCode = CodeGraphCli.run(arrayOf("complexity"))
+        assertEquals(0, exitCode, "atlas complexity with no arguments should print help and return exit code 0")
+    }
+
+    @Test
+    fun testRemediationVerifierExitCodeNormalization() {
+        val tmpDir = "/tmp/test_verifier_exit_${getpid()}"
+        PlatformFiles.mkdirs(tmpDir)
+        try {
+            val scriptPath = "$tmpDir/test_fail.sh"
+            PlatformFiles.writeText(scriptPath, "#!/bin/sh\nexit 1\n")
+            system("chmod +x \"$scriptPath\"")
+
+            val fileA = "$tmpDir/A.kt"
+            PlatformFiles.writeText(fileA, "class A\n")
+
+            val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir)
+            val result = verifier.verifyAndApply(
+                projectSlug = "test",
+                relPath = "A.kt",
+                beforeSnippet = "class A\n",
+                afterSnippet = "class A\n// comment\n",
+                ruleId = "GENERIC",
+                dryRun = true,
+                testCommand = "./test_fail.sh"
+            )
+            assertFalse(result.testsPreserved, "Tests should fail when exit code is 1")
+            assertTrue(
+                result.details.any { it.contains("exit code 1") },
+                "Failed test log must report exit code 1 (decoded), not 256. Details: ${result.details}"
+            )
+        } finally {
             PlatformFiles.deleteRecursively(tmpDir)
         }
     }

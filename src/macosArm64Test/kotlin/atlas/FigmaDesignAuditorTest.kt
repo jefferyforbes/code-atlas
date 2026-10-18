@@ -682,7 +682,7 @@ class FigmaDesignAuditorTest {
         val cleanResult = auditor.audit(cleanKey)
 
         assertTrue(cleanResult.passed)
-        assertEquals(95.0, cleanResult.maturityScore) // Capped at 95.0
+        assertEquals(100.0, cleanResult.maturityScore) // 100-Point World-Class Calibration (Zero Artificial 95 Cap)
         assertEquals(0, cleanResult.violations.size)
         assertEquals(4, cleanResult.polishDelta.size)
         assertTrue(cleanResult.polishDelta.any { it.contains("Optical kerning") })
@@ -1164,7 +1164,7 @@ class FigmaDesignAuditorTest {
 
         // 100 nodes total, 6 unbound = 6.0% unbound (just above 5.0% threshold)
         // Previously 6 * 8.0 = 48.0 points deducted (or 51/1000 -> 408 points -> 0.0 score).
-        // Now continuous deduction: 2.0 + (6.0 - 5.0) = 3.0 points deducted -> 92.0 score.
+        // Now continuous deduction: 2.0 + (6.0 - 5.0) = 3.0 points deducted -> 97.0 score (from 100-point base).
         val nodes = (1..100).map { i ->
             FigmaNode(
                 nodeId = "n_$i",
@@ -1188,7 +1188,7 @@ class FigmaDesignAuditorTest {
 
         val (score, finalViolations) = auditor.evaluateGate1Maturity(fileKey, violations)
         assertTrue(score > 90.0, "Crossing 5% unbound tokens (6%) must not cliff-drop score; got $score")
-        assertEquals(92.0, score, 0.01)
+        assertEquals(97.0, score, 0.01)
         assertFalse(finalViolations.any { it.rule == "GATE_1_MATURITY_SCORE" })
     }
 
