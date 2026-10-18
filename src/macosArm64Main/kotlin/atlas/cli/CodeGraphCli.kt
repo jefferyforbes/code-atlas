@@ -32,7 +32,7 @@ import kotlinx.serialization.json.putJsonObject
  */
 class CodeGraphCli {
     companion object {
-        const val VERSION = "0.5.0"
+        const val VERSION = "0.5.1"
         const val SUMMARY_CEILING_BYTES = 400
 
         private val jsonPretty = Json { prettyPrint = true }
