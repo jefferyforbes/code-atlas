@@ -50,13 +50,6 @@ object PlatformFiles {
         } else 0.0
     }
 
-    fun size(path: String): Long = memScoped {
-        val sb = alloc<stat>()
-        if (stat(path, sb.ptr) == 0) {
-            sb.st_size
-        } else 0L
-    }
-
     fun mkdirs(path: String): Boolean {
         if (path.isEmpty() || exists(path)) return true
         val normalized = path.replace('\\', '/').trimEnd('/')
@@ -119,30 +112,6 @@ object PlatformFiles {
         return success
     }
 
-    fun writeBytes(path: String, bytes: ByteArray): Boolean {
-        val parent = parentOf(path)
-        if (parent.isNotEmpty()) {
-            mkdirs(parent)
-        }
-        val file = fopen(path, "wb") ?: return false
-        var success = false
-        try {
-            if (bytes.isNotEmpty()) {
-                val written = bytes.usePinned { pinned ->
-                    fwrite(pinned.addressOf(0), 1u, bytes.size.toULong(), file)
-                }
-                success = (written == bytes.size.toULong())
-            } else {
-                success = true
-            }
-        } finally {
-            val closeRc = fclose(file)
-            if (closeRc != 0) {
-                success = false
-            }
-        }
-        return success
-    }
 
     fun listDirectory(dirPath: String): List<String> {
         val result = mutableListOf<String>()

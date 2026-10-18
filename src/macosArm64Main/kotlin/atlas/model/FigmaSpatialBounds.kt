@@ -18,10 +18,6 @@ data class FigmaSpatialBounds(
     val height: Double
         get() = maxY - minY
 
-    fun intersects(other: FigmaSpatialBounds): Boolean {
-        return maxX >= other.minX && minX <= other.maxX &&
-            maxY >= other.minY && minY <= other.maxY
-    }
 
     companion object {
         fun fromRect(x: Double, y: Double, width: Double, height: Double): FigmaSpatialBounds {
