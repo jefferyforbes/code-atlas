@@ -155,6 +155,16 @@ class CodeGraphCli {
                     arg == "--db" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> customDb = argv[++idx]
                     arg == "--cache-profile" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> cacheProfile = argv[++idx]
                     (arg == "--target" || arg == "--from") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> target = argv[++idx]
+                    arg == "--url" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> {
+                        target = argv[++idx]
+                        action = "url"
+                        if (command.isEmpty()) command = "query"
+                    }
+                    arg.startsWith("--url=") -> {
+                        target = arg.substringAfter('=')
+                        action = "url"
+                        if (command.isEmpty()) command = "query"
+                    }
                     arg == "--action" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> action = argv[++idx]
                     arg.startsWith("--action=") -> action = arg.substringAfter('=')
                     (arg == "--secondary-target" || arg == "--to") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> secondaryTarget = argv[++idx]
@@ -1251,9 +1261,10 @@ class CodeGraphCli {
                   --no-description-check   Disable top-level description suggestions check
 
                 Query & Compose Options:
-                  --target <sym>           Symbol name, node name, or ID
+                  --target <sym>           Symbol name, node name, URL/deep-link, or ID
+                  --url <url>              Shorthand for '--action url --target <url>' (HTTP routes, URLs, or deep links)
                   --secondary-target <sym> Target for shortest_path
-                  --action <action>        Query action (symbol, callers, callees, impact, complexity, summary, cascade, blame)
+                  --action <action>        Query action (symbol, callers, callees, impact, url, complexity, summary, cascade, blame)
                   --depth <int>            Traversal depth (default: 2)
                   --limit <int>            Max prescriptions for doctor (default: 10)
                   --paths <p1> [p2...]     Subpaths to index or seed targets for scoping

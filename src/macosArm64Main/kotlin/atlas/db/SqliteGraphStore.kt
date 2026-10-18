@@ -5,6 +5,13 @@ import atlas.extract.UrlTargetResolver
 import atlas.model.*
 import atlas.util.PlatformFiles
 import atlas.util.Sha256
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import kotlin.math.abs
 import kotlin.math.ln
 
@@ -1750,6 +1757,210 @@ class SqliteGraphStore(val dbPath: String) {
         }
 
         return matchedNodes.values.toList()
+    }
+
+    fun searchByUrl(projectId: String, rawUrlOrRoute: String, limit: Int = 20): JsonObject {
+        val jsonCodec = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+        val trimmed = rawUrlOrRoute.trim().trim('\'', '"')
+
+        val figmaLink = UrlTargetResolver.parseFigmaUrl(trimmed)
+        if (figmaLink != null) {
+            val figmaNodes = if (figmaLink.nodeId != null) {
+                listOfNotNull(queryFigmaNodeById(figmaLink.fileKey, figmaLink.nodeId))
+            } else {
+                val stmt = db.prepare(
+                    """
+                    SELECT rowid_pk, node_id, file_key, page_name, section_id, parent_id,
+                           name, node_type, layout_mode, sizing_horizontal, sizing_vertical,
+                           text_auto_resize, padding_left, padding_right, padding_top, padding_bottom,
+                           item_spacing, local_x, local_y, canvas_x, canvas_y, width, height,
+                           is_interactive, has_emoji, unbound_fill, unbound_stroke, wcag_contrast, semiotic_layer
+                    FROM figma_nodes WHERE file_key = ? LIMIT ?;
+                    """.trimIndent()
+                )
+                val list = mutableListOf<FigmaNode>()
+                try {
+                    stmt.bindString(1, figmaLink.fileKey)
+                    stmt.bindInt(2, limit)
+                    while (stmt.step()) list.add(rowToFigmaNode(stmt))
+                } finally {
+                    stmt.close()
+                }
+                list
+            }
+            val escFileKey = figmaLink.fileKey.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            val refEdges = queryUrlEdgeRecords(projectId, "%$escFileKey%", limit)
+            return buildJsonObject {
+                put("project", projectId)
+                put("query", trimmed)
+                put("kind", "figma_deep_link")
+                put("file_key", figmaLink.fileKey)
+                if (figmaLink.nodeId != null) put("node_id", figmaLink.nodeId)
+                put("figma_nodes", jsonCodec.encodeToJsonElement(figmaNodes))
+                putJsonArray("document_references") {
+                    for ((srcNode, edge) in refEdges) {
+                        addJsonObject {
+                            put("source_node_id", srcNode.nodeId)
+                            put("name", srcNode.name)
+                            put("file_id", srcNode.fileId)
+                            put("line", edge.lineNumber)
+                            put("edge_type", edge.edgeType)
+                            put("target", edge.targetNodeId)
+                        }
+                    }
+                }
+            }
+        }
+
+        val codeLink = UrlTargetResolver.parseCodeLocationUrl(trimmed)
+        if (codeLink != null) {
+            val resolvedNode = getNode(projectId, trimmed)
+            val callers = if (resolvedNode != null) getCallers(projectId, resolvedNode.nodeId, depth = 2) else emptyList()
+            val callees = if (resolvedNode != null) getCallees(projectId, resolvedNode.nodeId, depth = 2) else emptyList()
+            return buildJsonObject {
+                put("project", projectId)
+                put("query", trimmed)
+                put("kind", "code_location_link")
+                put("file_path_suffix", codeLink.filePathSuffix)
+                if (codeLink.startLine != null) put("start_line", codeLink.startLine)
+                if (codeLink.endLine != null) put("end_line", codeLink.endLine)
+                if (resolvedNode != null) put("node", jsonCodec.encodeToJsonElement(resolvedNode))
+                put("callers", jsonCodec.encodeToJsonElement(callers))
+                put("callees", jsonCodec.encodeToJsonElement(callees))
+            }
+        }
+
+        val isRoute = UrlTargetResolver.isHttpRouteCandidate(trimmed, hasExplicitRouteCall = true) || trimmed.startsWith("/")
+        val extractedPath = UrlTargetResolver.extractPathFromHttpUrl(trimmed)
+        val canonRoute = when {
+            isRoute -> UrlTargetResolver.normalizeRouteTemplate(trimmed)
+            extractedPath != null && UrlTargetResolver.isHttpRouteCandidate(extractedPath, hasExplicitRouteCall = false) ->
+                UrlTargetResolver.normalizeRouteTemplate(extractedPath)
+            else -> null
+        }
+        val canonUrl = UrlTargetResolver.normalizeExternalUrl(trimmed)
+        val endpointNodes = mutableListOf<GraphNode>()
+        if (canonRoute != null) {
+            val exactId = "$projectId:endpoint#$canonRoute"
+            val escRoute = canonRoute.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            val epStmt = db.prepare(
+                """
+                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                       is_test_double, in_degree, out_degree, description, is_top_level,
+                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+                FROM nodes
+                WHERE project_id = ? AND kind = 'endpoint'
+                  AND (node_id = ? OR name = ? OR name LIKE ? ESCAPE '\')
+                ORDER BY (name = ?) DESC, in_degree DESC
+                LIMIT ?;
+                """.trimIndent()
+            )
+            try {
+                epStmt.bindString(1, projectId)
+                epStmt.bindString(2, exactId)
+                epStmt.bindString(3, canonRoute)
+                epStmt.bindString(4, "%$escRoute%")
+                epStmt.bindString(5, canonRoute)
+                epStmt.bindInt(6, limit)
+                while (epStmt.step()) endpointNodes.add(rowToNode(epStmt))
+            } finally {
+                epStmt.close()
+            }
+        }
+
+        val targetIds = mutableSetOf<String>()
+        endpointNodes.forEach { targetIds.add(it.nodeId) }
+        if (canonRoute != null) targetIds.add("$projectId:endpoint#$canonRoute")
+        targetIds.add("$projectId:url_ref#$canonUrl")
+        targetIds.add("url_ref#$canonUrl")
+
+        val likeSource = canonRoute ?: canonUrl
+        val likePattern = "%" + likeSource.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        val edgeMatches = queryUrlEdgeRecords(projectId, likePattern, limit * 3, targetIds)
+        val producers = edgeMatches.filter { it.second.edgeType == "EXPOSES_ENDPOINT" }
+        val consumers = edgeMatches.filter { it.second.edgeType == "CALLS_ENDPOINT" }
+        val docRefs = edgeMatches.filter { it.second.edgeType == "URL_REFS" }
+
+        return buildJsonObject {
+            put("project", projectId)
+            put("query", trimmed)
+            put("kind", if (canonRoute != null) "http_endpoint" else "external_url")
+            if (canonRoute != null) put("canonical_route", canonRoute)
+            put("normalized_url", canonUrl)
+            put("endpoints", jsonCodec.encodeToJsonElement(endpointNodes))
+            putJsonArray("producers") {
+                for ((src, edge) in producers) {
+                    addJsonObject {
+                        put("node_id", src.nodeId); put("name", src.name); put("qualified_name", src.qualifiedName)
+                        put("file_id", src.fileId); put("line", edge.lineNumber); put("target", edge.targetNodeId)
+                    }
+                }
+            }
+            putJsonArray("consumers") {
+                for ((src, edge) in consumers) {
+                    addJsonObject {
+                        put("node_id", src.nodeId); put("name", src.name); put("qualified_name", src.qualifiedName)
+                        put("file_id", src.fileId); put("line", edge.lineNumber); put("target", edge.targetNodeId)
+                    }
+                }
+            }
+            putJsonArray("document_references") {
+                for ((src, edge) in docRefs) {
+                    addJsonObject {
+                        put("node_id", src.nodeId); put("name", src.name); put("qualified_name", src.qualifiedName)
+                        put("file_id", src.fileId); put("kind", src.kind); put("line", edge.lineNumber); put("target", edge.targetNodeId)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun queryUrlEdgeRecords(
+        projectId: String,
+        likePattern: String,
+        limit: Int,
+        exactTargetIds: Set<String> = emptySet()
+    ): List<Pair<GraphNode, GraphEdge>> {
+        val placeholders = if (exactTargetIds.isNotEmpty()) exactTargetIds.joinToString(",") { "?" } else ""
+        val inClause = if (exactTargetIds.isNotEmpty()) "e.target_node_id IN ($placeholders) OR " else ""
+        val stmt = db.prepare(
+            """
+            SELECT n.node_id, n.project_id, n.file_id, n.name, n.qualified_name, n.kind, n.signature,
+                   n.start_line, n.end_line, n.module_id, n.source_set, n.semiotic_layer, n.arch_layer,
+                   n.is_test_double, n.in_degree, n.out_degree, n.description, n.is_top_level,
+                   n.cyclomatic_complexity, n.cognitive_complexity, n.max_nesting_depth, n.complexity_score,
+                   e.edge_id, e.project_id, e.source_node_id, e.target_node_id, e.edge_type, e.provenance, e.confidence, e.line_number
+            FROM edges e
+            JOIN nodes n ON n.node_id = e.source_node_id AND n.project_id = e.project_id
+            WHERE e.project_id = ?
+              AND e.edge_type IN ('EXPOSES_ENDPOINT', 'CALLS_ENDPOINT', 'URL_REFS')
+              AND ($inClause e.target_node_id LIKE ? ESCAPE '\')
+            ORDER BY e.edge_type ASC, e.line_number ASC
+            LIMIT ?;
+            """.trimIndent()
+        )
+        val results = mutableListOf<Pair<GraphNode, GraphEdge>>()
+        try {
+            var bindIdx = 1
+            stmt.bindString(bindIdx++, projectId)
+            for (tid in exactTargetIds) stmt.bindString(bindIdx++, tid)
+            stmt.bindString(bindIdx++, likePattern)
+            stmt.bindInt(bindIdx, limit)
+            while (stmt.step()) {
+                val node = rowToNode(stmt)
+                val edge = GraphEdge(
+                    edgeId = stmt.columnString(22), projectId = stmt.columnString(23),
+                    sourceNodeId = stmt.columnString(24), targetNodeId = stmt.columnString(25),
+                    edgeType = stmt.columnString(26), provenance = stmt.columnString(27),
+                    confidence = stmt.columnDouble(28), lineNumber = stmt.columnInt(29)
+                )
+                results.add(Pair(node, edge))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
     }
 
     fun getShortestPath(
