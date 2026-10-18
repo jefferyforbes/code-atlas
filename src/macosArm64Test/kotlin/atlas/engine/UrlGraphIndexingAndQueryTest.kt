@@ -1,8 +1,8 @@
 package atlas.engine
 
-import atlas.cli.CodeGraphCli
+import atlas.cli.AtlasCli
 import atlas.db.SqliteGraphStore
-import atlas.mcp.CodeGraphMcpServer
+import atlas.mcp.AtlasMcpServer
 import atlas.util.PlatformFiles
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -96,7 +96,7 @@ class UrlGraphIndexingAndQueryTest {
             indexer.indexWorkspace("acme", subpaths = listOf("src/main/kotlin/com/acme/client"))
             assertNotNull(store.getNode("acme", "/api/v1/orders/{param}"))
 
-            val mcpServer = CodeGraphMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
+            val mcpServer = AtlasMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
             try {
                 assertEquals(4, mcpServer.toolDefinitions().size)
                 val urlSearchRes = mcpServer.callTool(
@@ -111,7 +111,7 @@ class UrlGraphIndexingAndQueryTest {
                 mcpServer.close()
             }
 
-            assertEquals(0, CodeGraphCli.run(arrayOf("--workspace", tmpDir, "--db", dbPath, "--project", "acme", "--url", "/api/v1/orders/999", "--json")))
+            assertEquals(0, AtlasCli.run(arrayOf("--workspace", tmpDir, "--db", dbPath, "--project", "acme", "--url", "/api/v1/orders/999", "--json")))
 
             PlatformFiles.writeText(serverFile, "package com.acme.server\n/** No routes. */\nclass OrderController { fun handleGetOrder() {} }")
             PlatformFiles.writeText(clientFile, "package com.acme.client\n/** No routes. */\ninterface OrderApiClient { suspend fun fetchOrder(id: String): String }")

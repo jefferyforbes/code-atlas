@@ -266,5 +266,5 @@ In accordance with workspace standards (Kotlin/Native for CLI tooling across Rel
    - Filter vector path bloat during streaming insertion.
 3. **Sub-Branch 3: `feature/atlas/figma-auditor-and-cli/tooling-and-cli`** (~260 LoC):
    - Author `FigmaDesignAuditor.kt` implementing the 12 deterministic SQL invariant queries.
-   - Wire `atlas figma [index|query|audit|synthesize-scope]` commands into [`CodeGraphCli.kt`](../../src/macosArm64Main/kotlin/atlas/cli/CodeGraphCli.kt).
+   - Wire `atlas figma [index|query|audit|synthesize-scope]` commands into [`AtlasCli.kt`](../../src/macosArm64Main/kotlin/atlas/cli/AtlasCli.kt).
    - Verify unit tests via `./gradlew macosArm64Test` and compile binary via `./gradlew installToLocalBin`.

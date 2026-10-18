@@ -48,7 +48,7 @@ import platform.posix.time
  * Standards-compliant 4-tool MCP Server and incremental workspace indexer with 32KB disk spillover.
  */
 @OptIn(ExperimentalForeignApi::class)
-class CodeGraphMcpServer(
+class AtlasMcpServer(
     val workspaceRoot: String,
     val customDbPath: String? = null,
     val cacheProfile: String? = null
@@ -369,7 +369,7 @@ class CodeGraphMcpServer(
         )
     }
 
-    private val projectServers = mutableMapOf<String, CodeGraphMcpServer>()
+    private val projectServers = mutableMapOf<String, AtlasMcpServer>()
 
     fun indexWorkspace(
         projectId: String,
@@ -391,7 +391,7 @@ class CodeGraphMcpServer(
         traceLogPath = traceLogPath
     )
 
-    private fun resolveServerForProject(projectId: String): CodeGraphMcpServer {
+    private fun resolveServerForProject(projectId: String): AtlasMcpServer {
         if (customDbPath != null || projectId.isEmpty()) return this
         val localStats = store.getStats(projectId)
         if (localStats.files > 0) return this
@@ -402,7 +402,7 @@ class CodeGraphMcpServer(
         if (canonCandidate == canonCurrent) return this
 
         return projectServers.getOrPut(canonCandidate) {
-            CodeGraphMcpServer(
+            AtlasMcpServer(
                 workspaceRoot = canonCandidate,
                 customDbPath = null,
                 cacheProfile = cacheProfile

@@ -1,6 +1,6 @@
 package atlas.mcp
 
-import atlas.cli.CodeGraphCli
+import atlas.cli.AtlasCli
 import atlas.util.PlatformFiles
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.add
@@ -72,11 +72,11 @@ class ComposeCliMcpIntegrationTest {
             """.trimIndent()
             PlatformFiles.writeText("$tmpDir/reports/trace.jsonl", traceLog)
 
-            val server = CodeGraphMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
+            val server = AtlasMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
             try {
                 // 1. Verify strictly 4 MCP tools and <= 25-word parameter descriptions
                 val tools = server.toolDefinitions()
-                assertEquals(4, tools.size, "CodeGraphMcpServer must expose strictly 4 MCP tools")
+                assertEquals(4, tools.size, "AtlasMcpServer must expose strictly 4 MCP tools")
                 for (tool in tools) {
                     val toolName = tool["name"]!!.jsonPrimitive.content
                     val props = tool["inputSchema"]!!.jsonObject["properties"]!!.jsonObject
@@ -183,34 +183,34 @@ class ComposeCliMcpIntegrationTest {
             }
 
             // 5. Test CLI commands and exit codes (1 on FAIL < 80.0, 0 on PASS >= 80.0)
-            val failExit = CodeGraphCli.run(
+            val failExit = AtlasCli.run(
                 arrayOf("compose", "audit", "--project", "shop-kmp", "--workspace", tmpDir, "--db", dbPath)
             )
             assertEquals(1, failExit, "CLI compose audit must return exit code 1 when overallScore < 80.0")
 
-            val aliasFailExit = CodeGraphCli.run(
+            val aliasFailExit = AtlasCli.run(
                 arrayOf("audit", "--compose", "--project", "shop-kmp", "--workspace", tmpDir, "--db", dbPath)
             )
             assertEquals(1, aliasFailExit, "CLI 'atlas audit --compose' must return exit code 1 when overallScore < 80.0")
 
-            val queryExit = CodeGraphCli.run(
+            val queryExit = AtlasCli.run(
                 arrayOf("compose", "query", "--action", "cascade", "--target", "CheckoutScreen", "--project", "shop-kmp", "--workspace", tmpDir, "--db", dbPath)
             )
             assertEquals(0, queryExit)
 
-            val doctorExit = CodeGraphCli.run(
+            val doctorExit = AtlasCli.run(
                 arrayOf("compose", "doctor", "--project", "shop-kmp", "--workspace", tmpDir, "--db", dbPath)
             )
             assertEquals(0, doctorExit)
 
-            val scopeExit = CodeGraphCli.run(
+            val scopeExit = AtlasCli.run(
                 arrayOf("compose", "synthesize-scope", "--paths", "CheckoutScreen", "--project", "shop-kmp", "--workspace", tmpDir, "--db", dbPath)
             )
             assertEquals(0, scopeExit)
 
             // Verify truncateSummary strictly caps non-JSON output at <= 400 UTF-8 bytes
             val longSummary = "[Compose Audit] " + "x".repeat(600)
-            val truncated = CodeGraphCli.truncateSummary(longSummary, isJson = false)
+            val truncated = AtlasCli.truncateSummary(longSummary, isJson = false)
             assertTrue(truncated.encodeToByteArray().size <= 400, "CLI summary must be <= 400 bytes")
         } finally {
             cleanupDir(tmpDir)
@@ -246,17 +246,17 @@ class ComposeCliMcpIntegrationTest {
             sb.append("@Preview\n@Composable\nfun CompliantWidgetPreview() { CompliantWidget1(\"\", 0) }\n")
             PlatformFiles.writeText("$tmpDir/src/commonMain/kotlin/ui/CompliantWidgets.kt", sb.toString())
 
-            val indexExit = CodeGraphCli.run(
+            val indexExit = AtlasCli.run(
                 arrayOf("compose", "index", "--project", "large-ui", "--workspace", tmpDir, "--db", dbPath)
             )
             assertEquals(0, indexExit)
 
-            val passAuditExit = CodeGraphCli.run(
+            val passAuditExit = AtlasCli.run(
                 arrayOf("compose", "audit", "--project", "large-ui", "--workspace", tmpDir, "--db", dbPath)
             )
             assertEquals(0, passAuditExit, "Compliant project with score 95.0/100 must return exit code 0")
 
-            val server = CodeGraphMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
+            val server = AtlasMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
             try {
                 val summaryEnvelope = server.callTool(
                     "atlas_query",
@@ -300,17 +300,17 @@ class ComposeCliMcpIntegrationTest {
             val ktPath = "$tmpDir/src/commonTest/kotlin/ui/ItemTest.kt"
             PlatformFiles.writeText(ktPath, ktSource)
 
-            val idxExit = CodeGraphCli.run(
+            val idxExit = AtlasCli.run(
                 arrayOf("compose", "index", "--project", "doc-apply", "--workspace", tmpDir, "--db", dbPath)
             )
             assertEquals(0, idxExit)
 
-            val docExit = CodeGraphCli.run(
+            val docExit = AtlasCli.run(
                 arrayOf("compose", "doctor", "--project", "doc-apply", "--workspace", tmpDir, "--db", dbPath)
             )
             assertEquals(0, docExit)
 
-            val applyExit = CodeGraphCli.run(
+            val applyExit = AtlasCli.run(
                 arrayOf("compose", "doctor", "--project", "doc-apply", "--workspace", tmpDir, "--db", dbPath, "--apply")
             )
             assertEquals(0, applyExit)

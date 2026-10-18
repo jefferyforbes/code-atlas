@@ -80,9 +80,9 @@ class UrlTargetResolverTest {
         assertEquals(10, glBlob.startLine)
         assertEquals(25, glBlob.endLine)
 
-        val relAnchor = UrlTargetResolver.parseCodeLocationUrl("src/macosArm64Main/kotlin/atlas/cli/CodeGraphCli.kt#L15")
+        val relAnchor = UrlTargetResolver.parseCodeLocationUrl("src/macosArm64Main/kotlin/atlas/cli/AtlasCli.kt#L15")
         assertNotNull(relAnchor)
-        assertEquals("src/macosArm64Main/kotlin/atlas/cli/CodeGraphCli.kt", relAnchor.filePathSuffix)
+        assertEquals("src/macosArm64Main/kotlin/atlas/cli/AtlasCli.kt", relAnchor.filePathSuffix)
         assertEquals(15, relAnchor.startLine)
         assertEquals(15, relAnchor.endLine)
 

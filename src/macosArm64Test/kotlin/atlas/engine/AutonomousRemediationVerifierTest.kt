@@ -1,7 +1,7 @@
 package atlas.engine
 
 import atlas.db.SqliteGraphStore
-import atlas.mcp.CodeGraphMcpServer
+import atlas.mcp.AtlasMcpServer
 import atlas.model.ComposeDoctorReport
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
@@ -277,7 +277,7 @@ class AutonomousRemediationVerifierTest {
                 """.trimIndent()
             )
 
-            val server = CodeGraphMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
+            val server = AtlasMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
 
             val toolArgs = buildJsonObject {
                 put("action", "verify_remediation")

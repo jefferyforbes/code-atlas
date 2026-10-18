@@ -5,7 +5,7 @@ import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkspaceInitEngine
 import atlas.extract.FigmaSnapshotExtractor
 import atlas.extract.UrlTargetResolver
-import atlas.mcp.CodeGraphMcpServer
+import atlas.mcp.AtlasMcpServer
 import atlas.model.FigmaSpatialBounds
 import atlas.util.PlatformFiles
 import kotlin.math.roundToInt
@@ -32,7 +32,7 @@ import kotlinx.serialization.json.putJsonObject
 /**
  * Command-line entrypoint for indexing, querying, synthesizing 3D scopes, and auditing code graphs.
  */
-class CodeGraphCli {
+class AtlasCli {
     companion object {
         const val VERSION = "0.5.2"
         const val SUMMARY_CEILING_BYTES = 400
@@ -249,7 +249,7 @@ class CodeGraphCli {
                 return 1
             }
 
-            val server = CodeGraphMcpServer(
+            val server = AtlasMcpServer(
                 workspaceRoot = workspace,
                 customDbPath = customDb,
                 cacheProfile = cacheProfile
@@ -642,7 +642,7 @@ class CodeGraphCli {
         }
 
         private fun runFigmaCommand(
-            server: CodeGraphMcpServer,
+            server: AtlasMcpServer,
             command: String,
             project: String,
             fileKeyArg: String?,
@@ -878,7 +878,7 @@ class CodeGraphCli {
         }
 
         private fun runComposeCommand(
-            server: CodeGraphMcpServer,
+            server: AtlasMcpServer,
             command: String,
             project: String,
             action: String,
@@ -1137,7 +1137,7 @@ class CodeGraphCli {
         }
 
         private fun runComplexityDoctorCommand(
-            server: CodeGraphMcpServer,
+            server: AtlasMcpServer,
             project: String,
             target: String,
             limit: Int,
@@ -1182,7 +1182,7 @@ class CodeGraphCli {
         }
 
         private fun runComplexityAuditCommand(
-            server: CodeGraphMcpServer,
+            server: AtlasMcpServer,
             project: String,
             paths: List<String>,
             target: String,
@@ -1218,7 +1218,7 @@ class CodeGraphCli {
         }
 
         private fun runComplexityQueryCommand(
-            server: CodeGraphMcpServer,
+            server: AtlasMcpServer,
             project: String,
             target: String,
             threshold: Int?,
@@ -1320,7 +1320,7 @@ class CodeGraphCli {
         }
 
         private fun runMigrateToolsCommand(
-            server: CodeGraphMcpServer,
+            server: AtlasMcpServer,
             paths: List<String>,
             target: String,
             applyRemediation: Boolean,

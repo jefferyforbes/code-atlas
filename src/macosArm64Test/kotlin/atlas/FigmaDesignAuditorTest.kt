@@ -1,6 +1,6 @@
 package atlas
 
-import atlas.cli.CodeGraphCli
+import atlas.cli.AtlasCli
 import atlas.db.SqliteGraphStore
 import atlas.engine.FigmaDesignAuditor
 import atlas.model.*
@@ -873,25 +873,25 @@ class FigmaDesignAuditorTest {
             store.close()
 
             // Run audit CLI subcommand
-            val auditExit = CodeGraphCli.run(
+            val auditExit = AtlasCli.run(
                 arrayOf("figma", "audit", "--project", "test_proj", "--file", fileKey, "--db", dbPath)
             )
             assertEquals(0, auditExit)
 
             // Run query CLI subcommand: symbol (explicit action)
-            val queryExit = CodeGraphCli.run(
+            val queryExit = AtlasCli.run(
                 arrayOf("figma", "query", "--project", "test_proj", "--file", fileKey, "--action", "symbol", "--target", "CleanButton", "--db", dbPath)
             )
             assertEquals(0, queryExit)
 
             // Run query CLI subcommand: default action (omitted --action defaults to symbol)
-            val queryDefaultExit = CodeGraphCli.run(
+            val queryDefaultExit = AtlasCli.run(
                 arrayOf("figma", "query", "--project", "test_proj", "--file", fileKey, "--target", "CleanButton", "--db", dbPath)
             )
             assertEquals(0, queryDefaultExit)
 
             // Run synthesize-scope CLI subcommand
-            val scopeExit = CodeGraphCli.run(
+            val scopeExit = AtlasCli.run(
                 arrayOf("figma", "synthesize-scope", "--project", "test_proj", "--file", fileKey, "--seeds", "CleanButton", "--db", dbPath)
             )
             assertEquals(0, scopeExit)

@@ -295,7 +295,7 @@ Atlas enforces the **Single Declaration Principle (`BOOST-003`)**: every source 
 src/macosArm64Main/kotlin/atlas/
 ├── Main.kt                            # Native CLI process entry point
 ├── bridge/VaultPlanBridge.kt          # Obsidian [[Wikilinks]], code spans & plans/ extraction
-├── cli/CodeGraphCli.kt                # Argument parsing, routing, <=400B compact summaries
+├── cli/AtlasCli.kt                    # Argument parsing, routing, <=400B compact summaries
 ├── config/CacheProfileResolver.kt     # Enterprise user cache vs in-repo .atlas/ resolution
 ├── db/                                # Native SQLite WAL, FTS5, R*Tree & statement wrappers
 │   ├── NativeSqliteDatabase.kt
@@ -321,7 +321,7 @@ src/macosArm64Main/kotlin/atlas/
 │   ├── PolyglotAstExtractor.kt        # Polyglot AST & HTTP route detection
 │   ├── SemioticLayerClassifier.kt     # FOROALFA semiotic & architectural classifier
 │   └── UrlTargetResolver.kt           # Figma deep links, code spans & route normalizer
-├── mcp/CodeGraphMcpServer.kt          # 4-tool Stdio JSON-RPC 2.0 MCP server with 32KB spillover
+├── mcp/AtlasMcpServer.kt              # 4-tool Stdio JSON-RPC 2.0 MCP server with 32KB spillover
 ├── model/                             # Domain data models (BOOST-003 compliant)
 └── util/                              # Filesystem utilities & pure Kotlin SHA-256
 ```

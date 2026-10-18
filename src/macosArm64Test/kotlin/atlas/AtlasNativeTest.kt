@@ -1,6 +1,6 @@
 package atlas
 
-import atlas.cli.CodeGraphCli
+import atlas.cli.AtlasCli
 import atlas.db.NativeSqliteDatabase
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
@@ -10,7 +10,7 @@ import atlas.extract.ModuleBoundaryDetector
 import atlas.extract.NameSegmentTokenizer
 import atlas.extract.PolyglotAstExtractor
 import atlas.extract.SemioticLayerClassifier
-import atlas.mcp.CodeGraphMcpServer
+import atlas.mcp.AtlasMcpServer
 import atlas.model.FigmaDocument
 import atlas.model.FigmaNode
 import atlas.model.FigmaSpatialBounds
@@ -219,32 +219,32 @@ class AtlasNativeTest {
 
     @Test
     fun testCliVersionFlag() {
-        assertEquals("0.5.2", CodeGraphCli.VERSION)
-        val exitCodeVersion = CodeGraphCli.run(arrayOf("--version"))
+        assertEquals("0.5.2", AtlasCli.VERSION)
+        val exitCodeVersion = AtlasCli.run(arrayOf("--version"))
         assertEquals(0, exitCodeVersion)
 
-        val exitCodeV = CodeGraphCli.run(arrayOf("-v"))
+        val exitCodeV = AtlasCli.run(arrayOf("-v"))
         assertEquals(0, exitCodeV)
 
-        val exitCodeCmd = CodeGraphCli.run(arrayOf("version"))
+        val exitCodeCmd = AtlasCli.run(arrayOf("version"))
         assertEquals(0, exitCodeCmd)
 
-        val exitCodeVersionJson = CodeGraphCli.run(arrayOf("version", "--json"))
+        val exitCodeVersionJson = AtlasCli.run(arrayOf("version", "--json"))
         assertEquals(0, exitCodeVersionJson)
 
-        val exitCodeFlagJson = CodeGraphCli.run(arrayOf("--version", "--json"))
+        val exitCodeFlagJson = AtlasCli.run(arrayOf("--version", "--json"))
         assertEquals(0, exitCodeFlagJson)
 
-        val exitCodeVJson = CodeGraphCli.run(arrayOf("-v", "--json"))
+        val exitCodeVJson = AtlasCli.run(arrayOf("-v", "--json"))
         assertEquals(0, exitCodeVJson)
 
-        val exitCodeFigmaVersion = CodeGraphCli.run(arrayOf("figma", "version"))
+        val exitCodeFigmaVersion = AtlasCli.run(arrayOf("figma", "version"))
         assertEquals(0, exitCodeFigmaVersion)
 
-        val exitCodeFigmaVersionJson = CodeGraphCli.run(arrayOf("figma", "version", "--json"))
+        val exitCodeFigmaVersionJson = AtlasCli.run(arrayOf("figma", "version", "--json"))
         assertEquals(0, exitCodeFigmaVersionJson)
 
-        val exitCodeFigmaHelp = CodeGraphCli.run(arrayOf("figma", "--help"))
+        val exitCodeFigmaHelp = AtlasCli.run(arrayOf("figma", "--help"))
         assertEquals(0, exitCodeFigmaHelp)
     }
 
@@ -368,10 +368,10 @@ class AtlasNativeTest {
     }
 
     @Test
-    fun testCodeGraphMcpServerFigmaToolsAndSingleLineJson() {
+    fun testAtlasMcpServerFigmaToolsAndSingleLineJson() {
         val dbPath = "/tmp/test_atlas_mcp_${getpid()}.db"
         PlatformFiles.delete(dbPath)
-        val server = CodeGraphMcpServer(workspaceRoot = ".", customDbPath = dbPath)
+        val server = AtlasMcpServer(workspaceRoot = ".", customDbPath = dbPath)
         try {
             val defs = server.toolDefinitions()
             val toolNames = defs.map { it["name"]?.jsonPrimitive?.content }
