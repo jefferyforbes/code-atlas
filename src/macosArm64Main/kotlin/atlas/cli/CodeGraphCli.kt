@@ -357,7 +357,7 @@ class CodeGraphCli {
                             put("project", project)
                             putJsonArray("targets") { seedList.forEach { add(it) } }
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val data = loadSpilledData(res)
                         val text = if (isJson) {
                             jsonPretty.encodeToString(data)
@@ -385,7 +385,7 @@ class CodeGraphCli {
                             if (!outcome.isNullOrBlank()) put("outcome", outcome)
                             if (!note.isNullOrBlank()) put("note", note)
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val data = loadSpilledData(res)
                         val bViolations = (data["single_declaration_violations"] ?: data["singleDeclarationViolations"])?.jsonArray?.size ?: 0
                         val lInversions = (data["layer_inversions"] ?: data["layerInversions"])?.jsonArray?.size ?: 0
@@ -416,7 +416,7 @@ class CodeGraphCli {
                             if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg)
                             put("limit", limit)
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val data = loadSpilledData(res)
                         val total = data["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
                         val bCount = data["boost003_count"]?.jsonPrimitive?.intOrNull ?: 0
@@ -483,7 +483,7 @@ class CodeGraphCli {
                                 putJsonArray("targets") { filterPaths.forEach { add(it) } }
                             }
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val data = loadSpilledData(res)
                         val count = data["dead_code_count"]?.jsonPrimitive?.intOrNull ?: 0
                         val names = data["dead_nodes"]?.jsonArray?.mapNotNull { it.jsonObject["name"]?.jsonPrimitive?.content } ?: emptyList()
@@ -504,7 +504,7 @@ class CodeGraphCli {
                             if (!outcome.isNullOrBlank()) put("outcome", outcome)
                             if (!note.isNullOrBlank()) put("note", note)
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val text = if (isJson) {
                             jsonPretty.encodeToString(res)
                         } else {
@@ -529,7 +529,7 @@ class CodeGraphCli {
                             if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg)
                             put("dry_run", !applyRemediation)
                         }
-                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val res = server.callTool("atlas_audit", toolArgs)
                         val data = loadSpilledData(res)
                         val valid = data["valid"]?.jsonPrimitive?.booleanOrNull ?: false
                         val phase = data["phase"]?.jsonPrimitive?.content ?: "UNKNOWN"
@@ -553,7 +553,7 @@ class CodeGraphCli {
                             if (!outcome.isNullOrBlank()) put("outcome", outcome)
                             if (!note.isNullOrBlank()) put("note", note)
                         }
-                        val res = server.callTool("codegraph_query", toolArgs)
+                        val res = server.callTool("atlas_query", toolArgs)
                         val data = if (isJson) loadSpilledData(res) else res
                         if (isJson) {
                             println(jsonPretty.encodeToString(data))
@@ -885,7 +885,7 @@ class CodeGraphCli {
                         put("depth", if (depth <= 2) 5 else depth)
                         put("strong_skipping", strongSkipping)
                     }
-                    val res = server.callTool("codegraph_query", toolArgs)
+                    val res = server.callTool("atlas_query", toolArgs)
                     val data = loadSpilledData(res)
                     if (isJson) {
                         println(jsonPretty.encodeToString(data))
@@ -911,7 +911,7 @@ class CodeGraphCli {
                         if (!compilerReportsDir.isNullOrBlank()) put("compiler_reports_dir", compilerReportsDir)
                         if (!traceLogPath.isNullOrBlank()) put("trace_log_path", traceLogPath)
                     }
-                    val res = server.callTool("codegraph_audit", toolArgs)
+                    val res = server.callTool("atlas_audit", toolArgs)
                     val data = loadSpilledData(res)
                     val score = data["overall_score"]?.jsonPrimitive?.doubleOrNull ?: 95.0
                     val status = data["status"]?.jsonPrimitive?.content ?: (if (score >= 80.0) "PASS" else "FAIL")
@@ -932,7 +932,7 @@ class CodeGraphCli {
                         put("limit", limit)
                         if (target.isNotEmpty()) putJsonArray("targets") { add(target) }
                     }
-                    val res = server.callTool("codegraph_audit", toolArgs)
+                    val res = server.callTool("atlas_audit", toolArgs)
                     val data = loadSpilledData(res)
 
                     if (applyRemediation) {
@@ -1025,7 +1025,7 @@ class CodeGraphCli {
                         put("project", project)
                         putJsonArray("targets") { seedList.forEach { add(it) } }
                     }
-                    val res = server.callTool("codegraph_audit", toolArgs)
+                    val res = server.callTool("atlas_audit", toolArgs)
                     val data = loadSpilledData(res)
                     if (isJson) {
                         println(jsonPretty.encodeToString(data))
@@ -1110,7 +1110,7 @@ class CodeGraphCli {
                 if (threshold != null) put("threshold", threshold)
                 if (!testCmd.isNullOrBlank()) put("test_command", testCmd)
             }
-            val res = server.callTool("codegraph_audit", toolArgs)
+            val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)
             val total = data["total_prescriptions"]?.jsonPrimitive?.intOrNull ?: 0
             val verified = data["verified_count"]?.jsonPrimitive?.intOrNull ?: 0
@@ -1155,7 +1155,7 @@ class CodeGraphCli {
                 if (threshold != null) put("threshold", threshold)
                 if (maxCyclomatic != null) put("max_cyclomatic", maxCyclomatic)
             }
-            val res = server.callTool("codegraph_audit", toolArgs)
+            val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)
             val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: true
             val total = data["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
@@ -1187,7 +1187,7 @@ class CodeGraphCli {
                 if (threshold != null) put("threshold", threshold)
                 put("limit", limit)
             }
-            val res = server.callTool("codegraph_query", toolArgs)
+            val res = server.callTool("atlas_query", toolArgs)
             val data = loadSpilledData(res)
             val results = data["results"]?.jsonArray ?: JsonArray(emptyList())
 

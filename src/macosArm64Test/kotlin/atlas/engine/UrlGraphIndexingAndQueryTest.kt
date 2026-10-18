@@ -100,7 +100,7 @@ class UrlGraphIndexingAndQueryTest {
             try {
                 assertEquals(4, mcpServer.toolDefinitions().size)
                 val urlSearchRes = mcpServer.callTool(
-                    "codegraph_query",
+                    "atlas_query",
                     buildJsonObject {
                         put("action", "url"); put("project", "acme")
                         put("target", "https://payments.acme.internal/v1/charge")

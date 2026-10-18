@@ -375,12 +375,12 @@ class AtlasNativeTest {
         try {
             val defs = server.toolDefinitions()
             val toolNames = defs.map { it["name"]?.jsonPrimitive?.content }
-            assertTrue(toolNames.contains("codegraph_query"))
-            assertTrue(toolNames.contains("codegraph_audit"))
+            assertTrue(toolNames.contains("atlas_query"))
+            assertTrue(toolNames.contains("atlas_audit"))
             assertTrue(toolNames.contains("figma_audit"))
             assertTrue(toolNames.contains("figma_scope"))
 
-            val auditTool = defs.first { it["name"]?.jsonPrimitive?.content == "codegraph_audit" }
+            val auditTool = defs.first { it["name"]?.jsonPrimitive?.content == "atlas_audit" }
             val actions = auditTool["inputSchema"]?.jsonObject?.get("properties")?.jsonObject
                 ?.get("action")?.jsonObject?.get("enum")?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
             assertTrue(actions.contains("figma_audit"))
@@ -409,12 +409,19 @@ class AtlasNativeTest {
             })
             assertNotNull(auditOut["maturityScore"])
 
-            // Test codegraph_audit with figma_audit action
-            val auditActionOut = server.callTool("codegraph_audit", buildJsonObject {
+            // Test atlas_audit with figma_audit action
+            val auditActionOut = server.callTool("atlas_audit", buildJsonObject {
                 put("action", "figma_audit")
                 put("file_key", "fk_test")
             })
             assertNotNull(auditActionOut["maturityScore"])
+
+            // Test legacy alias codegraph_audit with figma_audit action
+            val legacyAuditOut = server.callTool("codegraph_audit", buildJsonObject {
+                put("action", "figma_audit")
+                put("file_key", "fk_test")
+            })
+            assertNotNull(legacyAuditOut["maturityScore"])
 
             // Test figma_scope tool call
             val scopeOut = server.callTool("figma_scope", buildJsonObject {
@@ -423,13 +430,21 @@ class AtlasNativeTest {
             })
             assertNotNull(scopeOut["spatialBounds"])
 
-            // Test codegraph_audit with figma_scope action
-            val scopeActionOut = server.callTool("codegraph_audit", buildJsonObject {
+            // Test atlas_scope via atlas_audit with figma_scope action
+            val scopeActionOut = server.callTool("atlas_audit", buildJsonObject {
                 put("action", "figma_scope")
                 put("file_key", "fk_test")
                 put("project", "test_proj")
             })
             assertNotNull(scopeActionOut["spatialBounds"])
+
+            // Test legacy alias codegraph_audit with figma_scope action
+            val legacyScopeOut = server.callTool("codegraph_audit", buildJsonObject {
+                put("action", "figma_scope")
+                put("file_key", "fk_test")
+                put("project", "test_proj")
+            })
+            assertNotNull(legacyScopeOut["spatialBounds"])
 
             // Verify single-line NDJSON serialization for all tool outputs
             val encodedAudit = Json.encodeToString(JsonObject.serializer(), auditOut)

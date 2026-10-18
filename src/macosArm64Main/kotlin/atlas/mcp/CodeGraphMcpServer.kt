@@ -345,12 +345,12 @@ class CodeGraphMcpServer(
 
         return listOf(
             buildJsonObject {
-                put("name", "codegraph_query")
+                put("name", "atlas_query")
                 put("description", "Query indexed polyglot AST symbols, callers, callees, blast radius, Compose stability, or live source slices.")
                 put("inputSchema", querySchema)
             },
             buildJsonObject {
-                put("name", "codegraph_audit")
+                put("name", "atlas_audit")
                 put("description", "Audit architectural layers, Compose Gate 1 compliance, Doctor fixes, or synthesize 3D scopes.")
                 put("inputSchema", auditSchema)
             },
@@ -426,8 +426,8 @@ class CodeGraphMcpServer(
     private fun callToolDirect(name: String, arguments: JsonObject): JsonObject {
         val project = arguments["project"]?.jsonPrimitive?.content ?: "organisation"
         val payload = when (name) {
-            "codegraph_query", "atlas_query" -> handleQuery(arguments)
-            "codegraph_audit", "atlas_audit" -> handleAudit(arguments)
+            "atlas_query", "codegraph_query" -> handleQuery(arguments)
+            "atlas_audit", "codegraph_audit" -> handleAudit(arguments)
             "figma_audit" -> handleFigmaAudit(arguments)
             "figma_scope" -> handleFigmaScope(arguments)
             else -> throw IllegalArgumentException("Unknown MCP tool: $name")
@@ -598,7 +598,7 @@ class CodeGraphMcpServer(
                     }
                 }
             }
-            else -> throw IllegalArgumentException("Unsupported codegraph_query action: $action")
+            else -> throw IllegalArgumentException("Unsupported atlas_query action: $action")
         }
     }
 
@@ -801,7 +801,7 @@ class CodeGraphMcpServer(
             }
             "figma_audit" -> handleFigmaAudit(args)
             "figma_scope" -> handleFigmaScope(args)
-            else -> throw IllegalArgumentException("Unsupported codegraph_audit action: $action")
+            else -> throw IllegalArgumentException("Unsupported atlas_audit action: $action")
         }
     }
 
