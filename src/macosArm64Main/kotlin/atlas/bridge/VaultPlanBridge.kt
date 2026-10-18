@@ -1,5 +1,6 @@
 package atlas.bridge
 
+import atlas.extract.UrlTargetResolver
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 
@@ -10,6 +11,8 @@ object VaultPlanBridge {
 
     private val WIKILINK_RE = Regex("""\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]""")
     private val BACKTICK_SPAN_RE = Regex("""`([A-Za-z_][A-Za-z0-9_.:/#-]{2,80})`""")
+    private val MARKDOWN_URL_RE = Regex("""\[[^\]]*\]\(([^)\s]+)\)""")
+    private val BARE_ROUTE_BACKTICK_RE = Regex("""`(/[A-Za-z0-9_./:{}$<>-]+)`""")
 
     fun extractMarkdownAndPlans(
         projectId: String,
@@ -136,6 +139,67 @@ object VaultPlanBridge {
                         )
                     )
                 }
+            }
+        }
+
+        fun emitUrlRefEdge(targetId: String, lineNo: Int) {
+            val eid = "$docNodeId:urlref:$targetId:$lineNo"
+            if (seenEdges.add(eid)) {
+                edges.add(GraphEdge(eid, projectId, docNodeId, targetId, "URL_REFS", "EXTRACTED_URL", 1.0, lineNo))
+            }
+        }
+
+        for (match in MARKDOWN_URL_RE.findAll(markdownText)) {
+            val rawLink = match.groupValues[1].trim()
+            if (rawLink.isEmpty() || rawLink.startsWith("#")) continue
+            val lineNo = markdownText.take(match.range.first).count { it == '\n' } + 1
+
+            val codeLoc = UrlTargetResolver.parseCodeLocationUrl(rawLink)
+            if (codeLoc != null) {
+                val fileCandidates = byRelFile[codeLoc.filePathSuffix]
+                    ?: byRelFile.entries.firstOrNull { (k, _) ->
+                        k.endsWith("/${codeLoc.filePathSuffix}") || k == codeLoc.filePathSuffix.substringAfterLast('/')
+                    }?.value
+                    ?: emptyList()
+                val resolvedNode = when {
+                    codeLoc.startLine != null -> {
+                        val lineTarget = codeLoc.startLine
+                        fileCandidates
+                            .filter { it.kind !in setOf("file", "file_scope", "module") && lineTarget in it.startLine..it.endLine }
+                            .minWithOrNull(compareBy<GraphNode> { it.endLine - it.startLine }.thenByDescending { it.startLine })
+                            ?: fileCandidates.firstOrNull()
+                    }
+                    codeLoc.symbolFragment != null -> {
+                        fileCandidates.firstOrNull { it.name == codeLoc.symbolFragment } ?: byName[codeLoc.symbolFragment] ?: fileCandidates.firstOrNull()
+                    }
+                    else -> fileCandidates.firstOrNull()
+                }
+                if (resolvedNode != null) {
+                    emitUrlRefEdge(resolvedNode.nodeId, lineNo)
+                    continue
+                }
+            }
+
+            if (UrlTargetResolver.isHttpRouteCandidate(rawLink, hasExplicitRouteCall = false)) {
+                emitUrlRefEdge("$projectId:endpoint#${UrlTargetResolver.normalizeRouteTemplate(rawLink)}", lineNo)
+            } else if (rawLink.startsWith("http://", ignoreCase = true) ||
+                rawLink.startsWith("https://", ignoreCase = true) ||
+                rawLink.startsWith("figma://", ignoreCase = true) ||
+                rawLink.startsWith("sidecar://", ignoreCase = true)
+            ) {
+                emitUrlRefEdge("$projectId:url_ref#${UrlTargetResolver.normalizeExternalUrl(rawLink)}", lineNo)
+                val pathPart = UrlTargetResolver.extractPathFromHttpUrl(rawLink)
+                if (pathPart != null && UrlTargetResolver.isHttpRouteCandidate(pathPart, hasExplicitRouteCall = false)) {
+                    emitUrlRefEdge("$projectId:endpoint#${UrlTargetResolver.normalizeRouteTemplate(pathPart)}", lineNo)
+                }
+            }
+        }
+
+        for (match in BARE_ROUTE_BACKTICK_RE.findAll(markdownText)) {
+            val rawRoute = match.groupValues[1].trim()
+            if (UrlTargetResolver.isHttpRouteCandidate(rawRoute, hasExplicitRouteCall = false)) {
+                val lineNo = markdownText.take(match.range.first).count { it == '\n' } + 1
+                emitUrlRefEdge("$projectId:endpoint#${UrlTargetResolver.normalizeRouteTemplate(rawRoute)}", lineNo)
             }
         }
 

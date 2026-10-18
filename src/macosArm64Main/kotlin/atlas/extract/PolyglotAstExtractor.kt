@@ -64,7 +64,7 @@ class PolyglotAstExtractor {
             "require", "check", "match", "throw", "yield", "guard", "case", "typeof"
         )
 
-        const val EXTRACTOR_VERSION: String = "1.3.1"
+        const val EXTRACTOR_VERSION: String = "1.4.0"
 
         private val INFIX_CALL_RE = Regex(
             """(?<=\s|[)\]a-zA-Z0-9_])\s+(?<callee>[a-zA-Z_][a-zA-Z0-9_]{1,})\s+(?=[A-Za-z0-9_"'(\[])"""
@@ -457,15 +457,73 @@ class PolyglotAstExtractor {
             val moduleId = ModuleBoundaryDetector.resolveModuleId(relPath, knownModules)
             val sourceSet = SemioticLayerClassifier.detectSourceSet(relPath)
 
-            return when (lang) {
+            val (baseNodes, baseEdges, topLevelCount) = when (lang) {
                 "kotlin" -> extractKotlin(projectId, relPath, sourceText, moduleId, sourceSet)
                 "swift" -> extractSwift(projectId, relPath, sourceText, moduleId, sourceSet)
                 "python" -> extractPython(projectId, relPath, sourceText, moduleId, sourceSet)
                 "typescript", "javascript" -> extractTypeScript(projectId, relPath, sourceText, moduleId, sourceSet)
                 "rust" -> extractRust(projectId, relPath, sourceText, moduleId, sourceSet)
                 "cpp" -> extractCpp(projectId, relPath, sourceText, moduleId, sourceSet)
-                else -> Triple(emptyList(), emptyList(), 0)
+                else -> return Triple(emptyList(), emptyList(), 0)
             }
+
+            val maskedText = maskCommentsAndStrings(sourceText, lang)
+            val extractedUrls = UrlTargetResolver.extractCodeRoutesAndUrls(sourceText, maskedText, lang)
+            if (extractedUrls.isEmpty()) {
+                return Triple(baseNodes, baseEdges, topLevelCount)
+            }
+
+            val fileId = "$projectId:$relPath"
+            val finalNodes = baseNodes.toMutableList()
+            val finalEdges = baseEdges.toMutableList()
+            var fileScopeNode: GraphNode? = finalNodes.firstOrNull { it.nodeId == "$fileId#file" }
+
+            for (item in extractedUrls) {
+                val directEnclosing = baseNodes
+                    .filter { it.kind != "file_scope" && item.lineNumber in it.startLine..it.endLine }
+                    .minWithOrNull(compareBy<GraphNode> { it.endLine - it.startLine }.thenByDescending { it.startLine })
+                val annotatedChild = if (directEnclosing == null || directEnclosing.kind in setOf("class", "interface", "object")) {
+                    baseNodes
+                        .filter {
+                            it.kind in setOf("function", "method", "composable") &&
+                                it.startLine in (item.lineNumber + 1)..(item.lineNumber + 5) &&
+                                (directEnclosing == null || (it.startLine >= directEnclosing.startLine && it.endLine <= directEnclosing.endLine))
+                        }
+                        .minByOrNull { it.startLine - item.lineNumber }
+                } else null
+
+                val sourceNode = annotatedChild ?: directEnclosing ?: run {
+                    if (fileScopeNode == null) {
+                        val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relPath)
+                        val totalLines = sourceText.lines().size.coerceAtLeast(1)
+                        val created = GraphNode(
+                            nodeId = "$fileId#file", projectId = projectId, fileId = fileId,
+                            name = relPath.substringAfterLast('/'), qualifiedName = relPath,
+                            kind = "file_scope", signature = relPath, startLine = 1, endLine = totalLines,
+                            moduleId = moduleId, sourceSet = sourceSet, semioticLayer = semLayer,
+                            archLayer = archLayer, isTestDouble = false, isTopLevel = false
+                        )
+                        fileScopeNode = created
+                        finalNodes.add(created)
+                    }
+                    fileScopeNode!!
+                }
+
+                val targetId = if (item.isHttpEndpointRoute) {
+                    "$projectId:endpoint#${item.canonicalRouteOrUrl}"
+                } else {
+                    "$projectId:url_ref#${item.canonicalRouteOrUrl}"
+                }
+                finalEdges.add(
+                    GraphEdge(
+                        edgeId = "${sourceNode.nodeId}:url:${item.edgeType.lowercase()}:${item.canonicalRouteOrUrl}:${item.lineNumber}",
+                        projectId = projectId, sourceNodeId = sourceNode.nodeId, targetNodeId = targetId,
+                        edgeType = item.edgeType, provenance = "EXTRACTED_URL", confidence = 1.0, lineNumber = item.lineNumber
+                    )
+                )
+            }
+
+            return Triple(finalNodes, finalEdges, topLevelCount)
         }
 
         private class LexerState {
@@ -942,7 +1000,7 @@ class PolyglotAstExtractor {
             return rest
         }
 
-        private fun computeComplexityForNode(
+        private fun computeComplexityMetrics(
             kind: String,
             startLine: Int,
             endLine: Int,
@@ -1431,7 +1489,7 @@ class PolyglotAstExtractor {
                     null
                 }
 
-                val (cVec, cScore) = computeComplexityForNode(
+                val (cVec, cScore) = computeComplexityMetrics(
                     kind = kind,
                     startLine = startLine,
                     endLine = endLine,
@@ -1545,7 +1603,7 @@ class PolyglotAstExtractor {
                 val description = if (isTopLevel) extractDocDescription(lines, startLine, "swift") else null
 
                 val kind = if (kw == "func") "function" else kw
-                val (cVec, cScore) = computeComplexityForNode(
+                val (cVec, cScore) = computeComplexityMetrics(
                     kind = kind,
                     startLine = startLine,
                     endLine = endLine,
@@ -1655,7 +1713,7 @@ class PolyglotAstExtractor {
                     extractDocDescription(lines, startLine, "typescript")
                 } else null
 
-                val (cVec, cScore) = computeComplexityForNode(
+                val (cVec, cScore) = computeComplexityMetrics(
                     kind = kind,
                     startLine = startLine,
                     endLine = endLine,
@@ -1754,7 +1812,7 @@ class PolyglotAstExtractor {
                     extractDocDescription(lines, startLine, "rust")
                 } else null
 
-                val (cVec, cScore) = computeComplexityForNode(
+                val (cVec, cScore) = computeComplexityMetrics(
                     kind = kind,
                     startLine = startLine,
                     endLine = endLine,
@@ -1903,7 +1961,7 @@ class PolyglotAstExtractor {
                     extractDocDescription(lines, startLine, "cpp")
                 } else null
 
-                val (cVec, cScore) = computeComplexityForNode(
+                val (cVec, cScore) = computeComplexityMetrics(
                     kind = "function",
                     startLine = startLine,
                     endLine = endLine,
@@ -2019,7 +2077,7 @@ class PolyglotAstExtractor {
                 } else null
 
                 val kind = if ("class" in kw) "class" else "function"
-                val (cVec, cScore) = computeComplexityForNode(
+                val (cVec, cScore) = computeComplexityMetrics(
                     kind = kind,
                     startLine = startLine,
                     endLine = endLine,
