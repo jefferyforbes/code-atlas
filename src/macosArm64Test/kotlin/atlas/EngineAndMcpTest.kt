@@ -795,7 +795,7 @@ class EngineAndMcpTest {
                 createdAtEpoch = time(null).toDouble()
             )
 
-            // 1. atlas_query with action=impact (and legacy alias codegraph_query)
+            // 1. atlas_query with action=impact (legacy codegraph_query rejected)
             val queryCall = server.processJsonRpcMessage(
                 """{"jsonrpc":"2.0","id":101,"method":"tools/call","params":{"name":"atlas_query","arguments":{"project":"test_wm","action":"impact","target":"test_wm:src/Service.kt#PaymentService"}}}"""
             )
@@ -806,38 +806,22 @@ class EngineAndMcpTest {
                 """{"jsonrpc":"2.0","id":1011,"method":"tools/call","params":{"name":"codegraph_query","arguments":{"project":"test_wm","action":"impact","target":"test_wm:src/Service.kt#PaymentService"}}}"""
             )
             assertNotNull(legacyQueryCall)
-            assertTrue(legacyQueryCall.contains("exclusive lock on payment ledger table"), "Legacy codegraph_query alias must work")
-            val parsedLegacy = json.parseToJsonElement(legacyQueryCall).jsonObject
-            val legacyText = parsedLegacy["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.content ?: ""
-            val legacyData = json.parseToJsonElement(legacyText).jsonObject
-            val deprecation = legacyData["_deprecation"]?.jsonObject
-            assertNotNull(deprecation, "Legacy codegraph_query call must include _deprecation metadata")
-            assertEquals("codegraph_query", deprecation["legacy_tool"]?.jsonPrimitive?.content)
-            assertEquals("atlas_query", deprecation["preferred_tool"]?.jsonPrimitive?.content)
+            assertTrue(legacyQueryCall.contains("isError"), "Legacy codegraph_query call must return error")
+            assertTrue(legacyQueryCall.contains("Unknown MCP tool: codegraph_query"))
 
-            // 2. atlas_audit with action=synthesize_3d_scope (and legacy alias codegraph_audit)
+            // 2. atlas_audit with action=synthesize_3d_scope (legacy codegraph_audit rejected)
             val scopeCall = server.processJsonRpcMessage(
                 """{"jsonrpc":"2.0","id":102,"method":"tools/call","params":{"name":"atlas_audit","arguments":{"project":"test_wm","action":"synthesize_3d_scope","targets":["test_wm:src/Service.kt#PaymentService"]}}}"""
             )
             assertNotNull(scopeCall)
             assertTrue(scopeCall.contains("exclusive lock on payment ledger table"), "3D scope synthesis response must include active WorkMemory annotations")
-            val parsedScope = json.parseToJsonElement(scopeCall).jsonObject
-            val scopeText = parsedScope["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.content ?: ""
-            val scopeData = json.parseToJsonElement(scopeText).jsonObject
-            assertFalse(scopeData.containsKey("_deprecation"), "Canonical atlas_audit must not contain _deprecation metadata")
 
             val legacyScopeCall = server.processJsonRpcMessage(
                 """{"jsonrpc":"2.0","id":1021,"method":"tools/call","params":{"name":"codegraph_audit","arguments":{"project":"test_wm","action":"synthesize_3d_scope","targets":["test_wm:src/Service.kt#PaymentService"]}}}"""
             )
             assertNotNull(legacyScopeCall)
-            assertTrue(legacyScopeCall.contains("exclusive lock on payment ledger table"), "Legacy codegraph_audit alias must work")
-            val parsedLegacyScope = json.parseToJsonElement(legacyScopeCall).jsonObject
-            val legacyScopeText = parsedLegacyScope["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.content ?: ""
-            val legacyScopeData = json.parseToJsonElement(legacyScopeText).jsonObject
-            val scopeDeprecation = legacyScopeData["_deprecation"]?.jsonObject
-            assertNotNull(scopeDeprecation, "Legacy codegraph_audit call must include _deprecation metadata")
-            assertEquals("codegraph_audit", scopeDeprecation["legacy_tool"]?.jsonPrimitive?.content)
-            assertEquals("atlas_audit", scopeDeprecation["preferred_tool"]?.jsonPrimitive?.content)
+            assertTrue(legacyScopeCall.contains("isError"), "Legacy codegraph_audit call must return error")
+            assertTrue(legacyScopeCall.contains("Unknown MCP tool: codegraph_audit"))
         } finally {
             server.close()
             PlatformFiles.delete(dbPath)

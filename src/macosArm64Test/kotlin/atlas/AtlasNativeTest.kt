@@ -416,12 +416,13 @@ class AtlasNativeTest {
             })
             assertNotNull(auditActionOut["maturityScore"])
 
-            // Test legacy alias codegraph_audit with figma_audit action
-            val legacyAuditOut = server.callTool("codegraph_audit", buildJsonObject {
-                put("action", "figma_audit")
-                put("file_key", "fk_test")
-            })
-            assertNotNull(legacyAuditOut["maturityScore"])
+            // Test legacy alias codegraph_audit is rejected
+            kotlin.test.assertFailsWith<IllegalArgumentException> {
+                server.callTool("codegraph_audit", buildJsonObject {
+                    put("action", "figma_audit")
+                    put("file_key", "fk_test")
+                })
+            }
 
             // Test figma_scope tool call
             val scopeOut = server.callTool("figma_scope", buildJsonObject {
@@ -438,13 +439,14 @@ class AtlasNativeTest {
             })
             assertNotNull(scopeActionOut["spatialBounds"])
 
-            // Test legacy alias codegraph_audit with figma_scope action
-            val legacyScopeOut = server.callTool("codegraph_audit", buildJsonObject {
-                put("action", "figma_scope")
-                put("file_key", "fk_test")
-                put("project", "test_proj")
-            })
-            assertNotNull(legacyScopeOut["spatialBounds"])
+            // Test legacy alias codegraph_audit is rejected for figma_scope action
+            kotlin.test.assertFailsWith<IllegalArgumentException> {
+                server.callTool("codegraph_audit", buildJsonObject {
+                    put("action", "figma_scope")
+                    put("file_key", "fk_test")
+                    put("project", "test_proj")
+                })
+            }
 
             // Verify single-line NDJSON serialization for all tool outputs
             val encodedAudit = Json.encodeToString(JsonObject.serializer(), auditOut)

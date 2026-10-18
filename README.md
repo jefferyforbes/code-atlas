@@ -221,13 +221,10 @@ Atlas exposes a standard **JSON-RPC 2.0 stdio MCP server** with **4 compound too
 
 ### Tool Catalog
 
-1. **`atlas_query`** *(legacy alias: `codegraph_query`)*: Query polyglot symbols, callers, callees, blast radius, URLs, complexity, and Compose stability.
-2. **`atlas_audit`** *(legacy alias: `codegraph_audit`)*: Architecture verification, BOOST-003 audits, Compose compliance, complexity gates, 3D scope synthesis, and tool migrations (`migrate_tools`).
+1. **`atlas_query`**: Query polyglot symbols, callers, callees, blast radius, URLs, complexity, and Compose stability.
+2. **`atlas_audit`**: Architecture verification, BOOST-003 audits, Compose compliance, complexity gates, 3D scope synthesis, and tool migrations (`migrate_tools`).
 3. **`figma_audit`**: Run 12 deterministic design invariant SQL audits over Figma snapshots.
 4. **`figma_scope`**: Synthesize 2D spatial canvas bounds and token scopes.
-
-> [!NOTE]
-> Invoking legacy tool names `codegraph_query` or `codegraph_audit` transparently services the request while injecting an inline `_deprecation` metadata block recommending `atlas_query` or `atlas_audit`.
 
 ### Client Configuration
 

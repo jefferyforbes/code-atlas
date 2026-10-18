@@ -427,26 +427,12 @@ class CodeGraphMcpServer(
 
     private fun callToolDirect(name: String, arguments: JsonObject): JsonObject {
         val project = arguments["project"]?.jsonPrimitive?.content ?: "organisation"
-        val rawPayload = when (name) {
-            "atlas_query", "codegraph_query" -> handleQuery(arguments)
-            "atlas_audit", "codegraph_audit" -> handleAudit(arguments)
+        val payload = when (name) {
+            "atlas_query" -> handleQuery(arguments)
+            "atlas_audit" -> handleAudit(arguments)
             "figma_audit" -> handleFigmaAudit(arguments)
             "figma_scope" -> handleFigmaScope(arguments)
             else -> throw IllegalArgumentException("Unknown MCP tool: $name")
-        }
-        val payload = if (name == "codegraph_query" || name == "codegraph_audit") {
-            val preferred = if (name == "codegraph_query") "atlas_query" else "atlas_audit"
-            buildJsonObject {
-                putJsonObject("_deprecation") {
-                    put("deprecated", true)
-                    put("legacy_tool", name)
-                    put("preferred_tool", preferred)
-                    put("message", "Tool '$name' is deprecated and has been renamed to '$preferred'. Please update tool calls to '$preferred'.")
-                }
-                rawPayload.forEach { (k, v) -> put(k, v) }
-            }
-        } else {
-            rawPayload
         }
         return enforceSpillover(project, payload)
     }
