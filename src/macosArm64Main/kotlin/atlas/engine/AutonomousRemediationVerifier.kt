@@ -343,16 +343,33 @@ class AutonomousRemediationVerifier(
         }
 
         if (ruleId.startsWith("COMPLEXITY") || expectedReductionPercent != null) {
+            val sym = if (!targetNodeId.isNullOrBlank() && targetNodeId.contains('#')) {
+                targetNodeId.substringAfter('#')
+            } else {
+                targetNodeId ?: ""
+            }
+            val simpleSym = sym.substringAfterLast('.')
+
             val origTargetNode = if (!targetNodeId.isNullOrBlank()) {
-                origNodes.firstOrNull { it.nodeId == targetNodeId }
-                    ?: origNodes.firstOrNull { it.qualifiedName == targetNodeId }
-                    ?: origNodes.firstOrNull { it.name == targetNodeId }
+                origNodes.firstOrNull {
+                    it.nodeId == targetNodeId ||
+                    (sym.isNotEmpty() && it.nodeId.substringAfter('#') == sym) ||
+                    it.qualifiedName == targetNodeId ||
+                    it.name == targetNodeId ||
+                    (sym.isNotEmpty() && it.name == sym) ||
+                    (simpleSym.isNotEmpty() && it.name == simpleSym)
+                }
             } else {
                 origNodes.firstOrNull { it.kind in setOf("function", "method", "composable") }
             }
             val newTargetNode = if (!targetNodeId.isNullOrBlank()) {
                 val matches = nodes.filter {
-                    it.nodeId == targetNodeId || it.qualifiedName == targetNodeId || it.name == targetNodeId
+                    it.nodeId == targetNodeId ||
+                    (sym.isNotEmpty() && it.nodeId.substringAfter('#') == sym) ||
+                    it.qualifiedName == targetNodeId ||
+                    it.name == targetNodeId ||
+                    (sym.isNotEmpty() && it.name == sym) ||
+                    (simpleSym.isNotEmpty() && it.name == simpleSym)
                 }
                 if (origTargetNode != null && matches.size > 1) {
                     matches.minByOrNull { kotlin.math.abs(it.startLine - origTargetNode.startLine) }
@@ -363,19 +380,30 @@ class AutonomousRemediationVerifier(
                 nodes.firstOrNull { it.kind in setOf("function", "method", "composable") }
             }
 
+            val diff = if (origTargetNode != null && newTargetNode != null) {
+                origTargetNode.cognitiveComplexity - newTargetNode.cognitiveComplexity
+            } else {
+                0
+            }
+
             val reductionPct = if (origTargetNode != null && newTargetNode != null && origTargetNode.cognitiveComplexity > 0) {
-                val diff = origTargetNode.cognitiveComplexity - newTargetNode.cognitiveComplexity
                 (diff.toDouble() / origTargetNode.cognitiveComplexity.toDouble()) * 100.0
             } else {
                 expectedReductionPercent ?: 0.0
             }
 
             val roundedReduction = (reductionPct * 10.0).roundToInt() / 10.0
-            if (reductionPct < 25.0) {
-                checksPassed = false
-                details.add("Gate 4 failed: Cognitive complexity reduction ($roundedReduction%) is below the required 25.0% threshold.")
+            val floorSatisfied = if (origTargetNode != null && newTargetNode != null && origTargetNode.cognitiveComplexity > 0) {
+                diff >= 1
             } else {
-                details.add("Gate 4 passed: Cognitive complexity reduction verified ($roundedReduction% >= 25.0%).")
+                roundedReduction >= 25.0
+            }
+
+            if (!floorSatisfied) {
+                checksPassed = false
+                details.add("Gate 4 failed: Cognitive complexity reduction ($roundedReduction%) is below the required threshold.")
+            } else {
+                details.add("Gate 4 passed: Cognitive complexity reduction verified ($roundedReduction% >= threshold, delta=$diff).")
             }
         }
 

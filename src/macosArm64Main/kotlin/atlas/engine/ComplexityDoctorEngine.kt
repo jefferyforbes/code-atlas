@@ -200,8 +200,9 @@ class ComplexityDoctorEngine(
         if (bodyStart > endIdx) return null
 
         var ifLineIdx = -1
-        var ifMatch: MatchResult? = null
-        val ifRegex = Regex("""^(\s*)if\s*\((.+)\)\s*\{$""")
+        var ifIndent = ""
+        var rawCondition = ""
+        val ifRegex = Regex("""^(\s*)if\s*\((.+)\)\s*\{(?:\s*//.*)?$""")
 
         for (i in (bodyStart + 1)..endIdx) {
             val trimmed = lines[i].trim()
@@ -211,14 +212,21 @@ class ComplexityDoctorEngine(
             val m = ifRegex.find(lines[i])
             if (m != null) {
                 ifLineIdx = i
-                ifMatch = m
+                ifIndent = m.groupValues[1]
+                rawCondition = m.groupValues[2].trim()
+                break
+            }
+            // Allow skipping variable definitions/declarations before the outer if condition
+            if (trimmed.startsWith("val ") || trimmed.startsWith("var ") ||
+                trimmed.startsWith("let ") || trimmed.startsWith("const ") ||
+                trimmed.startsWith("final ") || trimmed.startsWith("auto ")
+            ) {
+                continue
             }
             break
         }
 
-        if (ifLineIdx < 0 || ifMatch == null) return null
-        val ifIndent = ifMatch.groupValues[1]
-        val rawCondition = ifMatch.groupValues[2].trim()
+        if (ifLineIdx < 0 || rawCondition.isEmpty()) return null
 
         var depth = 0
         var closeIfIdx = -1
@@ -338,7 +346,7 @@ class ComplexityDoctorEngine(
         val reductionPct = if (cogBefore > 0) (diff.toDouble() / cogBefore.toDouble()) * 100.0 else 0.0
         val roundedPct = (reductionPct * 10.0).roundToInt() / 10.0
 
-        if (roundedPct < 25.0) return null
+        if (diff < 1) return null
 
         val inDeg = inDegree.coerceAtLeast(node.inDegree).toDouble()
         val riskIndex = cogBefore.toDouble() * (1.0 + ln(1.0 + inDeg))
@@ -444,7 +452,7 @@ class ComplexityDoctorEngine(
             val reductionPct = if (cogBefore > 0) (diff.toDouble() / cogBefore.toDouble()) * 100.0 else 0.0
             val roundedPct = (reductionPct * 10.0).roundToInt() / 10.0
 
-            if (roundedPct < 25.0) continue
+            if (diff < 1) continue
 
             val inDeg = inDegree.coerceAtLeast(node.inDegree).toDouble()
             val riskIndex = cogBefore.toDouble() * (1.0 + ln(1.0 + inDeg))

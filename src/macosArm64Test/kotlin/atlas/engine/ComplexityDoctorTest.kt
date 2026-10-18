@@ -485,4 +485,108 @@ class ComplexityDoctorTest {
             cleanDir(tmpDir)
         }
     }
+
+    @Test
+    fun testDoctorSynthesizesElvisGuardOnHighCognitiveFunctionWithLowPercentage() {
+        val tmpDir = makeTempDir()
+        try {
+            val relPath = "src/HighBatchProcessor.kt"
+            val fullPath = "$tmpDir/$relPath"
+            PlatformFiles.mkdirs("$tmpDir/src")
+            val source = """
+                package atlas.sample
+
+                class HighBatchProcessor {
+                    fun processBatch(ids: List<String>): List<String> {
+                        val results = mutableListOf<String>()
+                        for (id in ids) {
+                            val item = fetchItem(id)
+                            if (item == null) {
+                                return emptyList()
+                            }
+                            if (id.length > 5) {
+                                if (id.startsWith("A")) {
+                                    if (id.endsWith("Z")) {
+                                        for (ch in id) {
+                                            if (ch == '1') {
+                                                results.add(item)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return results
+                    }
+
+                    fun fetchItem(id: String): String? = id
+                }
+            """.trimIndent()
+            PlatformFiles.writeText(fullPath, source)
+
+            val engine = ComplexityDoctorEngine(workspaceRoot = tmpDir)
+            val prescriptions = engine.analyzeSource(relPath, source)
+            val elvisPrescription = prescriptions.firstOrNull { it.ruleId == "COMPLEXITY-ELVIS-GUARD" }
+            assertNotNull(elvisPrescription, "Expected ELVIS_GUARD prescription on high complexity function")
+            assertTrue(elvisPrescription.cognitiveBefore >= 10, "Expected cognitiveBefore >= 10, got ${elvisPrescription.cognitiveBefore}")
+            assertEquals(1, elvisPrescription.cognitiveBefore - elvisPrescription.cognitiveAfter, "Expected reduction of 1 point")
+            assertTrue(elvisPrescription.reductionPercent < 25.0, "Expected reductionPercent < 25.0%, got ${elvisPrescription.reductionPercent}")
+            assertTrue(elvisPrescription.afterSnippet.contains("val item = fetchItem(id) ?: return emptyList()"))
+
+            val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir)
+            val result = verifier.verifyPrescription("test-proj", elvisPrescription, dryRun = true)
+            assertTrue(result.valid, "Verifier must approve Elvis prescription with delta >= 1")
+            assertTrue(result.checksPassed, "Gate 4 must pass with delta >= 1")
+            assertTrue(result.details.any { it.contains("Gate 4 passed") })
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testDoctorSynthesizesGuardInversionWithPrecedingVariableDeclarations() {
+        val tmpDir = makeTempDir()
+        try {
+            val relPath = "src/PrecedingVarsProcessor.kt"
+            val fullPath = "$tmpDir/$relPath"
+            PlatformFiles.mkdirs("$tmpDir/src")
+            val source = """
+                package atlas.sample
+
+                class PrecedingVarsProcessor {
+                    fun process(flag: Boolean, items: List<String>?): Int {
+                        val prefix = "item_"
+                        val limit = 100
+                        if (flag && items != null) {
+                            var count = 0
+                            for (x in items) {
+                                if (x.startsWith(prefix)) {
+                                    if (x.length > limit) {
+                                        count++
+                                    }
+                                }
+                            }
+                            return count
+                        }
+                        return 0
+                    }
+                }
+            """.trimIndent()
+            PlatformFiles.writeText(fullPath, source)
+
+            val engine = ComplexityDoctorEngine(workspaceRoot = tmpDir)
+            val prescriptions = engine.analyzeSource(relPath, source)
+            val guardPrescription = prescriptions.firstOrNull { it.ruleId == "COMPLEXITY-GUARD-INVERT" }
+            assertNotNull(guardPrescription, "Expected GUARD_INVERT prescription despite preceding val declarations")
+            assertTrue(guardPrescription.afterSnippet.contains("if (!flag || items == null) return 0"))
+
+            val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir)
+            val result = verifier.verifyPrescription("test-proj", guardPrescription, dryRun = true)
+            assertTrue(result.valid)
+            assertTrue(result.checksPassed)
+            assertTrue(result.details.any { it.contains("Gate 4 passed") })
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
 }
