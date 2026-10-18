@@ -1,7 +1,7 @@
 package atlas.cli
 
 import atlas.db.SqliteGraphStore
-import atlas.mcp.CodeGraphMcpServer
+import atlas.mcp.AtlasMcpServer
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
 import kotlin.random.Random
@@ -63,12 +63,12 @@ class ComplexityCliTest {
             )
             store.upsertNodesAndEdges("proj", listOf(node), emptyList())
 
-            val exitJson = CodeGraphCli.run(
+            val exitJson = AtlasCli.run(
                 arrayOf("query", "--action", "complexity", "--project", "proj", "--db", dbPath, "--json")
             )
             assertEquals(0, exitJson)
 
-            val exitTable = CodeGraphCli.run(
+            val exitTable = AtlasCli.run(
                 arrayOf("query", "--action", "complexity", "--project", "proj", "--db", dbPath)
             )
             assertEquals(0, exitTable)
@@ -101,13 +101,13 @@ class ComplexityCliTest {
             store.upsertNodesAndEdges("proj", listOf(complexNode), emptyList())
 
             // Default threshold is 10: node with cognitive 16 should fail (exit code 1)
-            val exitFail = CodeGraphCli.run(
+            val exitFail = AtlasCli.run(
                 arrayOf("audit", "--complexity", "--project", "proj", "--db", dbPath)
             )
             assertEquals(1, exitFail)
 
             // Relaxed threshold 20: node with cognitive 16 should pass (exit code 0)
-            val exitPass = CodeGraphCli.run(
+            val exitPass = AtlasCli.run(
                 arrayOf("audit", "--complexity", "--threshold", "20", "--project", "proj", "--db", dbPath)
             )
             assertEquals(0, exitPass)
@@ -166,7 +166,7 @@ class ComplexityCliTest {
             store.upsertNodesAndEdges("proj", listOf(node), emptyList())
 
             // Doctor dry run mode
-            val exitDryRun = CodeGraphCli.run(
+            val exitDryRun = AtlasCli.run(
                 arrayOf(
                     "doctor", "--complexity",
                     "--project", "proj",
@@ -178,7 +178,7 @@ class ComplexityCliTest {
             assertEquals(0, exitDryRun)
 
             // Doctor apply mode
-            val exitApply = CodeGraphCli.run(
+            val exitApply = AtlasCli.run(
                 arrayOf(
                     "doctor", "--complexity",
                     "--project", "proj",
@@ -201,7 +201,7 @@ class ComplexityCliTest {
     @Test
     fun testMcpComplexityEndpoints() {
         val dbPath = makeTempDb()
-        val server = CodeGraphMcpServer(workspaceRoot = ".", customDbPath = dbPath)
+        val server = AtlasMcpServer(workspaceRoot = ".", customDbPath = dbPath)
         try {
             val node = GraphNode(
                 nodeId = "proj:src/Compute.kt#execute",
@@ -282,13 +282,13 @@ class ComplexityCliTest {
             store.upsertNodesAndEdges("proj", listOf(classNode, methodNode), emptyList())
 
             // 1. atlas query --complexity --project proj
-            val exitQueryFlag = CodeGraphCli.run(
+            val exitQueryFlag = AtlasCli.run(
                 arrayOf("query", "--complexity", "--project", "proj", "--db", dbPath, "--json")
             )
             assertEquals(0, exitQueryFlag)
 
             // 2. atlas query --action complexity --target Service (resolves methods inside class Service)
-            val server = CodeGraphMcpServer(workspaceRoot = ".", customDbPath = dbPath)
+            val server = AtlasMcpServer(workspaceRoot = ".", customDbPath = dbPath)
             val queryArgs = buildJsonObject {
                 put("action", "complexity")
                 put("project", "proj")
@@ -301,13 +301,13 @@ class ComplexityCliTest {
             server.close()
 
             // 3. atlas complexity audit --project proj
-            val exitSubsystemAudit = CodeGraphCli.run(
+            val exitSubsystemAudit = AtlasCli.run(
                 arrayOf("complexity", "audit", "--project", "proj", "--db", dbPath)
             )
             assertEquals(1, exitSubsystemAudit) // cognitive 13 > 10
 
             // 4. atlas complexity query --project proj
-            val exitSubsystemQuery = CodeGraphCli.run(
+            val exitSubsystemQuery = AtlasCli.run(
                 arrayOf("complexity", "query", "--project", "proj", "--db", dbPath, "--json")
             )
             assertEquals(0, exitSubsystemQuery)

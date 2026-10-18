@@ -1,7 +1,7 @@
 package atlas
 
 import atlas.bridge.VaultPlanBridge
-import atlas.cli.CodeGraphCli
+import atlas.cli.AtlasCli
 import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
@@ -11,7 +11,7 @@ import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkspaceIndexer
 import atlas.extract.FigmaSnapshotExtractor
 import atlas.extract.ModuleBoundaryDetector
-import atlas.mcp.CodeGraphMcpServer
+import atlas.mcp.AtlasMcpServer
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
@@ -283,7 +283,7 @@ class EngineAndMcpTest {
             """.trimIndent()
         )
 
-        val server = CodeGraphMcpServer(workspaceRoot = wsRoot, customDbPath = dbPath)
+        val server = AtlasMcpServer(workspaceRoot = wsRoot, customDbPath = dbPath)
         try {
             val firstIdx = server.indexWorkspace("demo")
             assertEquals(3, firstIdx["files_indexed"]?.jsonPrimitive?.int)
@@ -463,17 +463,17 @@ class EngineAndMcpTest {
             assertEquals(null, store.queryFigmaNodeById("fk_reingest", "2:1"), "Deleted Figma node must be purged on re-ingest")
             assertNotNull(store.queryFigmaNodeById("fk_reingest", "2:2"))
 
-            // Test UTF-8 multi-byte safe truncateSummary in CodeGraphCli
+            // Test UTF-8 multi-byte safe truncateSummary in AtlasCli
             // Put 3-byte '→' (\u2192) across byte offset 396..398
             val prefix = "a".repeat(395)
             val multiByteText = prefix + "→→→→→"
-            val truncated = CodeGraphCli.truncateSummary(multiByteText, isJson = false)
-            assertTrue(truncated.encodeToByteArray().size <= CodeGraphCli.SUMMARY_CEILING_BYTES)
+            val truncated = AtlasCli.truncateSummary(multiByteText, isJson = false)
+            assertTrue(truncated.encodeToByteArray().size <= AtlasCli.SUMMARY_CEILING_BYTES)
             assertFalse(truncated.contains('\uFFFD'), "Truncated UTF-8 summary must not contain replacement character U+FFFD")
             assertTrue(truncated.endsWith("..."))
 
             // Test CLI flag parser guard so --target without a value does not swallow --json
-            val exitCode = CodeGraphCli.run(arrayOf("query", "--db", dbPath, "--target", "--json"))
+            val exitCode = AtlasCli.run(arrayOf("query", "--db", dbPath, "--target", "--json"))
             assertEquals(0, exitCode)
         } finally {
             store.close()
@@ -526,7 +526,7 @@ class EngineAndMcpTest {
             """.trimIndent()
         )
 
-        val server = CodeGraphMcpServer(workspaceRoot = wsRoot, customDbPath = dbPath)
+        val server = AtlasMcpServer(workspaceRoot = wsRoot, customDbPath = dbPath)
         try {
             server.indexWorkspace("bug01")
             assertEquals(null, server.store.getNode("bug01", "newlyAddedCallee"))
@@ -574,7 +574,7 @@ class EngineAndMcpTest {
             assertTrue("invokeLater" in deadNames, "Uncalled function should be reported in dead_code")
 
             // CLI dead-code command returns 0
-            val deadExit = CodeGraphCli.run(arrayOf("dead-code", "--project", "bug01", "--workspace", wsRoot, "--db", dbPath))
+            val deadExit = AtlasCli.run(arrayOf("dead-code", "--project", "bug01", "--workspace", wsRoot, "--db", dbPath))
             assertEquals(0, deadExit)
         } finally {
             server.store.close()
@@ -609,17 +609,17 @@ class EngineAndMcpTest {
             """.trimIndent()
         )
 
-        val server = CodeGraphMcpServer(workspaceRoot = wsRoot, customDbPath = dbPath)
+        val server = AtlasMcpServer(workspaceRoot = wsRoot, customDbPath = dbPath)
         try {
             server.indexWorkspace("audit_proj")
             // Symlink pointing outside workspaceRoot must NOT be indexed
             assertEquals(null, server.store.getNode("audit_proj", "SecretOutside"))
 
             // BUG-03: CLI `audit` must return exit code 1 when violations exist (both summary and --json modes)
-            val exitSummary = CodeGraphCli.run(arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath))
+            val exitSummary = AtlasCli.run(arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath))
             assertEquals(1, exitSummary, "atlas audit must return exit code 1 when passed=false in summary mode")
 
-            val exitJson = CodeGraphCli.run(arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath, "--json"))
+            val exitJson = AtlasCli.run(arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath, "--json"))
             assertEquals(1, exitJson, "atlas audit must return exit code 1 when passed=false in --json mode")
 
             // Scoped audit on a clean subpath must pass (exit code 0) while scoped audit on src/ViolatingFile.kt fails (exit code 1)
@@ -631,12 +631,12 @@ class EngineAndMcpTest {
                 """.trimIndent()
             )
             server.indexWorkspace("audit_proj")
-            val exitScopedPass = CodeGraphCli.run(
+            val exitScopedPass = AtlasCli.run(
                 arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath, "--paths", "src/CleanFile.kt")
             )
             assertEquals(0, exitScopedPass, "Scoped atlas audit on clean file must return exit code 0")
 
-            val exitScopedFail = CodeGraphCli.run(
+            val exitScopedFail = AtlasCli.run(
                 arrayOf("audit", "--project", "audit_proj", "--workspace", wsRoot, "--db", dbPath, "--paths", "src/ViolatingFile.kt")
             )
             assertEquals(1, exitScopedFail, "Scoped atlas audit on violating file must return exit code 1")
@@ -648,9 +648,9 @@ class EngineAndMcpTest {
             }
 
             // Verify figma-shortest-path and figma shortest-path CLI subcommands execute cleanly
-            val figmaShort1 = CodeGraphCli.run(arrayOf("figma-shortest-path", "--db", dbPath, "--from", "n1", "--to", "n2"))
+            val figmaShort1 = AtlasCli.run(arrayOf("figma-shortest-path", "--db", dbPath, "--from", "n1", "--to", "n2"))
             assertEquals(0, figmaShort1)
-            val figmaShort2 = CodeGraphCli.run(arrayOf("figma", "shortest-path", "--db", dbPath, "--from", "n1", "--to", "n2"))
+            val figmaShort2 = AtlasCli.run(arrayOf("figma", "shortest-path", "--db", dbPath, "--from", "n1", "--to", "n2"))
             assertEquals(0, figmaShort2)
 
             // BUG-16: Verify multiple >32KB tool calls within the same second generate distinct spillover filenames
@@ -715,7 +715,7 @@ class EngineAndMcpTest {
 
     @Test
     fun testMcpMethodNotFoundReturns32601() {
-        val server = CodeGraphMcpServer(workspaceRoot = ".")
+        val server = AtlasMcpServer(workspaceRoot = ".")
         try {
             val response = server.processJsonRpcMessage("""{"jsonrpc":"2.0","id":123,"method":"unknown_method","params":{}}""")
             assertNotNull(response)
@@ -732,7 +732,7 @@ class EngineAndMcpTest {
 
     @Test
     fun testMcpPingReturnsEmptyResult() {
-        val server = CodeGraphMcpServer(workspaceRoot = ".")
+        val server = AtlasMcpServer(workspaceRoot = ".")
         try {
             val response = server.processJsonRpcMessage("""{"jsonrpc":"2.0","id":42,"method":"ping"}""")
             assertNotNull(response)
@@ -749,7 +749,7 @@ class EngineAndMcpTest {
 
     @Test
     fun testMcpToolErrorReturnsResultWithIsErrorTrue() {
-        val server = CodeGraphMcpServer(workspaceRoot = ".")
+        val server = AtlasMcpServer(workspaceRoot = ".")
         try {
             val response = server.processJsonRpcMessage("""{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"unknown_tool","arguments":{}}}""")
             assertNotNull(response)
@@ -767,7 +767,7 @@ class EngineAndMcpTest {
         val pid = getpid()
         val dbPath = "/tmp/test_mcp_wm_$pid.db"
         PlatformFiles.delete(dbPath)
-        val server = CodeGraphMcpServer(workspaceRoot = ".", customDbPath = dbPath)
+        val server = AtlasMcpServer(workspaceRoot = ".", customDbPath = dbPath)
         try {
             val node = GraphNode(
                 nodeId = "test_wm:src/Service.kt#PaymentService",
@@ -1419,7 +1419,7 @@ class EngineAndMcpTest {
     fun testMcpServerVerifyArchitectureAndCheckDescriptions() {
         val dbPath = "/tmp/test_atlas_desc_mcp_${getpid()}_${time(null)}.db"
         PlatformFiles.delete(dbPath)
-        val server = CodeGraphMcpServer(workspaceRoot = ".", customDbPath = dbPath)
+        val server = AtlasMcpServer(workspaceRoot = ".", customDbPath = dbPath)
         try {
             val domainNode = GraphNode(
                 nodeId = "p:src/domain/Payment.kt#Payment",
@@ -1505,15 +1505,15 @@ class EngineAndMcpTest {
 
         try {
             // CLI audit with default options (exit code 0 since suggestions don't fail audit)
-            val exitCodeDefault = CodeGraphCli.run(arrayOf("audit", "--project", "p", "--db", dbPath))
+            val exitCodeDefault = AtlasCli.run(arrayOf("audit", "--project", "p", "--db", dbPath))
             assertEquals(0, exitCodeDefault)
 
             // CLI audit with --description-mode all
-            val exitCodeAll = CodeGraphCli.run(arrayOf("audit", "--project", "p", "--db", dbPath, "--description-mode", "all"))
+            val exitCodeAll = AtlasCli.run(arrayOf("audit", "--project", "p", "--db", dbPath, "--description-mode", "all"))
             assertEquals(0, exitCodeAll)
 
             // CLI audit with --no-description-check
-            val exitCodeNoCheck = CodeGraphCli.run(arrayOf("audit", "--project", "p", "--db", dbPath, "--no-description-check"))
+            val exitCodeNoCheck = AtlasCli.run(arrayOf("audit", "--project", "p", "--db", dbPath, "--no-description-check"))
             assertEquals(0, exitCodeNoCheck)
         } finally {
             PlatformFiles.delete(dbPath)
@@ -1771,7 +1771,7 @@ class EngineAndMcpTest {
     @Test
     fun testMcpToolSchemasIncludeAllRequiredProperties() {
         val testDb = "/tmp/test_schemas_${getpid()}_${time(null)}.db"
-        val server = CodeGraphMcpServer(workspaceRoot = "/tmp", customDbPath = testDb)
+        val server = AtlasMcpServer(workspaceRoot = "/tmp", customDbPath = testDb)
         try {
             val tools = server.toolDefinitions()
             val queryTool = tools.first { it["name"]?.jsonPrimitive?.content == "atlas_query" }
@@ -1942,7 +1942,7 @@ class EngineAndMcpTest {
 
     @Test
     fun testComplexitySingleArgHelpExitZero() {
-        val exitCode = CodeGraphCli.run(arrayOf("complexity"))
+        val exitCode = AtlasCli.run(arrayOf("complexity"))
         assertEquals(0, exitCode, "atlas complexity with no arguments should print help and return exit code 0")
     }
 
@@ -2048,19 +2048,19 @@ class EngineAndMcpTest {
             PlatformFiles.writeText(planFile, "Step 1: invoke codegraph_query\nStep 2: invoke codegraph_audit\n")
 
             // Dry-run via CLI returns exit code 1 because unmigrated occurrences found
-            val dryCode = CodeGraphCli.run(arrayOf("migrate-tools", "--path", tmpDir))
+            val dryCode = AtlasCli.run(arrayOf("migrate-tools", "--path", tmpDir))
             assertEquals(1, dryCode, "migrate-tools dry-run must return 1 when unmigrated occurrences exist")
 
             // audit --legacy-tools returns 1
-            val auditCode = CodeGraphCli.run(arrayOf("audit", "--legacy-tools", "--path", tmpDir))
+            val auditCode = AtlasCli.run(arrayOf("audit", "--legacy-tools", "--path", tmpDir))
             assertEquals(1, auditCode, "audit --legacy-tools must return 1 when deprecated tool calls exist")
 
             // Apply via CLI returns exit code 0
-            val applyCode = CodeGraphCli.run(arrayOf("migrate-tools", "--path", tmpDir, "--apply"))
+            val applyCode = AtlasCli.run(arrayOf("migrate-tools", "--path", tmpDir, "--apply"))
             assertEquals(0, applyCode, "migrate-tools with --apply must return 0")
 
             // audit --legacy-tools now returns 0
-            val cleanAuditCode = CodeGraphCli.run(arrayOf("audit", "--legacy-tools", "--path", tmpDir))
+            val cleanAuditCode = AtlasCli.run(arrayOf("audit", "--legacy-tools", "--path", tmpDir))
             assertEquals(0, cleanAuditCode, "audit --legacy-tools must pass (0) when all legacy calls are migrated")
 
             val migratedContent = PlatformFiles.readText(planFile)
@@ -2082,7 +2082,7 @@ class EngineAndMcpTest {
             val planFile = "$tmpDir/test_mcp.md"
             PlatformFiles.writeText(planFile, "Use codegraph_query for blast radius.\n")
 
-            val server = CodeGraphMcpServer(workspaceRoot = tmpDir)
+            val server = AtlasMcpServer(workspaceRoot = tmpDir)
             try {
                 // Call atlas_audit with action=migrate_tools (dry-run)
                 val dryCall = server.processJsonRpcMessage(
