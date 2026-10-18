@@ -5,12 +5,16 @@ import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
 import atlas.engine.ArchitectureRemediationEngine
 import atlas.engine.AutonomousRemediationVerifier
+import atlas.engine.ComplexityDoctorEngine
 import atlas.engine.ComposeStabilityEngine
 import atlas.engine.FigmaDesignAuditor
 import atlas.engine.ScopeSynthesizer
 import atlas.engine.WorkMemoryStore
 import atlas.engine.WorkspaceIndexer
+import atlas.model.ComplexityScoreRecord
 import atlas.util.PlatformFiles
+import kotlin.math.ln
+import kotlin.math.roundToInt
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -24,6 +28,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
@@ -59,6 +64,7 @@ class CodeGraphMcpServer(
     val memory: WorkMemoryStore
     val figmaAuditor: FigmaDesignAuditor
     val composeEngine: ComposeStabilityEngine
+    val complexityDoctor: ComplexityDoctorEngine
     val indexer: WorkspaceIndexer
     val remediationVerifier: AutonomousRemediationVerifier
     val remediationEngine: ArchitectureRemediationEngine
@@ -83,6 +89,7 @@ class CodeGraphMcpServer(
         memory = WorkMemoryStore(store)
         figmaAuditor = FigmaDesignAuditor(store)
         composeEngine = ComposeStabilityEngine(store)
+        complexityDoctor = ComplexityDoctorEngine(store, workspaceRoot)
         indexer = WorkspaceIndexer(workspaceRoot, store)
         remediationVerifier = AutonomousRemediationVerifier(workspaceRoot, store)
         remediationEngine = ArchitectureRemediationEngine(workspaceRoot, store, remediationVerifier)
@@ -106,8 +113,9 @@ class CodeGraphMcpServer(
                         add("compose_summary")
                         add("compose_cascade")
                         add("compose_blame")
+                        add("complexity")
                     }
-                    put("description", "Query operation to execute against the indexed polyglot code, Compose stability, and vault graph.")
+                    put("description", "Query operation to execute against the indexed polyglot code, Compose stability, complexity, and vault graph.")
                 }
                 putJsonObject("project") {
                     put("type", "string")
@@ -124,6 +132,10 @@ class CodeGraphMcpServer(
                 putJsonObject("depth") {
                     put("type", "integer")
                     put("description", "Maximum traversal hops for callers, callees, cascade, or blast-radius impact (default: 2).")
+                }
+                putJsonObject("threshold") {
+                    put("type", "integer")
+                    put("description", "Cognitive complexity threshold for filtering (default: 10).")
                 }
                 putJsonObject("include_source") {
                     put("type", "boolean")
@@ -158,8 +170,18 @@ class CodeGraphMcpServer(
                         add("compose_doctor")
                         add("synthesize_compose_scope")
                         add("verify_remediation")
+                        add("audit_complexity")
+                        add("complexity_doctor")
                     }
-                    put("description", "Audit, synthesis, Compose compliance, learning, or indexing action to execute.")
+                    put("description", "Audit, synthesis, Compose compliance, complexity audit, learning, or indexing action to execute.")
+                }
+                putJsonObject("threshold") {
+                    put("type", "integer")
+                    put("description", "Cognitive complexity threshold for Gate 1 complexity audit (default: 10).")
+                }
+                putJsonObject("apply") {
+                    put("type", "boolean")
+                    put("description", "Apply verified remediation prescriptions directly to disk (default: false).")
                 }
                 putJsonObject("description_mode") {
                     put("type", "string")
@@ -421,6 +443,66 @@ class CodeGraphMcpServer(
                 )
                 return json.encodeToJsonElement(res).jsonObject
             }
+            "complexity" -> {
+                val minCognitive = args["threshold"]?.jsonPrimitive?.intOrNull ?: 10
+                val queryLimit = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
+                val results = if (target.isNotEmpty()) {
+                    val matchingComplexNodes = store.queryComplexNodes(project, minCognitive = 0, limit = queryLimit * 4)
+                        .filter {
+                            it.nodeId == target ||
+                            it.name == target ||
+                            it.qualifiedName == target ||
+                            it.qualifiedName.endsWith(".$target") ||
+                            it.nodeId.contains("#$target.") ||
+                            it.nodeId.endsWith("#$target") ||
+                            it.filePath.contains(target)
+                        }
+                    if (matchingComplexNodes.isNotEmpty()) {
+                        matchingComplexNodes.take(queryLimit)
+                    } else {
+                        val directNode = store.getNode(project, target)
+                        if (directNode != null && directNode.kind in setOf("function", "method", "composable")) {
+                            val score = directNode.complexityScore
+                            val grade = when {
+                                score >= 90.0 -> "A"
+                                score >= 80.0 -> "B"
+                                score >= 70.0 -> "C"
+                                score >= 60.0 -> "D"
+                                else -> "F"
+                            }
+                            val risk = directNode.cognitiveComplexity.toDouble() * (1.0 + ln(1.0 + directNode.inDegree.toDouble()))
+                            val roundedRisk = (risk * 10.0).roundToInt() / 10.0
+                            listOf(
+                                ComplexityScoreRecord(
+                                    nodeId = directNode.nodeId,
+                                    projectId = project,
+                                    name = directNode.name,
+                                    qualifiedName = directNode.qualifiedName,
+                                    filePath = if (directNode.fileId.contains(':')) directNode.fileId.substringAfter(':') else directNode.fileId,
+                                    line = directNode.startLine,
+                                    cyclomatic = directNode.cyclomaticComplexity,
+                                    cognitive = directNode.cognitiveComplexity,
+                                    maxNesting = directNode.maxNestingDepth,
+                                    inDegree = directNode.inDegree,
+                                    overallScore = score,
+                                    grade = grade,
+                                    riskIndex = roundedRisk
+                                )
+                            )
+                        } else {
+                            emptyList()
+                        }
+                    }
+                } else {
+                    store.queryComplexNodes(project, minCognitive = minCognitive, limit = queryLimit)
+                }
+                return buildJsonObject {
+                    put("project", project)
+                    put("total_results", results.size)
+                    put("threshold", minCognitive)
+                    put("results", json.encodeToJsonElement(results))
+                }
+            }
         }
 
         val node = store.getNode(project, target)
@@ -566,6 +648,45 @@ class CodeGraphMcpServer(
                 val targetSym = targets.firstOrNull() ?: args["target"]?.jsonPrimitive?.contentOrNull
                 val report = composeEngine.runDoctor(project, target = targetSym, limit = limit)
                 json.encodeToJsonElement(report).jsonObject
+            }
+            "audit_complexity" -> {
+                val threshold = args["threshold"]?.jsonPrimitive?.intOrNull ?: 10
+                val maxCyclomatic = args["max_cyclomatic"]?.jsonPrimitive?.intOrNull ?: 15
+                val violations = auditor.checkComplexityViolations(
+                    projectId = project,
+                    maxCognitive = threshold,
+                    maxCyclomatic = maxCyclomatic,
+                    pathPrefixes = if (targets.isNotEmpty()) targets else null
+                )
+                val passed = violations.isEmpty()
+                buildJsonObject {
+                    put("project", project)
+                    put("passed", passed)
+                    put("threshold", threshold)
+                    put("max_cyclomatic", maxCyclomatic)
+                    put("total_violations", violations.size)
+                    put("high_severity_count", violations.count { it.severity == "HIGH" })
+                    put("warning_count", violations.count { it.severity == "WARNING" })
+                    put("violations", json.encodeToJsonElement(violations))
+                }
+            }
+            "complexity_doctor" -> {
+                val targetSym = targets.firstOrNull() ?: args["target"]?.jsonPrimitive?.contentOrNull
+                val apply = args["apply"]?.jsonPrimitive?.booleanOrNull ?: false
+                val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
+                val minCognitive = args["threshold"]?.jsonPrimitive?.intOrNull ?: 10
+                val report = complexityDoctor.runDoctor(
+                    projectId = project,
+                    target = targetSym,
+                    limit = limit,
+                    minCognitive = minCognitive
+                )
+                val finalReport = if (apply) {
+                    complexityDoctor.applyRemediations(report, dryRun = false, testCommand = testCmd)
+                } else {
+                    report
+                }
+                json.encodeToJsonElement(finalReport).jsonObject
             }
             "synthesize_compose_scope" -> {
                 val scope = synthesizer.synthesizeComposeScope(project, targets)

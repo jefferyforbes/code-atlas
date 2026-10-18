@@ -106,8 +106,15 @@ class ComplexityDoctorEngine(
         val candidatePrescriptions = mutableListOf<ComplexityDoctorReport.Prescription>()
 
         val funcNodes = nodes.filter { it.kind in setOf("function", "method", "composable") }
+        val sym = if (nodeId.contains('#')) nodeId.substringAfter('#') else nodeId
+        val simpleSym = sym.substringAfterLast('.')
         for (func in funcNodes) {
-            if (nodeId.isNotEmpty() && func.nodeId != nodeId && func.name != nodeId && func.qualifiedName != nodeId) {
+            val matches = nodeId.isEmpty() ||
+                func.nodeId == nodeId ||
+                func.name == nodeId ||
+                func.qualifiedName == nodeId ||
+                (sym.isNotEmpty() && (func.nodeId.substringAfter('#') == sym || func.name == sym || func.name == simpleSym || func.qualifiedName.endsWith(sym)))
+            if (!matches) {
                 continue
             }
 
