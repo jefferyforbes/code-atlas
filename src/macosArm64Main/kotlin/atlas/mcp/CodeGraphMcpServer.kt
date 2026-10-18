@@ -3,6 +3,7 @@ package atlas.mcp
 import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
+import atlas.engine.ArchitectureRemediationEngine
 import atlas.engine.AutonomousRemediationVerifier
 import atlas.engine.ComposeStabilityEngine
 import atlas.engine.FigmaDesignAuditor
@@ -60,6 +61,7 @@ class CodeGraphMcpServer(
     val composeEngine: ComposeStabilityEngine
     val indexer: WorkspaceIndexer
     val remediationVerifier: AutonomousRemediationVerifier
+    val remediationEngine: ArchitectureRemediationEngine
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -83,6 +85,7 @@ class CodeGraphMcpServer(
         composeEngine = ComposeStabilityEngine(store)
         indexer = WorkspaceIndexer(workspaceRoot, store)
         remediationVerifier = AutonomousRemediationVerifier(workspaceRoot, store)
+        remediationEngine = ArchitectureRemediationEngine(workspaceRoot, store, remediationVerifier)
     }
 
     fun toolDefinitions(): List<JsonObject> {
@@ -315,8 +318,9 @@ class CodeGraphMcpServer(
 
     fun indexWorkspace(
         projectId: String,
-        subpaths: List<String>? = null
-    ): JsonObject = resolveServerForProject(projectId).indexer.indexWorkspace(projectId, subpaths)
+        subpaths: List<String>? = null,
+        force: Boolean = false
+    ): JsonObject = resolveServerForProject(projectId).indexer.indexWorkspace(projectId, subpaths, force = force)
 
     fun indexComposeArtifacts(
         projectId: String,
@@ -617,6 +621,27 @@ class CodeGraphMcpServer(
                     put("node_id", nodeId)
                     put("outcome", outcome)
                 }
+            }
+            "remedy_architecture", "fix_architecture", "fix", "remedy" -> {
+                val targetList = if (targets.isNotEmpty()) targets else (args["path"]?.jsonPrimitive?.contentOrNull?.let { listOf(it) } ?: emptyList())
+                val ruleFilter = args["rule"]?.jsonPrimitive?.contentOrNull ?: args["rule_id"]?.jsonPrimitive?.contentOrNull
+                val dryRun = args["dry_run"]?.jsonPrimitive?.booleanOrNull ?: (!args["apply"]?.jsonPrimitive?.booleanOrNull.let { it == true })
+                val split = args["split"]?.jsonPrimitive?.booleanOrNull ?: true
+                val makePrivate = args["make_private"]?.jsonPrimitive?.booleanOrNull ?: false
+                val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
+                val limitArg = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
+                val active = resolveServerForProject(project)
+                val report = active.remediationEngine.planAndRemediate(
+                    projectId = project,
+                    targetPaths = targetList,
+                    ruleFilter = ruleFilter,
+                    dryRun = dryRun,
+                    splitBoost003 = split,
+                    makePrivateBoost003 = makePrivate,
+                    testCommand = testCmd,
+                    limit = limitArg
+                )
+                json.encodeToJsonElement(report).jsonObject
             }
             "figma_audit" -> handleFigmaAudit(args)
             "figma_scope" -> handleFigmaScope(args)

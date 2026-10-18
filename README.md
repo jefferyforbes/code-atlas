@@ -30,6 +30,7 @@ AI coding and design agents waste thousands of prompt tokens repeatedly reading,
 
 - **v0.3.0 &middot; Figma Atlas (`atlas figma`)**: Indexes Figma document trees and W3C Design Tokens (DTCG), queries 2D spatial layouts via R*Tree bounding boxes, runs 12 deterministic SQL design audits, and synthesizes 3D Concurrency Scopes for design agents.
 - **v0.4.0 &middot; Jetpack Compose & KMP Stability (`atlas compose`)**: Analyzes Kotlin `@Composable` functions via single-pass AST tokenization, infers parameter stability across a 4-state join-semilattice (`STABLE < RUNTIME < UNCERTAIN < UNSTABLE`), evaluates 12 deterministic Compose rules, performs the Kotlin 2.0+ Strong Skipping Reality Check (`SILENT_WASTE` detection), runs write-site verified Compose Doctor remediation previews, detects unreferenced dead code (`atlas dead-code`), and enables path-scoped architecture auditing (`--paths`).
+- **Autonomous Architecture Remediation (`atlas fix`)**: Plans, verifies, and applies automated AST file-splitting diffs for `BOOST-003` Single Declaration Principle compliance, privatizes secondary declarations (`--make-private`), corrects layer classification inversions, and enforces test command rollback guards.
 
 Whether invoked directly from your shell, embedded into git pre-commit hooks, or running as a background **Model Context Protocol (MCP)** server, Atlas provides deterministic codebase and design truth with minimal token consumption.
 
@@ -96,6 +97,7 @@ flowchart TD
 10. **Vector Bloat Stripping & W3C DTCG Token Ingestion**: Strips heavy SVG vector path and bezier payloads (~85% reduction) during ingestion, imports DTCG design token bundles, and resolves alias DAGs with cycle detection.
 11. **12 Deterministic SQL Design Invariant Audits**: Evaluates AutoLayout geometry, static containers, default 100px frame heights, accessibility touch targets ($\ge 48\times 48\,\text{dp}$), negative coordinates, child width amputation, zero emojis, unbound token ratios, detached gym specimens, 2D canvas topology, and WCAG AA contrast ratios.
 12. **Clean Architecture & `BOOST-003` Auditor**: Enforces Clean Architecture layer boundaries (flagging illegal Domain $\to$ UI or Domain $\to$ concrete Data references) and the Single Declaration Principle (Rule 6: at most 1 top-level declaration per production file).
+13. **Autonomous Architecture Remediation Engine (`atlas fix`)**: Synthesizes verified AST file-splitting diffs for `BOOST-003` Single Declaration Principle violations (extracting secondary declarations into dedicated files with preserved package headers, imports, annotations, and KDoc), converts unreferenced secondary declarations to private (`--make-private`), corrects layer classification inversions, and automatically re-indexes modified files with rollback protection on test suite failures.
 
 ---
 
@@ -262,6 +264,66 @@ atlas dead-code --project my-project
 *Output:*
 ```text
 [Dead Code] project=my-project dead_symbols=3 top=[LegacyPaymentFormatter, oldUnusedHelper, StaleTokenParser]
+```
+
+#### 6. `atlas fix`
+Autonomously plan, verify, and remediate architecture audit violations (`BOOST-003` Single Declaration Principle and `ARCH-LAYER-INVERSION` Clean Architecture inversions).
+
+```bash
+# Preview remediations across the workspace (dry-run, default)
+atlas fix --project my-project
+
+# Preview remediations for specific files or paths
+atlas fix --project my-project --paths src/models/
+
+# Apply verified AST file-splitting and re-index automatically
+atlas fix --project my-project --apply
+
+# Remediate by converting unreferenced secondary declarations to private
+atlas fix --project my-project --make-private --apply
+
+# Remediate with test suite preservation guard (rolls back on test failure)
+atlas fix --project my-project --apply --test-cmd "./gradlew check"
+```
+
+*Output:*
+```text
+[Remediation] project=my-project mode=dry-run violations=3 boost003=2 layer_inversions=1 verified=3 applied=0
+  - BOOST-003: src/models/UserModels.kt [AST_FILE_SPLIT, verified=true, applied=false]
+  - ARCH-LAYER-INVERSION: src/domain/PaymentService.kt [CLASSIFICATION_CORRECTION, verified=true, applied=false]
+```
+
+*JSON output (`--json`):*
+```json
+{
+  "project": "my-project",
+  "total_violations": 3,
+  "boost003_count": 2,
+  "layer_inversion_count": 1,
+  "verified_count": 3,
+  "applied_count": 0,
+  "dry_run": true,
+  "prescriptions": [
+    {
+      "id": "rx-boost003-UserModels",
+      "rule_id": "BOOST-003",
+      "file_path": "src/models/UserModels.kt",
+      "fix_strategy": "AST_FILE_SPLIT",
+      "rationale": "File declares multiple public top-level types (UserModels, UserSettings). Split secondary declaration into dedicated file.",
+      "primary_declaration": "UserModels",
+      "secondary_declarations": ["UserSettings"],
+      "spawned_files": [
+        {
+          "rel_path": "src/models/UserSettings.kt",
+          "declaration_name": "UserSettings",
+          "loc": 14
+        }
+      ],
+      "verified": true,
+      "applied": false
+    }
+  ]
+}
 ```
 
 ---
@@ -533,6 +595,7 @@ Atlas exposes a standard **JSON-RPC 2.0 stdio MCP server** with strictly **4 com
 
 2. **`codegraph_audit`**: Architectural compliance, Compose audits, scoping, and maintenance.
    - `verify_architecture`: Clean Architecture layer verification and `BOOST-003` audit (supports path scoping via `targets`).
+   - `remedy_architecture`: Autonomously plan, verify, and optionally commit remediations for `BOOST-003` (AST file-splitting or privatization) and `ARCH-LAYER-INVERSION` violations.
    - `synthesize_3d_scope`: Synthesize 3D Concurrency Scope (`files`, `modules`, `architecture`).
    - `dead_code`: Detect unreferenced production symbols with 0 callers.
    - `audit_compose`: 12-rule Compose Gate 1 audit with Strong Skipping Reality Check.

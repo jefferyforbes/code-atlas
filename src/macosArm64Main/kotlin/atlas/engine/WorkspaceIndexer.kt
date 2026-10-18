@@ -75,7 +75,8 @@ class WorkspaceIndexer(
         projectId: String,
         subpaths: List<String>? = null,
         stabilityConfigPath: String? = null,
-        forceComposeReindex: Boolean = false
+        forceComposeReindex: Boolean = false,
+        force: Boolean = false
     ): JsonObject {
         val root = PlatformFiles.canonicalPath(workspaceRoot)
         val normalizedSubpaths = subpaths
@@ -88,7 +89,7 @@ class WorkspaceIndexer(
         val filesWithRawEdges = store.filesWithRawSymbolEdges(projectId)
         val storedVersion = store.getProjectMetadata(projectId, "extractor_version")
         val versionMismatch = storedVersion != PolyglotAstExtractor.EXTRACTOR_VERSION
-        val effectiveForce = forceComposeReindex || versionMismatch
+        val effectiveForce = force || forceComposeReindex || versionMismatch
 
         val changedNodes = mutableListOf<GraphNode>()
         val markdownQueue = mutableListOf<Pair<String, String>>()
