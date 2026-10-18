@@ -1,6 +1,7 @@
 package atlas.db
 
 import atlas.extract.NameSegmentTokenizer
+import atlas.extract.UrlTargetResolver
 import atlas.model.*
 import atlas.util.PlatformFiles
 import atlas.util.Sha256
@@ -1066,6 +1067,76 @@ class SqliteGraphStore(val dbPath: String) {
     }
 
     fun getNode(projectId: String, target: String): GraphNode? {
+        val codeLink = UrlTargetResolver.parseCodeLocationUrl(target)
+        if (codeLink != null) {
+            val escapedSuffix = codeLink.filePathSuffix
+                .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            if (codeLink.startLine != null) {
+                val targetLine = codeLink.startLine
+                val spanStmt = db.prepare(
+                    """
+                    SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                           start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                           is_test_double, in_degree, out_degree, description, is_top_level,
+                           cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+                    FROM nodes
+                    WHERE project_id = ?
+                      AND kind NOT IN ('file', 'file_scope', 'module')
+                      AND start_line <= ? AND end_line >= ?
+                      AND (file_id = ? OR file_id = ? OR file_id LIKE ? ESCAPE '\' OR file_id LIKE ? ESCAPE '\')
+                    ORDER BY (end_line - start_line) ASC, start_line DESC, in_degree DESC
+                    LIMIT 1;
+                    """.trimIndent()
+                )
+                try {
+                    spanStmt.bindString(1, projectId)
+                    spanStmt.bindInt(2, targetLine)
+                    spanStmt.bindInt(3, targetLine)
+                    spanStmt.bindString(4, "$projectId:${codeLink.filePathSuffix}")
+                    spanStmt.bindString(5, codeLink.filePathSuffix)
+                    spanStmt.bindString(6, "%:$escapedSuffix")
+                    spanStmt.bindString(7, "%/$escapedSuffix")
+                    if (spanStmt.step()) return rowToNode(spanStmt)
+                } finally {
+                    spanStmt.close()
+                }
+            }
+            if (codeLink.symbolFragment != null) {
+                val symStmt = db.prepare(
+                    """
+                    SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                           start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                           is_test_double, in_degree, out_degree, description, is_top_level,
+                           cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+                    FROM nodes
+                    WHERE project_id = ?
+                      AND (name = ? OR qualified_name LIKE ? ESCAPE '\')
+                      AND (file_id = ? OR file_id = ? OR file_id LIKE ? ESCAPE '\' OR file_id LIKE ? ESCAPE '\')
+                    ORDER BY (name = ?) DESC, in_degree DESC
+                    LIMIT 1;
+                    """.trimIndent()
+                )
+                try {
+                    val escFrag = codeLink.symbolFragment
+                        .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    symStmt.bindString(1, projectId)
+                    symStmt.bindString(2, codeLink.symbolFragment)
+                    symStmt.bindString(3, "%$escFrag%")
+                    symStmt.bindString(4, "$projectId:${codeLink.filePathSuffix}")
+                    symStmt.bindString(5, codeLink.filePathSuffix)
+                    symStmt.bindString(6, "%:$escapedSuffix")
+                    symStmt.bindString(7, "%/$escapedSuffix")
+                    symStmt.bindString(8, codeLink.symbolFragment)
+                    if (symStmt.step()) return rowToNode(symStmt)
+                } finally {
+                    symStmt.close()
+                }
+            }
+            val fileNodes = getNodesForFile(projectId, codeLink.filePathSuffix)
+            return fileNodes.firstOrNull { it.kind !in setOf("file", "file_scope", "module") }
+                ?: fileNodes.firstOrNull()
+        }
+
         val escapedTarget = target
             .replace("\\", "\\\\")
             .replace("%", "\\%")
@@ -2073,6 +2144,11 @@ class SqliteGraphStore(val dbPath: String) {
     }
 
     fun queryFigmaNodeById(fileKey: String, nodeId: String): FigmaNode? {
+        val parsedFromFileKey = UrlTargetResolver.parseFigmaUrl(fileKey)
+        val parsedFromNodeId = UrlTargetResolver.parseFigmaUrl(nodeId)
+        val normFileKey = parsedFromFileKey?.fileKey ?: parsedFromNodeId?.fileKey ?: fileKey
+        val normNodeId = parsedFromNodeId?.nodeId
+            ?: (if (nodeId.isBlank()) parsedFromFileKey?.nodeId ?: "" else UrlTargetResolver.normalizeFigmaNodeId(nodeId))
         val stmt = db.prepare(
             """
             SELECT rowid_pk, node_id, file_key, page_name, section_id, parent_id,
@@ -2085,8 +2161,8 @@ class SqliteGraphStore(val dbPath: String) {
             WHERE file_key = ? AND node_id = ?;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, nodeId)
+        stmt.bindString(1, normFileKey)
+        stmt.bindString(2, normNodeId)
         try {
             if (stmt.step()) {
                 return rowToFigmaNode(stmt)
@@ -2373,6 +2449,11 @@ class SqliteGraphStore(val dbPath: String) {
         componentNameOrId: String,
         depth: Int = 2
     ): List<FigmaNode> {
+        val parsedFromFileKey = UrlTargetResolver.parseFigmaUrl(fileKey)
+        val parsedFromTarget = UrlTargetResolver.parseFigmaUrl(componentNameOrId)
+        val normFileKey = parsedFromFileKey?.fileKey ?: parsedFromTarget?.fileKey ?: fileKey
+        val normTarget = parsedFromTarget?.nodeId
+            ?: (if (componentNameOrId.isBlank()) parsedFromFileKey?.nodeId ?: "" else UrlTargetResolver.normalizeFigmaNodeId(componentNameOrId))
         val maxDepth = if (depth < 1) 1 else depth
         val stmt = db.prepare(
             """
@@ -2397,7 +2478,7 @@ class SqliteGraphStore(val dbPath: String) {
                   AND instr(c.path, ',' || e.source_node_id || ',') = 0
             )
             SELECT n.rowid_pk, n.node_id, n.file_key, n.page_name, n.section_id, n.parent_id,
-                   n.name, n.node_type, n.layout_mode, n.sizing_horizontal, n.sizing_vertical,
+                   n.name, n.node_type, layout_mode, n.sizing_horizontal, n.sizing_vertical,
                    n.text_auto_resize, n.padding_left, n.padding_right, n.padding_top, n.padding_bottom,
                    n.item_spacing, n.local_x, n.local_y, n.canvas_x, n.canvas_y, n.width, n.height,
                    n.is_interactive, n.has_emoji, n.unbound_fill, n.unbound_stroke, n.wcag_contrast,
@@ -2408,14 +2489,14 @@ class SqliteGraphStore(val dbPath: String) {
             ORDER BY MIN(c.hop), n.name;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, componentNameOrId)
-        stmt.bindString(3, fileKey)
-        stmt.bindString(4, componentNameOrId)
-        stmt.bindString(5, fileKey)
-        stmt.bindString(6, fileKey)
+        stmt.bindString(1, normFileKey)
+        stmt.bindString(2, normTarget)
+        stmt.bindString(3, normFileKey)
+        stmt.bindString(4, normTarget)
+        stmt.bindString(5, normFileKey)
+        stmt.bindString(6, normFileKey)
         stmt.bindInt(7, maxDepth)
-        stmt.bindString(8, fileKey)
+        stmt.bindString(8, normFileKey)
 
         val results = mutableListOf<FigmaNode>()
         try {

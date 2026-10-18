@@ -1,5 +1,15 @@
 package atlas.extract
 
+import atlas.db.SqliteGraphStore
+import atlas.engine.FigmaDesignAuditor
+import atlas.engine.ScopeSynthesizer
+import atlas.engine.WorkspaceIndexer
+import atlas.model.FigmaDocument
+import atlas.model.FigmaNode
+import atlas.util.PlatformFiles
+import platform.posix.getpid
+import platform.posix.rmdir
+import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -112,5 +122,63 @@ class UrlTargetResolverTest {
         assertTrue(UrlTargetResolver.isUrlOrDeepLink("src/main/App.kt#L20"))
         assertFalse(UrlTargetResolver.isUrlOrDeepLink("src/main/App.kt"))
         assertFalse(UrlTargetResolver.isUrlOrDeepLink("atlas.engine.ScopeSynthesizer"))
+    }
+
+    @Test
+    fun testInnermostAstSpanAndFigmaDeepLinkResolution() {
+        val tmpDir = "/tmp/atlas_pr2_test_${getpid()}_${Random.nextInt(100000, 999999)}"
+        PlatformFiles.mkdirs("$tmpDir/src/main/kotlin/com/acme")
+        val store = SqliteGraphStore("$tmpDir/atlas.db")
+        try {
+            val srcFile = "$tmpDir/src/main/kotlin/com/acme/OrderController.kt"
+            PlatformFiles.writeText(
+                srcFile,
+                """
+                package com.acme
+                class OrderController {
+                    fun handleGetOrder() {
+                        println("order")
+                    }
+                }
+                """.trimIndent()
+            )
+            WorkspaceIndexer(tmpDir, store).indexWorkspace("acme")
+
+            val ghNode = store.getNode("acme", "https://github.com/acme/repo/blob/main/src/main/kotlin/com/acme/OrderController.kt#L4")
+            assertNotNull(ghNode)
+            assertEquals("handleGetOrder", ghNode.name)
+
+            val fileNode = store.getNode("acme", "file://$srcFile#L3-L5")
+            assertNotNull(fileNode)
+            assertEquals("handleGetOrder", fileNode.name)
+
+            val scope = ScopeSynthesizer(store).synthesizeScope(
+                "acme",
+                listOf("https://github.com/acme/repo/blob/main/src/main/kotlin/com/acme/OrderController.kt#L4")
+            )
+            assertTrue(scope.files.any { it.endsWith("OrderController.kt") })
+
+            val fileKey = "abcFigmaKey123"
+            store.insertFigmaDocument(FigmaDocument(fileKey = fileKey, name = "Checkout", version = "1"))
+            store.insertFigmaNodes(
+                fileKey,
+                listOf(
+                    FigmaNode(
+                        nodeId = "304:335", fileKey = fileKey, pageName = "Page 1", name = "CheckoutHeader",
+                        nodeType = "COMPONENT", layoutMode = "HORIZONTAL", sizingHorizontal = "FIXED",
+                        sizingVertical = "HUG", width = 320.0, height = 64.0
+                    )
+                )
+            )
+            val fullFigmaUrl = "https://www.figma.com/design/abcFigmaKey123/Checkout-Design?node-id=304-335&t=abcd"
+            assertEquals("CheckoutHeader", store.queryFigmaNodeById(fullFigmaUrl, "304-335")?.name)
+            val auditor = FigmaDesignAuditor(store)
+            assertEquals(fileKey, auditor.audit(fullFigmaUrl).fileKey)
+            assertEquals(1, auditor.synthesizeFigmaScope("acme", fullFigmaUrl, emptyList()).scopedNodesCount)
+        } finally {
+            store.close()
+            for (f in PlatformFiles.listFilesRecursively(tmpDir)) PlatformFiles.delete(f)
+            rmdir(tmpDir)
+        }
     }
 }

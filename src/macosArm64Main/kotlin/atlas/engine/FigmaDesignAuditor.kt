@@ -1,6 +1,7 @@
 package atlas.engine
 
 import atlas.db.SqliteGraphStore
+import atlas.extract.UrlTargetResolver
 import atlas.model.Figma3DScope
 import atlas.model.FigmaAuditResult
 import atlas.model.FigmaNode
@@ -28,6 +29,8 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
      * Runs the 12 deterministic design invariant audits and evaluates Gate 1 maturity compliance.
      */
     fun audit(fileKey: String): FigmaAuditResult {
+        val rawFileKey = fileKey
+        val fileKey = UrlTargetResolver.parseFigmaUrl(rawFileKey)?.fileKey ?: rawFileKey
         val violations = mutableListOf<FigmaViolation>()
         violations.addAll(checkCircularFillInHug(fileKey))
         violations.addAll(checkStaticContainerFrames(fileKey))
@@ -219,7 +222,20 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
         fileKey: String,
         seedNodeNames: List<String>
     ): Figma3DScope {
-        val expandedSeeds = seedNodeNames.flatMap { it.split(',') }.map { it.trim() }.filter { it.isNotEmpty() }
+        val rawFileKey = fileKey
+        val parsedFileLink = UrlTargetResolver.parseFigmaUrl(rawFileKey)
+        val fileKey = parsedFileLink?.fileKey ?: rawFileKey
+        val rawExpanded = seedNodeNames.flatMap { it.split(',') }.map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
+        if (rawExpanded.isEmpty() && parsedFileLink?.nodeId != null) {
+            rawExpanded.add(parsedFileLink.nodeId)
+        }
+        val expandedSeeds = rawExpanded.map { seed ->
+            val seedLink = UrlTargetResolver.parseFigmaUrl(seed)
+            when {
+                seedLink?.nodeId != null -> seedLink.nodeId
+                else -> UrlTargetResolver.normalizeFigmaNodeId(seed)
+            }
+        }
         val seedNodes = mutableListOf<FigmaNode>()
         for (seed in expandedSeeds) {
             val byName = store.queryFigmaNodesByName(fileKey, seed)

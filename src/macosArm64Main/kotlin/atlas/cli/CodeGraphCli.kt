@@ -2,6 +2,7 @@ package atlas.cli
 
 import atlas.engine.FigmaDesignAuditor
 import atlas.extract.FigmaSnapshotExtractor
+import atlas.extract.UrlTargetResolver
 import atlas.mcp.CodeGraphMcpServer
 import atlas.model.FigmaSpatialBounds
 import atlas.util.PlatformFiles
@@ -575,7 +576,29 @@ class CodeGraphCli {
             seeds: List<String>,
             isJson: Boolean
         ): Int {
-            val fileKey = fileKeyArg ?: server.store.getLatestFigmaFileKey() ?: "default"
+            val parsedFromFileArg = fileKeyArg?.let { UrlTargetResolver.parseFigmaUrl(it) }
+            val parsedFromTarget = UrlTargetResolver.parseFigmaUrl(target)
+            val parsedFromSecondary = UrlTargetResolver.parseFigmaUrl(secondaryTarget)
+            val parsedSeedUrls = seeds.mapNotNull { UrlTargetResolver.parseFigmaUrl(it) }
+            val fileKey = parsedFromFileArg?.fileKey
+                ?: parsedFromTarget?.fileKey
+                ?: parsedSeedUrls.firstOrNull()?.fileKey
+                ?: fileKeyArg
+                ?: server.store.getLatestFigmaFileKey()
+                ?: "default"
+            val normTarget = parsedFromTarget?.nodeId
+                ?: (if (target.isEmpty()) parsedFromFileArg?.nodeId ?: "" else UrlTargetResolver.normalizeFigmaNodeId(target))
+            val normSecondaryTarget = parsedFromSecondary?.nodeId
+                ?: UrlTargetResolver.normalizeFigmaNodeId(secondaryTarget)
+            val normSeeds = if (seeds.isNotEmpty()) {
+                seeds.map { s -> UrlTargetResolver.parseFigmaUrl(s)?.nodeId ?: UrlTargetResolver.normalizeFigmaNodeId(s) }
+            } else if (normTarget.isNotEmpty()) {
+                listOf(normTarget)
+            } else if (parsedFromFileArg?.nodeId != null) {
+                listOf(parsedFromFileArg.nodeId)
+            } else {
+                emptyList()
+            }
             val figmaAction = if (action == "search") "symbol" else action
 
             when (command) {
@@ -619,13 +642,13 @@ class CodeGraphCli {
                 "query" -> {
                     when (figmaAction) {
                         "symbol" -> {
-                            val node = server.store.queryFigmaNodeById(fileKey, target)
-                            val nodes = if (node != null) listOf(node) else server.store.queryFigmaNodesByName(fileKey, target)
-                            val variable = if (nodes.isEmpty()) server.store.queryFigmaVariableByName(fileKey, target) ?: server.store.queryFigmaVariableById(fileKey, target) else null
+                            val node = server.store.queryFigmaNodeById(fileKey, normTarget)
+                            val nodes = if (node != null) listOf(node) else server.store.queryFigmaNodesByName(fileKey, normTarget)
+                            val variable = if (nodes.isEmpty()) server.store.queryFigmaVariableByName(fileKey, normTarget) ?: server.store.queryFigmaVariableById(fileKey, normTarget) else null
                             if (isJson) {
                                 val jsonElement = buildJsonObject {
                                     put("file_key", fileKey)
-                                    put("target", target)
+                                    put("target", normTarget)
                                     putJsonArray("nodes") {
                                         nodes.forEach { n -> add(jsonCompact.parseToJsonElement(jsonCompact.encodeToString(n))) }
                                     }
@@ -637,30 +660,30 @@ class CodeGraphCli {
                             } else {
                                 val count = nodes.size + (if (variable != null) 1 else 0)
                                 val names = nodes.map { it.name } + listOfNotNull(variable?.name)
-                                val text = "[Figma Query: symbol] target=$target found=$count matches=[${names.take(3).joinToString(", ")}]"
+                                val text = "[Figma Query: symbol] target=$normTarget found=$count matches=[${names.take(3).joinToString(", ")}]"
                                 println(truncateSummary(text, false))
                             }
                             return 0
                         }
                         "callers" -> {
-                            val callers = server.store.queryFigmaCallers(fileKey, target, depth)
+                            val callers = server.store.queryFigmaCallers(fileKey, normTarget, depth)
                             if (isJson) {
                                 println(jsonPretty.encodeToString(callers))
                             } else {
                                 val names = callers.map { it.name }
-                                val text = "[Figma Query: callers] target=$target callers=${callers.size} instances=[${names.take(3).joinToString(", ")}]"
+                                val text = "[Figma Query: callers] target=$normTarget callers=${callers.size} instances=[${names.take(3).joinToString(", ")}]"
                                 println(truncateSummary(text, false))
                             }
                             return 0
                         }
                         "impact" -> {
-                            val impact = server.store.resolveVariableBlastRadius(fileKey, target, depth)
+                            val impact = server.store.resolveVariableBlastRadius(fileKey, normTarget, depth)
                             if (isJson) {
                                 println(jsonPretty.encodeToString(impact))
                             } else {
                                 val vars = impact.impactedVariables.map { it.name }
                                 val bound = impact.boundNodes.map { it.name }
-                                val text = "[Figma Query: impact] target=$target impacted_vars=${vars.size} bound_nodes=${bound.size} vars=[${vars.take(3).joinToString(", ")}]"
+                                val text = "[Figma Query: impact] target=$normTarget impacted_vars=${vars.size} bound_nodes=${bound.size} vars=[${vars.take(3).joinToString(", ")}]"
                                 println(truncateSummary(text, false))
                             }
                             return 0
@@ -674,8 +697,8 @@ class CodeGraphCli {
                                     FigmaSpatialBounds(0.0, 0.0, 0.0, 0.0)
                                 }
                             } else {
-                                val targetNode = server.store.queryFigmaNodeById(fileKey, target)
-                                    ?: server.store.queryFigmaNodesByName(fileKey, target).firstOrNull()
+                                val targetNode = server.store.queryFigmaNodeById(fileKey, normTarget)
+                                    ?: server.store.queryFigmaNodesByName(fileKey, normTarget).firstOrNull()
                                 targetNode?.spatialBounds ?: FigmaSpatialBounds(0.0, 0.0, 0.0, 0.0)
                             }
                             val intersecting = server.store.queryFigmaSpatialIntersection(fileKey, bounds)
@@ -710,12 +733,12 @@ class CodeGraphCli {
                             return 0
                         }
                         "shortest_path" -> {
-                            val path = server.store.findFigmaShortestPath(fileKey, target, secondaryTarget, depth = maxOf(depth, 10))
+                            val path = server.store.findFigmaShortestPath(fileKey, normTarget, normSecondaryTarget, depth = maxOf(depth, 10))
                             if (isJson) {
                                 println(jsonPretty.encodeToString(path))
                             } else {
                                 val names = path.map { it.name }
-                                val text = "[Figma Query: shortest_path] fileKey=$fileKey from=$target to=$secondaryTarget hops=${maxOf(0, path.size - 1)} path=[${names.joinToString(" -> ")}]"
+                                val text = "[Figma Query: shortest_path] fileKey=$fileKey from=$normTarget to=$normSecondaryTarget hops=${maxOf(0, path.size - 1)} path=[${names.joinToString(" -> ")}]"
                                 println(truncateSummary(text, false))
                             }
                             return 0
@@ -741,9 +764,8 @@ class CodeGraphCli {
                     return if (result.passed) 0 else 1
                 }
                 "synthesize-scope" -> {
-                    val seedsList = if (seeds.isNotEmpty()) seeds else (if (target.isNotEmpty()) listOf(target) else emptyList())
                     val auditor = FigmaDesignAuditor(server.store)
-                    val scope = auditor.synthesizeFigmaScope(project, fileKey, seedsList)
+                    val scope = auditor.synthesizeFigmaScope(project, fileKey, normSeeds)
                     if (isJson) {
                         println(jsonPretty.encodeToString(scope))
                     } else {
