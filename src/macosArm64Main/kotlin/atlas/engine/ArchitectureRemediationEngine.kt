@@ -387,7 +387,8 @@ class ArchitectureRemediationEngine(
                 // 3. Run test command if specified
                 if (!testCommand.isNullOrBlank()) {
                     val cmd = "cd \"$workspaceRoot\" && $testCommand"
-                    val exitCode = system(cmd)
+                    val rawStatus = system(cmd)
+                    val exitCode = if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
                     if (exitCode != 0) {
                         testsPreserved = false
                         details.add("Test command '$testCommand' failed (exit code $exitCode). Automatic rollback performed.")
@@ -546,7 +547,8 @@ class ArchitectureRemediationEngine(
                 PlatformFiles.writeText(fullPath, modifiedContent)
                 if (!testCommand.isNullOrBlank()) {
                     val cmd = "cd \"$workspaceRoot\" && $testCommand"
-                    val exitCode = system(cmd)
+                    val rawStatus = system(cmd)
+                    val exitCode = if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
                     if (exitCode != 0) {
                         testsPreserved = false
                         details.add("Test command '$testCommand' failed (exit code $exitCode). Automatic rollback performed.")
