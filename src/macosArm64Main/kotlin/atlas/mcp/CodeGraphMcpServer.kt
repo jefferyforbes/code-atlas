@@ -161,6 +161,7 @@ class CodeGraphMcpServer(
                     put("type", "string")
                     putJsonArray("enum") {
                         add("verify_architecture")
+                        add("remedy_architecture")
                         add("synthesize_3d_scope")
                         add("record_memory")
                         add("sync_index")
@@ -865,7 +866,7 @@ class CodeGraphMcpServer(
                     }
                     putJsonObject("serverInfo") {
                         put("name", "atlas")
-                        put("version", "0.4.0")
+                        put("version", "0.5.0")
                     }
                 }
             }
