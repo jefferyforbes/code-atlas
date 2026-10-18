@@ -92,7 +92,10 @@ class CodeGraphCli {
             var targetNodeArg: String? = null
             var testCmdArg: String? = null
             var applyRemediation = false
+            var splitBoost003 = true
+            var makePrivateBoost003 = false
             var descriptionMode: String? = null
+            var forceIndex = false
 
             var idx = 0
             while (idx < argv.size) {
@@ -116,11 +119,12 @@ class CodeGraphCli {
                         command = "query"
                         action = "shortest_path"
                     }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" -> {
+                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "fix" || arg == "remedy" || arg == "remediate" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" -> {
                         command = when (arg) {
                             "dead_code" -> "dead-code"
                             "record_memory" -> "record-memory"
                             "verify_remediation" -> "verify-remediation"
+                            "remedy", "remediate" -> "fix"
                             else -> arg
                         }
                     }
@@ -168,6 +172,11 @@ class CodeGraphCli {
                     arg == "--target-node" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> targetNodeArg = argv[++idx]
                     arg == "--test-cmd" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> testCmdArg = argv[++idx]
                     arg == "--apply" -> applyRemediation = true
+                    arg == "--dry-run" -> applyRemediation = false
+                    arg == "--split" -> splitBoost003 = true
+                    arg == "--no-split" -> splitBoost003 = false
+                    arg == "--make-private" -> makePrivateBoost003 = true
+                    arg == "--force" -> forceIndex = true
                     (arg == "--description-mode" || arg == "--descriptions") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> descriptionMode = argv[++idx]
                     arg.startsWith("--description-mode=") -> descriptionMode = arg.substringAfter('=')
                     arg.startsWith("--descriptions=") -> descriptionMode = arg.substringAfter('=')
@@ -247,7 +256,7 @@ class CodeGraphCli {
                         return 0
                     }
                     "index" -> {
-                        val res = server.indexWorkspace(project, subpaths = if (paths.isNotEmpty()) paths else null)
+                        val res = server.indexWorkspace(project, subpaths = if (paths.isNotEmpty()) paths else null, force = forceIndex)
                         val text = if (isJson) {
                             jsonPretty.encodeToString(res)
                         } else {
@@ -310,6 +319,79 @@ class CodeGraphCli {
                         }
                         println(truncateSummary(text, isJson))
                         return if (passed) 0 else 1
+                    }
+                    "fix" -> {
+                        val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
+                        val toolArgs = buildJsonObject {
+                            put("action", "remedy_architecture")
+                            put("project", project)
+                            if (filterPaths.isNotEmpty()) {
+                                putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                            }
+                            if (!ruleIdArg.isNullOrBlank()) put("rule_id", ruleIdArg!!)
+                            put("dry_run", !applyRemediation)
+                            put("split", splitBoost003)
+                            put("make_private", makePrivateBoost003)
+                            if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg!!)
+                            put("limit", limit)
+                        }
+                        val res = server.callTool("codegraph_audit", toolArgs)
+                        val data = loadSpilledData(res)
+                        val total = data["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
+                        val bCount = data["boost003_count"]?.jsonPrimitive?.intOrNull ?: 0
+                        val lCount = data["layer_inversion_count"]?.jsonPrimitive?.intOrNull ?: 0
+                        val vCount = data["verified_count"]?.jsonPrimitive?.intOrNull ?: 0
+                        val aCount = data["applied_count"]?.jsonPrimitive?.intOrNull ?: 0
+                        val dryRun = data["dry_run"]?.jsonPrimitive?.booleanOrNull ?: (!applyRemediation)
+                        val prescriptions = data["prescriptions"]?.jsonArray ?: emptyList()
+
+                        if (applyRemediation && aCount > 0) {
+                            val reindexPaths = mutableListOf<String>()
+                            if (filterPaths.isNotEmpty()) {
+                                reindexPaths.addAll(filterPaths)
+                            }
+                            for (p in prescriptions) {
+                                val f = p.jsonObject["file_path"]?.jsonPrimitive?.content ?: continue
+                                reindexPaths.add(f)
+                                val sfArray = p.jsonObject["spawned_files"]?.jsonArray ?: emptyList()
+                                for (sf in sfArray) {
+                                    val spRel = sf.jsonObject["rel_path"]?.jsonPrimitive?.content ?: continue
+                                    reindexPaths.add(spRel)
+                                }
+                            }
+                            server.indexWorkspace(project, subpaths = if (reindexPaths.isNotEmpty()) reindexPaths.distinct() else null, force = true)
+                        }
+
+                        val text = if (isJson) {
+                            jsonPretty.encodeToString(data)
+                        } else {
+                            val mode = if (dryRun) "dry-run" else "applied"
+                            val header = "[Remediation] project=$project mode=$mode violations=$total boost003=$bCount layer_inversions=$lCount verified=$vCount applied=$aCount"
+                            val details = if (prescriptions.isNotEmpty() && (filterPaths.isNotEmpty() || prescriptions.size <= 5)) {
+                                val lines = mutableListOf<String>()
+                                for (p in prescriptions.take(5)) {
+                                    val obj = p.jsonObject
+                                    val f = obj["file_path"]?.jsonPrimitive?.content ?: ""
+                                    val r = obj["rule_id"]?.jsonPrimitive?.content ?: ""
+                                    val s = obj["fix_strategy"]?.jsonPrimitive?.content ?: ""
+                                    val v = obj["verified"]?.jsonPrimitive?.booleanOrNull ?: false
+                                    val app = obj["applied"]?.jsonPrimitive?.booleanOrNull ?: false
+                                    lines.add("  - $r: $f [$s, verified=$v, applied=$app]")
+                                    val diff = obj["diff_preview"]?.jsonPrimitive?.contentOrNull
+                                    if (!diff.isNullOrBlank()) {
+                                        lines.add(diff.lines().take(20).joinToString("\n") { "    $it" })
+                                    }
+                                }
+                                "\n" + lines.joinToString("\n")
+                            } else ""
+                            header + details
+                        }
+                        println(truncateSummary(text, isJson))
+                        return if (applyRemediation) {
+                            if (aCount == prescriptions.size || total == 0) 0 else 1
+                        } else {
+                            if (vCount > 0 || total == 0) 0 else 1
+                        }
                     }
                     "dead-code" -> {
                         val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
@@ -910,6 +992,7 @@ class CodeGraphCli {
                   query              Query AST symbols, callers, callees, blast radius, or status
                   synthesize-scope   Synthesize 3D Concurrency Scope (files, modules, architecture)
                   audit              Verify Clean Architecture layers and Single Declaration Principle
+                  fix                Remediate architecture violations (BOOST-003 AST split & layer inversions)
                   dead-code          Detect dead code unreferenced across indexed modules
                   record-memory      Record execution outcome annotation for a node into work memory
                   verify-remediation Verify and optionally apply autonomous remediation with pre-flight & post-verification checks
@@ -960,12 +1043,16 @@ class CodeGraphCli {
                   --strong-skipping <bool> Evaluate under Kotlin 2.0+ Strong Skipping mode (default: true)
 
                 Remediation Options:
+                  --split                  Enable automated AST file-splitting for BOOST-003 (default: true)
+                  --no-split               Disable AST file-splitting
+                  --make-private           Convert unreferenced secondary declarations to private
+                  --dry-run                Preview remediations without modifying disk (default)
+                  --apply                  Commit verified remediation to disk
                   --before <snippet>       Original code snippet to replace
                   --after <snippet>        Target replacement snippet
-                  --rule <id>              Target rule ID (e.g. COMPOSE-STAB-001)
+                  --rule <id>              Target rule ID (e.g. BOOST-003, ARCH-LAYER-INVERSION)
                   --target-node <id>       Target composable/symbol ID for scoped rule verification
                   --test-cmd <cmd>         Shell command to verify test suite preservation
-                  --apply                  Commit verified remediation to disk (default: dry-run)
 
                 Figma Options:
                   --file <key>             Figma file key

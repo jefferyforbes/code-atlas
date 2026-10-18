@@ -32,16 +32,17 @@ class SemioticLayerClassifier {
             annotations: List<String> = emptyList()
         ): Triple<String, String, Boolean> {
             val normPath = relPath.replace('\\', '/').lowercase()
-            val parts = relPath.replace('\\', '/').split('/')
+            val checkPath = if (normPath.startsWith("/")) normPath else "/$normPath"
+            val parts = normPath.split('/')
             val symLow = symbolName.lowercase()
             val annLow = annotations.map { it.lowercase().removePrefix("@") }.toSet()
 
             val isTestDouble = symLow.startsWith("fake") || symLow.startsWith("mock") ||
-                    symLow.startsWith("stub") || "/fixtures/" in normPath || normPath.endsWith("_fixture.py")
+                    symLow.startsWith("stub") || "/fixtures/" in checkPath || normPath.endsWith("_fixture.py")
 
-            val isTestSourceSet = parts.any { it.endsWith("Test") && it.length > 4 }
+            val isTestSourceSet = parts.any { it.endsWith("test") && it.length > 4 }
 
-            if (isTestDouble || isTestSourceSet || "/test/" in normPath || "/tests/" in normPath ||
+            if (isTestDouble || isTestSourceSet || "/test/" in checkPath || "/tests/" in checkPath ||
                 "commontest" in normPath || "test/" in normPath ||
                 normPath.startsWith("test_") || normPath.endsWith("_test.py") ||
                 relPath.endsWith("Test.kt") || normPath.endsWith("/test.kt") || normPath == "test.kt" ||
@@ -51,35 +52,42 @@ class SemioticLayerClassifier {
             }
 
             if ("composable" in annLow ||
-                listOf("/ui/", "/presentation/", "/screen/", "/components/", "/views/", "/cli/", "/mcp/").any { it in normPath } ||
-                listOf("screen", "viewmodel", "composable", "dialog", "sheet", "cli", "mcpserver").any { symLow.endsWith(it) } ||
+                listOf("/ui/", "/presentation/", "/screen/", "/screens/", "/components/", "/views/", "/view/", "/cli/", "/mcp/",
+                       "/web/", "/gui/", "/activity/", "/activities/", "/demo/", "/launcher/").any { it in checkPath } ||
+                listOf("screen", "viewmodel", "composable", "dialog", "sheet", "cli", "mcpserver",
+                       "activity", "launcher", "gui", "component", "components").any { symLow.endsWith(it) } ||
                 normPath.endsWith("cli.py") || normPath.endsWith("cli.kt") || normPath.endsWith("mcpserver.kt") ||
+                normPath.endsWith("gui.py") || normPath.endsWith("_gui.py") || normPath.endsWith("_runner.py") ||
+                normPath.endsWith("_tool.py") || normPath.endsWith("mb_tool.py") ||
                 normPath.endsWith("/main.kt") || normPath == "main.kt"
             ) {
                 return Triple("pragmatic", "presentation", false)
             }
 
-            if (listOf("/dto/", "/entity/", "/schema/", "/tokens/", "/contract/", "/model/").any { it in normPath } ||
+            if (listOf("/dto/", "/entity/", "/schema/", "/tokens/", "/contract/", "/model/").any { it in checkPath } ||
                 listOf("dto", "entity", "schema", "token", "node", "edge", "recommendation", "contract").any { symLow.endsWith(it) } ||
                 normPath.endsWith(".sql")
             ) {
-                val arch = if (listOf("/data/", "/db/", "/room/", "sqlite").any { it in normPath } ||
+                val arch = if (listOf("/data/", "/db/", "/room/", "sqlite").any { it in checkPath } ||
                     symLow.endsWith("dto") || symLow.endsWith("entity")
                 ) "data" else "domain"
                 return Triple("syntactic", arch, false)
             }
 
-            if (listOf("/data/", "/repository/", "/db/", "/storage/", "/store/", "/network/", "/api/").any { it in normPath } ||
+            if (listOf("/data/", "/repository/", "/db/", "/storage/", "/store/", "/network/", "/api/").any { it in checkPath } ||
                 listOf("store", "repository", "dao", "client", "adapter").any { symLow.endsWith(it) }
             ) {
                 return Triple("semantic", "data", false)
             }
 
-            if (listOf("/extract/", "/bridge/", "/config/", "/util/").any { it in normPath }) {
+            if (listOf("/extract/", "/bridge/", "/config/", "/util/", "/tools/", "/scripts/", "/orchestrator/",
+                       "/tools & scripts/").any { it in checkPath } ||
+                checkPath.contains("/tools") || checkPath.contains("/scripts") || checkPath.contains("/orchestrator")
+            ) {
                 return Triple("semantic", "infrastructure", false)
             }
 
-            if ("/engine/" in normPath) {
+            if ("/engine/" in checkPath) {
                 return Triple("semantic", "application", false)
             }
 

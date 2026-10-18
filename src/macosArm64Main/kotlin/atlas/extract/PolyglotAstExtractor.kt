@@ -63,7 +63,7 @@ class PolyglotAstExtractor {
             "require", "check", "match", "throw", "yield", "guard", "case", "typeof"
         )
 
-        const val EXTRACTOR_VERSION: String = "1.3.0"
+        const val EXTRACTOR_VERSION: String = "1.3.1"
 
         private val INFIX_CALL_RE = Regex(
             """(?<=\s|[)\]a-zA-Z0-9_])\s+(?<callee>[a-zA-Z_][a-zA-Z0-9_]{1,})\s+(?=[A-Za-z0-9_"'(\[])"""

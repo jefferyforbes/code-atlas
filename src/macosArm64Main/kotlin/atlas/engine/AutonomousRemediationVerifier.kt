@@ -449,23 +449,25 @@ class AutonomousRemediationVerifier(
         )
     }
 
-    private fun hasBalancedDelimiters(maskedText: String): Boolean {
-        val stack = mutableListOf<Char>()
-        for (c in maskedText) {
-            when (c) {
-                '{', '(', '[' -> stack.add(c)
-                '}' -> {
-                    if (stack.isEmpty() || stack.removeAt(stack.size - 1) != '{') return false
-                }
-                ')' -> {
-                    if (stack.isEmpty() || stack.removeAt(stack.size - 1) != '(') return false
-                }
-                ']' -> {
-                    if (stack.isEmpty() || stack.removeAt(stack.size - 1) != '[') return false
+    companion object {
+        fun hasBalancedDelimiters(maskedText: String): Boolean {
+            val stack = mutableListOf<Char>()
+            for (c in maskedText) {
+                when (c) {
+                    '{', '(', '[' -> stack.add(c)
+                    '}' -> {
+                        if (stack.isEmpty() || stack.removeAt(stack.size - 1) != '{') return false
+                    }
+                    ')' -> {
+                        if (stack.isEmpty() || stack.removeAt(stack.size - 1) != '(') return false
+                    }
+                    ']' -> {
+                        if (stack.isEmpty() || stack.removeAt(stack.size - 1) != '[') return false
+                    }
                 }
             }
+            return stack.isEmpty()
         }
-        return stack.isEmpty()
     }
 
     private fun countOccurrences(source: String, target: String): Int {
