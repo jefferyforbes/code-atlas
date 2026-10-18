@@ -112,6 +112,7 @@ object PlatformFiles {
         return success
     }
 
+    fun chmod(path: String, mode: UInt): Boolean = platform.posix.chmod(path, mode.toUShort()) == 0
 
     fun listDirectory(dirPath: String): List<String> {
         val result = mutableListOf<String>()
