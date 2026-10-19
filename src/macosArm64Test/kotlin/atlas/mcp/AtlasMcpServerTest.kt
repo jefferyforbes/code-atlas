@@ -176,4 +176,57 @@ class AtlasMcpServerTest {
             server.close()
         }
     }
+
+    @Test
+    fun testNotificationsNeverReturnResponse() {
+        val server = AtlasMcpServer(workspaceRoot = ".")
+        try {
+            // ping as notification -> null
+            assertNull(server.processJsonRpcMessage("""{"jsonrpc": "2.0", "method": "ping"}"""))
+
+            // initialize as notification -> null
+            assertNull(server.processJsonRpcMessage("""{"jsonrpc": "2.0", "method": "initialize"}"""))
+
+            // tools/list as notification -> null
+            assertNull(server.processJsonRpcMessage("""{"jsonrpc": "2.0", "method": "tools/list"}"""))
+
+            // tools/call as notification -> executes side effects and returns null
+            assertNull(
+                server.processJsonRpcMessage(
+                    """{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "atlas_query", "arguments": {"action": "symbol", "target": "AtlasMcpServer"}}}"""
+                )
+            )
+
+            // tools/call with invalid params as notification -> null
+            assertNull(
+                server.processJsonRpcMessage(
+                    """{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": 123}}"""
+                )
+            )
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun testNonPrimitiveIdReturns32600() {
+        val server = AtlasMcpServer(workspaceRoot = ".")
+        try {
+            // ID as array -> -32600 with id: null
+            val arrayIdResp = server.processJsonRpcMessage("""{"jsonrpc": "2.0", "id": [1, 2], "method": "ping"}""")
+            assertNotNull(arrayIdResp)
+            val parsedArr = json.parseToJsonElement(arrayIdResp).jsonObject
+            assertEquals(JsonNull, parsedArr["id"])
+            assertEquals(-32600, parsedArr["error"]?.jsonObject?.get("code")?.jsonPrimitive?.int)
+
+            // ID as object -> -32600 with id: null
+            val objIdResp = server.processJsonRpcMessage("""{"jsonrpc": "2.0", "id": {}, "method": "ping"}""")
+            assertNotNull(objIdResp)
+            val parsedObj = json.parseToJsonElement(objIdResp).jsonObject
+            assertEquals(JsonNull, parsedObj["id"])
+            assertEquals(-32600, parsedObj["error"]?.jsonObject?.get("code")?.jsonPrimitive?.int)
+        } finally {
+            server.close()
+        }
+    }
 }

@@ -62,8 +62,16 @@ tasks.register<Exec>("atlasAudit") {
     commandLine(binary.get().asFile.absolutePath, "audit", "--project", "code-atlas")
 }
 
+tasks.register<Exec>("atlasComplexityAudit") {
+    group = "verification"
+    description = "Runs the Atlas complexity ratchet quality gate against the code-atlas project."
+    dependsOn("atlasIndex")
+    val binary = layout.buildDirectory.file("bin/macosArm64/releaseExecutable/atlas.kexe")
+    commandLine(binary.get().asFile.absolutePath, "audit", "--complexity", "--project", "code-atlas")
+}
+
 tasks.named("check") {
-    dependsOn("atlasAudit")
+    dependsOn("atlasAudit", "atlasComplexityAudit")
 }
 
 tasks.register<Copy>("installToDist") {

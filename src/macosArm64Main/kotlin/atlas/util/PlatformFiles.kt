@@ -138,9 +138,10 @@ object PlatformFiles {
         var res = name
             .replace('/', '_')
             .replace('\\', '_')
-            .replace("..", "_")
             .filter { it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' }
-            .trim('.', '_')
+        while (res.contains("..")) {
+            res = res.replace("..", "_")
+        }
         while (res.contains("__")) {
             res = res.replace("__", "_")
         }
