@@ -65,13 +65,7 @@ object ComplexityExtractor {
         return cognitive.toDouble() * (1.0 + ln(1.0 + inDegree.toDouble()))
     }
 
-    private fun calculateBraceLanguage(
-        maskedLines: List<String>,
-        rawLines: List<String>,
-        language: String,
-        isComposable: Boolean,
-        functionName: String? = null
-    ): ComplexityVector {
+    private class BraceRunState {
         var cyclomatic = 1
         var cognitive = 0
         var maxNesting = 0
@@ -83,192 +77,250 @@ object ComplexityExtractor {
         var lastIdentifier = ""
         var lastCallIdentifier = ""
         var prevWord = ""
-
         var parenDepth = 0
+
+        fun currentNesting(): Int = scopeStack.count {
+            it == ScopeType.CONTROL || it == ScopeType.SWITCH_LIKE || it == ScopeType.LAMBDA
+        }
+
+        fun updateNesting() {
+            val nesting = currentNesting()
+            if (nesting > maxNesting) maxNesting = nesting
+        }
+
+        fun openScope(scopeType: ScopeType) {
+            scopeStack.add(scopeType)
+            updateNesting()
+            pendingControl = false
+            pendingSwitchLike = false
+            lastCallIdentifier = ""
+        }
+
+        fun closeScope() {
+            if (scopeStack.isNotEmpty()) {
+                scopeStack.removeAt(scopeStack.size - 1)
+            }
+        }
+    }
+
+    private fun calculateBraceLanguage(
+        maskedLines: List<String>,
+        rawLines: List<String>,
+        language: String,
+        isComposable: Boolean,
+        functionName: String? = null
+    ): ComplexityVector {
+        val state = BraceRunState()
+
         for (line in maskedLines) {
             val trimmed = line.trim()
             if (trimmed.isEmpty()) continue
 
-            // Count returns
-            val words = tokenizeWords(trimmed)
-            for (w in words) {
-                if (w == "return") returnCount++
-            }
-
-            // Count binary logical operators
-            cyclomatic += countRegexMatches(trimmed, Regex("""&&|\|\|"""))
-            cognitive += countLogicalOperatorSequences(trimmed)
-
-            // Elvis in Kotlin/Swift or ternary in TS/C++
-            if (language in listOf("kotlin", "swift")) {
-                val elvisCount = countRegexMatches(trimmed, Regex("""\?:"""))
-                cyclomatic += elvisCount
-                cognitive += elvisCount
-            } else if (language in listOf("typescript", "javascript", "ts", "js", "cpp", "c")) {
-                val ternaryCount = countRegexMatches(trimmed, Regex("""(?<=\S)\s+\?\s+[^:?]+\s+:"""))
-                cyclomatic += ternaryCount
-                cognitive += ternaryCount
-            }
-
-            // Character-by-character scan for tokens, braces, and keywords
-            var i = 0
-            while (i < trimmed.length) {
-                val c = trimmed[i]
-
-                if (c == '(') {
-                    parenDepth++
-                    lastCallIdentifier = lastIdentifier
-                    i++
-                    continue
-                } else if (c == ')') {
-                    if (parenDepth > 0) parenDepth--
-                    i++
-                    continue
-                }
-
-                if (c == '{') {
-                    val callTarget = if (lastCallIdentifier.isNotEmpty()) lastCallIdentifier else lastIdentifier
-                    val isRootScope = scopeStack.isEmpty() && !pendingControl && !pendingSwitchLike
-                    val isSelfDecl = functionName != null && callTarget == functionName
-                    val scopeType = when {
-                        pendingSwitchLike -> ScopeType.SWITCH_LIKE
-                        pendingControl -> ScopeType.CONTROL
-                        isRootScope || isSelfDecl -> ScopeType.OTHER
-                        isComposable && callTarget in COMPOSE_CONTAINERS -> ScopeType.COMPOSE_CONTAINER
-                        !isComposable && callTarget in COMPOSE_CONTAINERS -> ScopeType.LAMBDA
-                        callTarget in COMMON_LAMBDAS -> ScopeType.LAMBDA
-                        else -> ScopeType.OTHER
-                    }
-                    scopeStack.add(scopeType)
-                    val activeCognitiveNesting = scopeStack.count { it == ScopeType.CONTROL || it == ScopeType.SWITCH_LIKE || it == ScopeType.LAMBDA }
-                    if (activeCognitiveNesting > maxNesting) {
-                        maxNesting = activeCognitiveNesting
-                    }
-                    pendingControl = false
-                    pendingSwitchLike = false
-                    lastCallIdentifier = ""
-                    i++
-                    continue
-                } else if (c == '}') {
-                    if (scopeStack.isNotEmpty()) {
-                        scopeStack.removeAt(scopeStack.size - 1)
-                    }
-                    i++
-                    continue
-                }
-
-                // Check for words
-                if (c.isLetter() || c == '_') {
-                    val start = i
-                    while (i < trimmed.length && (trimmed[i].isLetterOrDigit() || trimmed[i] == '_')) {
-                        i++
-                    }
-                    val word = trimmed.substring(start, i)
-                    val currentNesting = scopeStack.count { it == ScopeType.CONTROL || it == ScopeType.SWITCH_LIKE || it == ScopeType.LAMBDA }
-
-                    when (word) {
-                        "if" -> {
-                            val isElseIf = prevWord == "else"
-                            cyclomatic++
-                            if (isElseIf) {
-                                cognitive += 1 // else if increment without nesting penalty
-                            } else {
-                                cognitive += (1 + currentNesting)
-                            }
-                            pendingControl = true
-                        }
-                        "else" -> {
-                            val remainder = trimmed.substring(i).trimStart()
-                            if (!remainder.startsWith("if")) {
-                                cognitive += 1 // else structural increment
-                                pendingControl = true
-                            }
-                        }
-                        "when", "switch", "match" -> {
-                            cyclomatic++
-                            cognitive += (1 + currentNesting)
-                            pendingControl = true
-                            pendingSwitchLike = true
-                        }
-                        "for", "while", "do" -> {
-                            cyclomatic++
-                            cognitive += (1 + currentNesting)
-                            pendingControl = true
-                        }
-                        "catch" -> {
-                            cyclomatic++
-                            cognitive += (1 + currentNesting)
-                            pendingControl = true
-                        }
-                        "case" -> {
-                            cyclomatic++
-                        }
-                        "break", "continue" -> {
-                            val remainder = trimmed.substring(i).trimStart()
-                            if (remainder.startsWith("@") || remainder.takeWhile { it.isLetter() }.isNotEmpty()) {
-                                cognitive += 1
-                            }
-                        }
-                    }
-                    prevWord = word
-                    lastIdentifier = word
-                    continue
-                }
-
-                // Arrow branch in Kotlin when (->)
-                if (c == '-' && i + 1 < trimmed.length && trimmed[i + 1] == '>') {
-                    val inKotlinWhen = (language in listOf("kotlin", "kt")) &&
-                        scopeStack.lastOrNull() == ScopeType.SWITCH_LIKE &&
-                        parenDepth == 0
-                    if (inKotlinWhen) {
-                        val beforeArrow = trimmed.substring(0, i).trim()
-                        if (!beforeArrow.endsWith("else")) {
-                            cyclomatic++
-                        }
-                    }
-                    i += 2
-                    continue
-                }
-
-                // Fat-arrow branch in Rust match (=>)
-                if (c == '=' && i + 1 < trimmed.length && trimmed[i + 1] == '>') {
-                    val inRustMatch = (language in listOf("rust", "rs")) &&
-                        scopeStack.lastOrNull() == ScopeType.SWITCH_LIKE &&
-                        parenDepth == 0
-                    if (inRustMatch) {
-                        val beforeArrow = trimmed.substring(0, i).trim()
-                        if (!beforeArrow.endsWith("_")) {
-                            cyclomatic++
-                        }
-                    }
-                    i += 2
-                    continue
-                }
-
-                i++
-            }
-
-            // Reset pending control if line finishes a single-line statement without opening a brace
-            if ((pendingControl || pendingSwitchLike) && !trimmed.endsWith("{") && !trimmed.endsWith("(") && !trimmed.endsWith("&&") && !trimmed.endsWith("||")) {
-                // If it was a single line statement (e.g. if (x) return 1), control does not persist to next line
-                if (trimmed.contains("return") || trimmed.contains("=") || trimmed.endsWith(";")) {
-                    pendingControl = false
-                    pendingSwitchLike = false
-                }
-            }
+            tallyLineReturnsAndOperators(trimmed, language, state)
+            scanBraceLineTokens(trimmed, language, isComposable, functionName, state)
+            resetPendingControlIfSingleLine(trimmed, state)
         }
 
-        val sloc = computeSloc(if (rawLines.isNotEmpty()) rawLines else maskedLines, language)
-        val paramCount = extractParamCount(if (rawLines.isNotEmpty()) rawLines else maskedLines)
-
+        val effectiveLines = if (rawLines.isNotEmpty()) rawLines else maskedLines
         return ComplexityVector(
-            cyclomatic = cyclomatic,
-            cognitive = cognitive,
-            maxNesting = maxNesting,
-            sloc = sloc,
-            paramCount = paramCount,
-            returnCount = returnCount
+            cyclomatic = state.cyclomatic,
+            cognitive = state.cognitive,
+            maxNesting = state.maxNesting,
+            sloc = computeSloc(effectiveLines, language),
+            paramCount = extractParamCount(effectiveLines),
+            returnCount = state.returnCount
         )
+    }
+
+    private fun tallyLineReturnsAndOperators(
+        trimmed: String,
+        language: String,
+        state: BraceRunState
+    ) {
+        val words = tokenizeWords(trimmed)
+        for (w in words) {
+            if (w == "return") state.returnCount++
+        }
+
+        state.cyclomatic += countRegexMatches(trimmed, Regex("""&&|\|\|"""))
+        state.cognitive += countLogicalOperatorSequences(trimmed)
+
+        if (language in listOf("kotlin", "swift")) {
+            val elvisCount = countRegexMatches(trimmed, Regex("""\?:"""))
+            state.cyclomatic += elvisCount
+            state.cognitive += elvisCount
+        } else if (language in listOf("typescript", "javascript", "ts", "js", "cpp", "c")) {
+            val ternaryCount = countRegexMatches(trimmed, Regex("""(?<=\S)\s+\?\s+[^:?]+\s+:"""))
+            state.cyclomatic += ternaryCount
+            state.cognitive += ternaryCount
+        }
+    }
+
+    private fun resolveOpeningScopeType(
+        state: BraceRunState,
+        isComposable: Boolean,
+        functionName: String?
+    ): ScopeType {
+        val callTarget = if (state.lastCallIdentifier.isNotEmpty()) state.lastCallIdentifier else state.lastIdentifier
+        val isRootScope = state.scopeStack.isEmpty() && !state.pendingControl && !state.pendingSwitchLike
+        val isSelfDecl = functionName != null && callTarget == functionName
+        return when {
+            state.pendingSwitchLike -> ScopeType.SWITCH_LIKE
+            state.pendingControl -> ScopeType.CONTROL
+            isRootScope || isSelfDecl -> ScopeType.OTHER
+            isComposable && callTarget in COMPOSE_CONTAINERS -> ScopeType.COMPOSE_CONTAINER
+            !isComposable && callTarget in COMPOSE_CONTAINERS -> ScopeType.LAMBDA
+            callTarget in COMMON_LAMBDAS -> ScopeType.LAMBDA
+            else -> ScopeType.OTHER
+        }
+    }
+
+    private fun handleIfKeyword(state: BraceRunState, nesting: Int) {
+        val isElseIf = state.prevWord == "else"
+        state.cyclomatic++
+        if (isElseIf) {
+            state.cognitive += 1
+        } else {
+            state.cognitive += (1 + nesting)
+        }
+        state.pendingControl = true
+    }
+
+    private fun handleElseKeyword(trimmed: String, wordEndIndex: Int, state: BraceRunState) {
+        val remainder = trimmed.substring(wordEndIndex).trimStart()
+        if (!remainder.startsWith("if")) {
+            state.cognitive += 1
+            state.pendingControl = true
+        }
+    }
+
+    private fun handleBreakContinueKeyword(trimmed: String, wordEndIndex: Int, state: BraceRunState) {
+        val remainder = trimmed.substring(wordEndIndex).trimStart()
+        if (remainder.startsWith("@") || remainder.takeWhile { it.isLetter() }.isNotEmpty()) {
+            state.cognitive += 1
+        }
+    }
+
+    private fun handleKeywordToken(
+        word: String,
+        trimmed: String,
+        wordEndIndex: Int,
+        state: BraceRunState
+    ) {
+        val nesting = state.currentNesting()
+        when (word) {
+            "if" -> handleIfKeyword(state, nesting)
+            "else" -> handleElseKeyword(trimmed, wordEndIndex, state)
+            "when", "switch", "match" -> {
+                state.cyclomatic++
+                state.cognitive += (1 + nesting)
+                state.pendingControl = true
+                state.pendingSwitchLike = true
+            }
+            "for", "while", "do", "catch" -> {
+                state.cyclomatic++
+                state.cognitive += (1 + nesting)
+                state.pendingControl = true
+            }
+            "case" -> state.cyclomatic++
+            "break", "continue" -> handleBreakContinueKeyword(trimmed, wordEndIndex, state)
+        }
+        state.prevWord = word
+        state.lastIdentifier = word
+    }
+
+    private fun scanWordToken(
+        trimmed: String,
+        startIndex: Int,
+        state: BraceRunState
+    ): Int {
+        var end = startIndex
+        while (end < trimmed.length && (trimmed[end].isLetterOrDigit() || trimmed[end] == '_')) {
+            end++
+        }
+        val word = trimmed.substring(startIndex, end)
+        handleKeywordToken(word, trimmed, end, state)
+        return end
+    }
+
+    private fun checkKotlinArrow(trimmed: String, index: Int, language: String, state: BraceRunState): Boolean {
+        if (index + 1 >= trimmed.length || trimmed[index] != '-' || trimmed[index + 1] != '>') return false
+        val inKotlinWhen = (language in listOf("kotlin", "kt")) &&
+            state.scopeStack.lastOrNull() == ScopeType.SWITCH_LIKE &&
+            state.parenDepth == 0
+        if (inKotlinWhen) {
+            val beforeArrow = trimmed.substring(0, index).trim()
+            if (!beforeArrow.endsWith("else")) {
+                state.cyclomatic++
+            }
+        }
+        return true
+    }
+
+    private fun checkRustFatArrow(trimmed: String, index: Int, language: String, state: BraceRunState): Boolean {
+        if (index + 1 >= trimmed.length || trimmed[index] != '=' || trimmed[index + 1] != '>') return false
+        val inRustMatch = (language in listOf("rust", "rs")) &&
+            state.scopeStack.lastOrNull() == ScopeType.SWITCH_LIKE &&
+            state.parenDepth == 0
+        if (inRustMatch) {
+            val beforeArrow = trimmed.substring(0, index).trim()
+            if (!beforeArrow.endsWith("_")) {
+                state.cyclomatic++
+            }
+        }
+        return true
+    }
+
+    private fun scanBraceLineTokens(
+        trimmed: String,
+        language: String,
+        isComposable: Boolean,
+        functionName: String?,
+        state: BraceRunState
+    ) {
+        var i = 0
+        while (i < trimmed.length) {
+            val c = trimmed[i]
+            when {
+                c == '(' -> {
+                    state.parenDepth++
+                    state.lastCallIdentifier = state.lastIdentifier
+                    i++
+                }
+                c == ')' -> {
+                    if (state.parenDepth > 0) state.parenDepth--
+                    i++
+                }
+                c == '{' -> {
+                    val scopeType = resolveOpeningScopeType(state, isComposable, functionName)
+                    state.openScope(scopeType)
+                    i++
+                }
+                c == '}' -> {
+                    state.closeScope()
+                    i++
+                }
+                c.isLetter() || c == '_' -> {
+                    i = scanWordToken(trimmed, i, state)
+                }
+                checkKotlinArrow(trimmed, i, language, state) -> {
+                    i += 2
+                }
+                checkRustFatArrow(trimmed, i, language, state) -> {
+                    i += 2
+                }
+                else -> i++
+            }
+        }
+    }
+
+    private fun resetPendingControlIfSingleLine(trimmed: String, state: BraceRunState) {
+        if (!state.pendingControl && !state.pendingSwitchLike) return
+        if (trimmed.endsWith("{") || trimmed.endsWith("(") || trimmed.endsWith("&&") || trimmed.endsWith("||")) return
+        if (trimmed.contains("return") || trimmed.contains("=") || trimmed.endsWith(";")) {
+            state.pendingControl = false
+            state.pendingSwitchLike = false
+        }
     }
 
     private class PythonRunState {
