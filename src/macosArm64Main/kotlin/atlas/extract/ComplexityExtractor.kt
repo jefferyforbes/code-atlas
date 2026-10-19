@@ -271,136 +271,135 @@ object ComplexityExtractor {
         )
     }
 
-    private fun calculatePython(
-        maskedLines: List<String>,
-        rawLines: List<String>
-    ): ComplexityVector {
+    private class PythonRunState {
         var cyclomatic = 1
         var cognitive = 0
         var maxNesting = 0
         var returnCount = 0
 
+        fun updateNesting(nesting: Int) {
+            if (nesting > maxNesting) maxNesting = nesting
+        }
+    }
+
+    private fun calculatePython(
+        maskedLines: List<String>,
+        rawLines: List<String>
+    ): ComplexityVector {
+        val state = PythonRunState()
         val indentStack = mutableListOf<Pair<Int, Boolean>>() // (indentation, isControl)
 
         for (line in maskedLines) {
-            val trimmed = line.trim()
-            if (trimmed.isEmpty() || trimmed.startsWith("#")) continue
-
-            val indent = line.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
-
-            // Pop scopes where indentation is no longer active
-            while (indentStack.isNotEmpty() && indentStack.last().first >= indent) {
-                indentStack.removeAt(indentStack.size - 1)
-            }
-
-            val currentNesting = indentStack.count { it.second }
-            if (currentNesting > maxNesting) {
-                maxNesting = currentNesting
-            }
-
-            val words = tokenizeWords(trimmed)
-            for (w in words) {
-                if (w == "return") returnCount++
-            }
-
-            // Logical operators and, or
-            for (w in words) {
-                if (w == "and" || w == "or") {
-                    cyclomatic++
-                    cognitive++
-                }
-            }
-
-            val firstWord = words.firstOrNull() ?: ""
-            var openedControl = false
-
-            when (firstWord) {
-                "if" -> {
-                    cyclomatic++
-                    cognitive += (1 + currentNesting)
-                    openedControl = true
-                }
-                "elif" -> {
-                    cyclomatic++
-                    cognitive += 1
-                    openedControl = true
-                }
-                "else" -> {
-                    cognitive += 1
-                    openedControl = true
-                }
-                "for", "while" -> {
-                    cyclomatic++
-                    cognitive += (1 + currentNesting)
-                    openedControl = true
-                }
-                "except" -> {
-                    cyclomatic++
-                    cognitive += (1 + currentNesting)
-                    openedControl = true
-                }
-                "match" -> {
-                    cyclomatic++
-                    cognitive += (1 + currentNesting)
-                    openedControl = true
-                }
-                "case" -> {
-                    if (words.getOrNull(1) != "_") {
-                        cyclomatic++
-                    }
-                    openedControl = true
-                }
-            }
-
-            if (trimmed.endsWith(":")) {
-                indentStack.add(Pair(indent, openedControl))
-                val newNesting = indentStack.count { it.second }
-                if (newNesting > maxNesting) {
-                    maxNesting = newNesting
-                }
-            }
+            processPythonLine(line, indentStack, state)
         }
 
-        val sloc = computeSloc(if (rawLines.isNotEmpty()) rawLines else maskedLines, "python")
-        val paramCount = extractParamCount(if (rawLines.isNotEmpty()) rawLines else maskedLines)
-
+        val effectiveLines = if (rawLines.isNotEmpty()) rawLines else maskedLines
         return ComplexityVector(
-            cyclomatic = cyclomatic,
-            cognitive = cognitive,
-            maxNesting = maxNesting,
-            sloc = sloc,
-            paramCount = paramCount,
-            returnCount = returnCount
+            cyclomatic = state.cyclomatic,
+            cognitive = state.cognitive,
+            maxNesting = state.maxNesting,
+            sloc = computeSloc(effectiveLines, "python"),
+            paramCount = extractParamCount(effectiveLines),
+            returnCount = state.returnCount
         )
+    }
+
+    private fun processPythonLine(
+        line: String,
+        indentStack: MutableList<Pair<Int, Boolean>>,
+        state: PythonRunState
+    ) {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty() || trimmed.startsWith("#")) return
+
+        val indent = line.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+        popInactivePythonIndent(indentStack, indent)
+
+        val currentNesting = indentStack.count { it.second }
+        state.updateNesting(currentNesting)
+
+        val words = tokenizeWords(trimmed)
+        val (returns, ops) = tallyPythonTokens(words)
+        state.returnCount += returns
+        state.cyclomatic += ops
+        state.cognitive += ops
+
+        val firstWord = words.firstOrNull() ?: ""
+        val (cycDelta, cogDelta, openedControl) = evalPythonControlKeyword(firstWord, words, currentNesting)
+        state.cyclomatic += cycDelta
+        state.cognitive += cogDelta
+
+        if (trimmed.endsWith(":")) {
+            indentStack.add(Pair(indent, openedControl))
+            state.updateNesting(indentStack.count { it.second })
+        }
+    }
+
+    private fun popInactivePythonIndent(indentStack: MutableList<Pair<Int, Boolean>>, indent: Int) {
+        while (indentStack.isNotEmpty() && indentStack.last().first >= indent) {
+            indentStack.removeAt(indentStack.size - 1)
+        }
+    }
+
+    private fun tallyPythonTokens(words: List<String>): Pair<Int, Int> {
+        var returns = 0
+        var ops = 0
+        for (w in words) {
+            if (w == "return") returns++
+            if (w == "and" || w == "or") ops++
+        }
+        return Pair(returns, ops)
+    }
+
+    private data class PythonKeywordComplexity(
+        val cyclomaticDelta: Int,
+        val cognitiveDelta: Int,
+        val openedControl: Boolean
+    )
+
+    private fun evalPythonControlKeyword(
+        firstWord: String,
+        words: List<String>,
+        currentNesting: Int
+    ): PythonKeywordComplexity {
+        return when (firstWord) {
+            "if" -> PythonKeywordComplexity(1, 1 + currentNesting, true)
+            "elif" -> PythonKeywordComplexity(1, 1, true)
+            "else" -> PythonKeywordComplexity(0, 1, true)
+            "for", "while" -> PythonKeywordComplexity(1, 1 + currentNesting, true)
+            "except" -> PythonKeywordComplexity(1, 1 + currentNesting, true)
+            "match" -> PythonKeywordComplexity(1, 1 + currentNesting, true)
+            "case" -> {
+                val cyc = if (words.getOrNull(1) != "_") 1 else 0
+                PythonKeywordComplexity(cyc, 0, true)
+            }
+            else -> PythonKeywordComplexity(0, 0, false)
+        }
     }
 
     private fun countLogicalOperatorSequences(line: String): Int {
         var count = 0
-        var inAnd = false
-        var inOr = false
+        var currentOp = ""
         var i = 0
         while (i < line.length - 1) {
-            if (line[i] == '&' && line[i + 1] == '&') {
-                if (!inAnd) {
+            val op = readLogicalOp(line, i)
+            if (op != null) {
+                if (currentOp != op) {
                     count++
-                    inAnd = true
-                    inOr = false
+                    currentOp = op
                 }
                 i += 2
-                continue
+            } else {
+                i++
             }
-            if (line[i] == '|' && line[i + 1] == '|') {
-                if (!inOr) {
-                    count++
-                    inOr = true
-                    inAnd = false
-                }
-                i += 2
-                continue
-            }
-            i++
         }
         return count
+    }
+
+    private fun readLogicalOp(line: String, i: Int): String? {
+        if (line[i] == '&' && line[i + 1] == '&') return "&&"
+        if (line[i] == '|' && line[i + 1] == '|') return "||"
+        return null
     }
 
     private fun countRegexMatches(text: String, regex: Regex): Int {
@@ -438,30 +437,50 @@ object ComplexityExtractor {
     }
 
     private fun extractParamCount(lines: List<String>): Int {
-        if (lines.isEmpty()) return 0
+        val paramContent = extractParamContent(lines) ?: return 0
+        if (paramContent.isEmpty()) return 0
+        return countTopLevelCommas(paramContent) + 1
+    }
+
+    private fun extractParamContent(lines: List<String>): String? {
+        if (lines.isEmpty()) return null
+        val header = collectHeaderSnippet(lines)
+        val openParen = header.indexOf('(')
+        val closeParen = header.lastIndexOf(')')
+        if (openParen == -1 || closeParen <= openParen) return null
+        return header.substring(openParen + 1, closeParen).trim()
+    }
+
+    private fun collectHeaderSnippet(lines: List<String>): String {
         val headerSb = StringBuilder()
         var parenDepth = 0
         var foundOpen = false
         for (line in lines) {
             headerSb.append(line).append(' ')
-            for (c in line) {
-                if (c == '(') {
-                    parenDepth++
-                    foundOpen = true
-                } else if (c == ')') {
-                    parenDepth--
-                }
-            }
+            val (depth, opened) = scanLineParens(line, parenDepth, foundOpen)
+            parenDepth = depth
+            foundOpen = opened
             if (foundOpen && parenDepth <= 0) break
             if (headerSb.length > 500) break
         }
-        val header = headerSb.toString()
-        val openParen = header.indexOf('(')
-        val closeParen = header.lastIndexOf(')')
-        if (openParen == -1 || closeParen <= openParen) return 0
-        val paramContent = header.substring(openParen + 1, closeParen).trim()
-        if (paramContent.isEmpty()) return 0
+        return headerSb.toString()
+    }
 
+    private fun scanLineParens(line: String, startDepth: Int, startOpened: Boolean): Pair<Int, Boolean> {
+        var depth = startDepth
+        var opened = startOpened
+        for (c in line) {
+            if (c == '(') {
+                depth++
+                opened = true
+            } else if (c == ')') {
+                depth--
+            }
+        }
+        return Pair(depth, opened)
+    }
+
+    private fun countTopLevelCommas(paramContent: String): Int {
         var depth = 0
         var commas = 0
         for (c in paramContent) {
@@ -471,7 +490,7 @@ object ComplexityExtractor {
                 ',' -> if (depth == 0) commas++
             }
         }
-        return commas + 1
+        return commas
     }
 
     private enum class ScopeType {
