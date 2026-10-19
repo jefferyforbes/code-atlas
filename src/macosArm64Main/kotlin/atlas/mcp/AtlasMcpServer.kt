@@ -17,6 +17,7 @@ import atlas.engine.ArchitectContextEngine
 import atlas.extract.UrlTargetResolver
 import atlas.model.ArchitectContextResult
 import atlas.model.ComplexityScoreRecord
+import atlas.model.ComplexityViolation
 import atlas.util.PlatformFiles
 import kotlin.math.ln
 import kotlin.math.roundToInt
@@ -1053,126 +1054,8 @@ class AtlasMcpServer(
                 val report = composeEngine.runDoctor(project, target = targetSym, limit = limit, workspaceRoot = workspaceRoot)
                 json.encodeToJsonElement(report).jsonObject
             }
-            "audit_complexity" -> {
-                val threshold = args["threshold"]?.jsonPrimitive?.intOrNull ?: 10
-                val maxCyclomatic = args["max_cyclomatic"]?.jsonPrimitive?.intOrNull ?: 15
-                val violations = auditor.checkComplexityViolations(
-                    projectId = project,
-                    maxCognitive = threshold,
-                    maxCyclomatic = maxCyclomatic,
-                    pathPrefixes = if (targets.isNotEmpty()) targets else null
-                )
-
-                var resolvedRatchet: Int? = args["ratchet"]?.jsonPrimitive?.intOrNull
-                    ?: args["ratchet"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
-                    ?: args["max_violations"]?.jsonPrimitive?.intOrNull
-                    ?: args["max_violations"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
-                    ?: args["baseline"]?.jsonPrimitive?.intOrNull
-                    ?: args["baseline"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
-
-                var resolvedHighRatchet: Int? = args["high_ratchet"]?.jsonPrimitive?.intOrNull
-                    ?: args["high_ratchet"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
-                    ?: args["max_high_violations"]?.jsonPrimitive?.intOrNull
-                    ?: args["max_high_violations"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
-
-                if (resolvedRatchet == null || resolvedHighRatchet == null) {
-                    val explicitFile = if (args["baseline"]?.jsonPrimitive?.intOrNull == null &&
-                        args["baseline"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() == null) {
-                        args["baseline"]?.jsonPrimitive?.contentOrNull
-                    } else null
-
-                    val candidatePaths = listOfNotNull(
-                        explicitFile,
-                        "$workspaceRoot/.atlas/complexity-baseline.json",
-                        "$workspaceRoot/complexity-baseline.json",
-                        ".atlas/complexity-baseline.json",
-                        "complexity-baseline.json"
-                    ).distinct()
-
-                    for (cPath in candidatePaths) {
-                        val resolvedPath = if (PlatformFiles.exists(cPath)) {
-                            cPath
-                        } else if (!cPath.startsWith("/") && PlatformFiles.exists("$workspaceRoot/$cPath")) {
-                            "$workspaceRoot/$cPath"
-                        } else {
-                            null
-                        }
-                        if (resolvedPath != null) {
-                            try {
-                                val text = PlatformFiles.readText(resolvedPath)
-                                val parsed = json.parseToJsonElement(text).jsonObject
-                                val fileProject = parsed["project"]?.jsonPrimitive?.contentOrNull
-                                if (fileProject == null || fileProject == project) {
-                                    if (resolvedRatchet == null) {
-                                        resolvedRatchet = parsed["ratchet"]?.jsonPrimitive?.intOrNull
-                                            ?: parsed["total_violations"]?.jsonPrimitive?.intOrNull
-                                            ?: parsed["max_violations"]?.jsonPrimitive?.intOrNull
-                                    }
-                                    if (resolvedHighRatchet == null) {
-                                        resolvedHighRatchet = parsed["high_ratchet"]?.jsonPrimitive?.intOrNull
-                                            ?: parsed["high_severity_count"]?.jsonPrimitive?.intOrNull
-                                            ?: parsed["max_high_violations"]?.jsonPrimitive?.intOrNull
-                                    }
-                                    if (resolvedRatchet != null || resolvedHighRatchet != null) break
-                                }
-                            } catch (e: Exception) {
-                                PlatformFiles.logWarning("AtlasMcpServer", "Failed to parse complexity baseline from $resolvedPath: ${e.message}")
-                            }
-                        }
-                    }
-                }
-
-                val highCount = violations.count { it.severity == "HIGH" }
-                val warningCount = violations.count { it.severity == "WARNING" }
-
-                val totalPassed = if (resolvedRatchet != null) violations.size <= resolvedRatchet else violations.isEmpty()
-                val highPassed = if (resolvedHighRatchet != null) highCount <= resolvedHighRatchet else true
-                val passed = totalPassed && highPassed
-
-                val baselineDelta = resolvedRatchet?.let { violations.size - it }
-                val highDelta = resolvedHighRatchet?.let { highCount - it }
-
-                buildJsonObject {
-                    put("project", project)
-                    put("passed", passed)
-                    put("threshold", threshold)
-                    put("max_cyclomatic", maxCyclomatic)
-                    put("total_violations", violations.size)
-                    put("high_severity_count", highCount)
-                    put("warning_count", warningCount)
-                    if (resolvedRatchet != null) {
-                        put("ratchet", resolvedRatchet)
-                        if (baselineDelta != null) {
-                            put("baseline_delta", baselineDelta)
-                        }
-                    }
-                    if (resolvedHighRatchet != null) {
-                        put("high_ratchet", resolvedHighRatchet)
-                        if (highDelta != null) {
-                            put("high_delta", highDelta)
-                        }
-                    }
-                    put("violations", json.encodeToJsonElement(violations))
-                }
-            }
-            "complexity_doctor" -> {
-                val targetSym = targets.firstOrNull() ?: args["target"]?.jsonPrimitive?.contentOrNull
-                val apply = args["apply"]?.jsonPrimitive?.booleanOrNull ?: false
-                val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
-                val minCognitive = args["threshold"]?.jsonPrimitive?.intOrNull ?: 10
-                val report = complexityDoctor.runDoctor(
-                    projectId = project,
-                    target = targetSym,
-                    limit = limit,
-                    minCognitive = minCognitive
-                )
-                val finalReport = if (apply) {
-                    complexityDoctor.applyRemediations(report, dryRun = false, testCommand = testCmd)
-                } else {
-                    report
-                }
-                json.encodeToJsonElement(finalReport).jsonObject
-            }
+            "audit_complexity" -> handleAuditComplexity(args, project, targets)
+            "complexity_doctor" -> handleAuditComplexityDoctor(args, project, targets, limit)
             "synthesize_compose_scope" -> {
                 val scope = synthesizer.synthesizeComposeScope(project, targets)
                 val baseObj = json.encodeToJsonElement(scope).jsonObject
@@ -1269,6 +1152,185 @@ class AtlasMcpServer(
             "figma_scope" -> handleFigmaScope(args)
             else -> throw IllegalArgumentException("Unsupported atlas_audit action: $action")
         }
+    }
+
+    private fun handleAuditComplexity(
+        args: JsonObject,
+        project: String,
+        targets: List<String>
+    ): JsonObject {
+        val threshold = args["threshold"]?.jsonPrimitive?.intOrNull ?: 10
+        val maxCyclomatic = args["max_cyclomatic"]?.jsonPrimitive?.intOrNull ?: 15
+        val violations = auditor.checkComplexityViolations(
+            projectId = project,
+            maxCognitive = threshold,
+            maxCyclomatic = maxCyclomatic,
+            pathPrefixes = if (targets.isNotEmpty()) targets else null
+        )
+        val (resolvedRatchet, resolvedHighRatchet) = resolveComplexityRatchets(args, project)
+        return buildComplexityAuditResponse(project, threshold, maxCyclomatic, violations, resolvedRatchet, resolvedHighRatchet)
+    }
+
+    private fun extractIntOrParsed(args: JsonObject, vararg keys: String): Int? {
+        for (key in keys) {
+            val prim = args[key]?.jsonPrimitive ?: continue
+            val direct = prim.intOrNull
+            if (direct != null) return direct
+            val parsed = prim.contentOrNull?.toIntOrNull()
+            if (parsed != null) return parsed
+        }
+        return null
+    }
+
+    private fun resolveExplicitBaselineFile(args: JsonObject): String? {
+        val prim = args["baseline"]?.jsonPrimitive ?: return null
+        if (prim.intOrNull != null) return null
+        if (prim.contentOrNull?.toIntOrNull() != null) return null
+        return prim.contentOrNull
+    }
+
+    private fun resolveComplexityRatchets(args: JsonObject, project: String): Pair<Int?, Int?> {
+        val rRatchet = extractIntOrParsed(args, "ratchet", "max_violations", "baseline")
+        val rHigh = extractIntOrParsed(args, "high_ratchet", "max_high_violations")
+        if (rRatchet != null && rHigh != null) return Pair(rRatchet, rHigh)
+
+        val explicitFile = resolveExplicitBaselineFile(args)
+        return findBaselineInPaths(project, explicitFile, rRatchet, rHigh)
+    }
+
+    private fun candidateBaselinePaths(explicitFile: String?): List<String> {
+        return listOfNotNull(
+            explicitFile,
+            "$workspaceRoot/.atlas/complexity-baseline.json",
+            "$workspaceRoot/complexity-baseline.json",
+            ".atlas/complexity-baseline.json",
+            "complexity-baseline.json"
+        ).distinct()
+    }
+
+    private fun isBothResolved(ratchet: Int?, high: Int?): Boolean {
+        return ratchet != null || high != null
+    }
+
+    private fun tryReadBaseline(
+        cPath: String,
+        project: String,
+        ratchet: Int?,
+        high: Int?
+    ): Pair<Int?, Int?> {
+        val resolvedPath = resolveExistingPath(cPath) ?: return Pair(ratchet, high)
+        val parsed = parseBaselineJson(resolvedPath, project) ?: return Pair(ratchet, high)
+        val finalRatchet = ratchet ?: parsed.first
+        val finalHigh = high ?: parsed.second
+        return Pair(finalRatchet, finalHigh)
+    }
+
+    private fun findBaselineInPaths(
+        project: String,
+        explicitFile: String?,
+        initialRatchet: Int?,
+        initialHigh: Int?
+    ): Pair<Int?, Int?> {
+        var ratchet = initialRatchet
+        var high = initialHigh
+        val candidatePaths = candidateBaselinePaths(explicitFile)
+
+        for (cPath in candidatePaths) {
+            val (newRatchet, newHigh) = tryReadBaseline(cPath, project, ratchet, high)
+            ratchet = newRatchet
+            high = newHigh
+            if (isBothResolved(ratchet, high)) break
+        }
+        return Pair(ratchet, high)
+    }
+
+    private fun resolveExistingPath(cPath: String): String? {
+        if (PlatformFiles.exists(cPath)) return cPath
+        if (!cPath.startsWith("/") && PlatformFiles.exists("$workspaceRoot/$cPath")) {
+            return "$workspaceRoot/$cPath"
+        }
+        return null
+    }
+
+    private fun extractIntFromObject(obj: JsonObject, vararg keys: String): Int? {
+        for (key in keys) {
+            val v = obj[key]?.jsonPrimitive?.intOrNull
+            if (v != null) return v
+        }
+        return null
+    }
+
+    private fun parseBaselineJson(resolvedPath: String, project: String): Pair<Int?, Int?>? {
+        return try {
+            val text = PlatformFiles.readText(resolvedPath)
+            val parsed = json.parseToJsonElement(text).jsonObject
+            val fileProject = parsed["project"]?.jsonPrimitive?.contentOrNull
+            if (fileProject != null && fileProject != project) return null
+            val r = extractIntFromObject(parsed, "ratchet", "total_violations", "max_violations")
+            val h = extractIntFromObject(parsed, "high_ratchet", "high_severity_count", "max_high_violations")
+            Pair(r, h)
+        } catch (e: Exception) {
+            PlatformFiles.logWarning("AtlasMcpServer", "Failed to parse complexity baseline from $resolvedPath: ${e.message}")
+            null
+        }
+    }
+
+    private fun buildComplexityAuditResponse(
+        project: String,
+        threshold: Int,
+        maxCyclomatic: Int,
+        violations: List<ComplexityViolation>,
+        resolvedRatchet: Int?,
+        resolvedHighRatchet: Int?
+    ): JsonObject {
+        val highCount = violations.count { it.severity == "HIGH" }
+        val warningCount = violations.count { it.severity == "WARNING" }
+        val totalPassed = if (resolvedRatchet != null) violations.size <= resolvedRatchet else violations.isEmpty()
+        val highPassed = if (resolvedHighRatchet != null) highCount <= resolvedHighRatchet else true
+        val passed = totalPassed && highPassed
+
+        return buildJsonObject {
+            put("project", project)
+            put("passed", passed)
+            put("threshold", threshold)
+            put("max_cyclomatic", maxCyclomatic)
+            put("total_violations", violations.size)
+            put("high_severity_count", highCount)
+            put("warning_count", warningCount)
+            if (resolvedRatchet != null) {
+                put("ratchet", resolvedRatchet)
+                put("baseline_delta", violations.size - resolvedRatchet)
+            }
+            if (resolvedHighRatchet != null) {
+                put("high_ratchet", resolvedHighRatchet)
+                put("high_delta", highCount - resolvedHighRatchet)
+            }
+            put("violations", json.encodeToJsonElement(violations))
+        }
+    }
+
+    private fun handleAuditComplexityDoctor(
+        args: JsonObject,
+        project: String,
+        targets: List<String>,
+        limit: Int
+    ): JsonObject {
+        val targetSym = targets.firstOrNull() ?: args["target"]?.jsonPrimitive?.contentOrNull
+        val apply = args["apply"]?.jsonPrimitive?.booleanOrNull ?: false
+        val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
+        val minCognitive = args["threshold"]?.jsonPrimitive?.intOrNull ?: 10
+        val report = complexityDoctor.runDoctor(
+            projectId = project,
+            target = targetSym,
+            limit = limit,
+            minCognitive = minCognitive
+        )
+        val finalReport = if (apply) {
+            complexityDoctor.applyRemediations(report, dryRun = false, testCommand = testCmd)
+        } else {
+            report
+        }
+        return json.encodeToJsonElement(finalReport).jsonObject
     }
 
     private fun handleFigmaAudit(args: JsonObject): JsonObject {
