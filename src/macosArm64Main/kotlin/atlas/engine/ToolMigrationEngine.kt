@@ -116,25 +116,30 @@ object ToolMigrationEngine {
     private fun collectFiles(path: String, outList: MutableList<String>) {
         if (!PlatformFiles.exists(path)) return
         if (PlatformFiles.isRegularFile(path)) {
-            val fileName = path.trimEnd('/').substringAfterLast('/')
-            if (SKIP_FILES.contains(fileName)) return
-            val ext = path.substringAfterLast('.', "")
-            if (TARGET_EXTS.contains(ext)) {
-                outList.add(path)
-            }
+            collectTargetFile(path, outList)
             return
         }
-
         if (PlatformFiles.isDirectory(path)) {
-            val dirName = path.trimEnd('/').substringAfterLast('/')
-            if (SKIP_DIRS.contains(dirName)) return
+            collectFromDirectory(path, outList)
+        }
+    }
 
-            val entries = PlatformFiles.listDirectory(path)
-            for (entry in entries) {
-                if (SKIP_DIRS.contains(entry)) continue
-                val full = if (path.endsWith("/")) "$path$entry" else "$path/$entry"
-                collectFiles(full, outList)
-            }
+    private fun collectTargetFile(path: String, outList: MutableList<String>) {
+        val fileName = path.trimEnd('/').substringAfterLast('/')
+        if (SKIP_FILES.contains(fileName)) return
+        val ext = path.substringAfterLast('.', "")
+        if (TARGET_EXTS.contains(ext)) {
+            outList.add(path)
+        }
+    }
+
+    private fun collectFromDirectory(dirPath: String, outList: MutableList<String>) {
+        val dirName = dirPath.trimEnd('/').substringAfterLast('/')
+        if (SKIP_DIRS.contains(dirName)) return
+        for (entry in PlatformFiles.listDirectory(dirPath)) {
+            if (SKIP_DIRS.contains(entry)) continue
+            val full = if (dirPath.endsWith("/")) "$dirPath$entry" else "$dirPath/$entry"
+            collectFiles(full, outList)
         }
     }
 }
