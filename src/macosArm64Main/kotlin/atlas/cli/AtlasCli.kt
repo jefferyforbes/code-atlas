@@ -1126,7 +1126,9 @@ class AtlasCli {
                 try {
                     val text = PlatformFiles.readText(uri)
                     return Json.parseToJsonElement(text).jsonObject
-                } catch (_: Throwable) {}
+                } catch (e: Exception) {
+                    PlatformFiles.logWarning("AtlasCli", "failed to load spilled data from $uri: ${e.message}")
+                }
             }
             return payload
         }
