@@ -295,6 +295,14 @@ class AtlasMcpServer(
                     put("type", "integer")
                     put("description", "Maximum allowed violations for audit_complexity ratchet gate.")
                 }
+                putJsonObject("high_ratchet") {
+                    put("type", "integer")
+                    put("description", "Maximum allowed HIGH severity violations for audit_complexity ratchet gate.")
+                }
+                putJsonObject("max_high_violations") {
+                    put("type", "integer")
+                    put("description", "Alias for high_ratchet.")
+                }
                 putJsonObject("baseline") {
                     put("type", "string")
                     put("description", "Explicit baseline violation count or path to baseline JSON file.")
@@ -1019,14 +1027,20 @@ class AtlasMcpServer(
                 )
 
                 var resolvedRatchet: Int? = args["ratchet"]?.jsonPrimitive?.intOrNull
+                    ?: args["ratchet"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
                     ?: args["max_violations"]?.jsonPrimitive?.intOrNull
+                    ?: args["max_violations"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
                     ?: args["baseline"]?.jsonPrimitive?.intOrNull
+                    ?: args["baseline"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
 
                 var resolvedHighRatchet: Int? = args["high_ratchet"]?.jsonPrimitive?.intOrNull
+                    ?: args["high_ratchet"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
                     ?: args["max_high_violations"]?.jsonPrimitive?.intOrNull
+                    ?: args["max_high_violations"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
 
                 if (resolvedRatchet == null || resolvedHighRatchet == null) {
-                    val explicitFile = if (args["baseline"]?.jsonPrimitive?.intOrNull == null) {
+                    val explicitFile = if (args["baseline"]?.jsonPrimitive?.intOrNull == null &&
+                        args["baseline"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() == null) {
                         args["baseline"]?.jsonPrimitive?.contentOrNull
                     } else null
 

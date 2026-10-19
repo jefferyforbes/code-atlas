@@ -1352,6 +1352,7 @@ class AtlasCli {
                 val baselineObj = buildJsonObject {
                     put("project", project)
                     put("ratchet", total)
+                    put("high_ratchet", high)
                     put("threshold", thresh)
                     put("max_cyclomatic", maxCyc)
                     put("total_violations", total)

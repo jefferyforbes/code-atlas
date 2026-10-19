@@ -421,4 +421,132 @@ class ComplexityRatchetTest {
             cleanDir(tempDir)
         }
     }
+
+    @Test
+    fun testAuditSchemaDeclaresHighRatchetAndMaxHighViolations() {
+        val tempDir = makeTempDir()
+        val server = AtlasMcpServer(workspaceRoot = tempDir)
+        try {
+            val tools = server.toolDefinitions()
+            val auditTool = tools.firstOrNull { it["name"]?.jsonPrimitive?.content == "atlas_audit" }
+            assertNotNull(auditTool, "atlas_audit tool must exist")
+            val inputSchema = auditTool["inputSchema"]?.jsonObject
+            assertNotNull(inputSchema, "inputSchema must exist")
+            val schemaProps = inputSchema["properties"]?.jsonObject
+            assertNotNull(schemaProps, "inputSchema properties must exist")
+            assertTrue(schemaProps.containsKey("high_ratchet"), "auditSchema must declare high_ratchet property")
+            assertTrue(schemaProps.containsKey("max_high_violations"), "auditSchema must declare max_high_violations property")
+            assertEquals("integer", schemaProps["high_ratchet"]?.jsonObject?.get("type")?.jsonPrimitive?.content)
+            assertEquals("integer", schemaProps["max_high_violations"]?.jsonObject?.get("type")?.jsonPrimitive?.content)
+        } finally {
+            server.close()
+            cleanDir(tempDir)
+        }
+    }
+
+    @Test
+    fun testStringEncodedRatchetArgumentsViaMcpTool() {
+        val tempDir = makeTempDir()
+        val dbPath = makeTempDb()
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val node1 = GraphNode(
+                nodeId = "proj:src/A.kt#fnA",
+                projectId = "proj",
+                fileId = "proj:src/A.kt",
+                name = "fnA",
+                qualifiedName = "atlas.sample.fnA",
+                kind = "function",
+                startLine = 1,
+                endLine = 20,
+                cognitiveComplexity = 12, // WARNING
+                cyclomaticComplexity = 5
+            )
+            val node2 = GraphNode(
+                nodeId = "proj:src/B.kt#fnB",
+                projectId = "proj",
+                fileId = "proj:src/B.kt",
+                name = "fnB",
+                qualifiedName = "atlas.sample.fnB",
+                kind = "function",
+                startLine = 1,
+                endLine = 30,
+                cognitiveComplexity = 18, // HIGH
+                cyclomaticComplexity = 8
+            )
+            store.upsertNodesAndEdges("proj", listOf(node1, node2), emptyList())
+
+            val server = AtlasMcpServer(workspaceRoot = tempDir, customDbPath = dbPath)
+
+            // String-encoded ratchets: ratchet = "2", high_ratchet = "1" -> passes
+            val resPass = server.callTool("atlas_audit", buildJsonObject {
+                put("action", "audit_complexity")
+                put("project", "proj")
+                put("ratchet", "2")
+                put("high_ratchet", "1")
+            })
+            assertTrue(resPass["passed"]?.jsonPrimitive?.booleanOrNull ?: false)
+            assertEquals(2, resPass["ratchet"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, resPass["high_ratchet"]?.jsonPrimitive?.intOrNull)
+
+            // String-encoded ratchets: high_ratchet = "0" -> fails
+            val resFail = server.callTool("atlas_audit", buildJsonObject {
+                put("action", "audit_complexity")
+                put("project", "proj")
+                put("ratchet", "5")
+                put("high_ratchet", "0")
+            })
+            assertFalse(resFail["passed"]?.jsonPrimitive?.booleanOrNull ?: true)
+            assertEquals(0, resFail["high_ratchet"]?.jsonPrimitive?.intOrNull)
+
+            server.close()
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+            cleanDir(tempDir)
+        }
+    }
+
+    @Test
+    fun testCliSaveBaselineIncludesBothHighRatchetAndHighSeverityCount() {
+        val tempDir = makeTempDir()
+        val dbPath = makeTempDb()
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val highNode = GraphNode(
+                nodeId = "cli-proj:src/Main.kt#heavy",
+                projectId = "cli-proj",
+                fileId = "cli-proj:src/Main.kt",
+                name = "heavy",
+                qualifiedName = "heavy",
+                kind = "function",
+                startLine = 1,
+                cognitiveComplexity = 25
+            )
+            store.upsertNodesAndEdges("cli-proj", listOf(highNode), emptyList())
+
+            val baselinePath = "$tempDir/saved-baseline.json"
+            val exitCode = AtlasCli.run(
+                arrayOf(
+                    "audit", "--complexity", "--project", "cli-proj",
+                    "--db", dbPath, "--workspace", tempDir,
+                    "--save-baseline", baselinePath
+                )
+            )
+            assertEquals(0, exitCode)
+            assertTrue(PlatformFiles.exists(baselinePath))
+
+            val content = PlatformFiles.readText(baselinePath)
+            val json = Json.parseToJsonElement(content).jsonObject
+            assertEquals(1, json["total_violations"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, json["ratchet"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, json["high_severity_count"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, json["high_ratchet"]?.jsonPrimitive?.intOrNull)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+            cleanDir(tempDir)
+        }
+    }
 }
+
