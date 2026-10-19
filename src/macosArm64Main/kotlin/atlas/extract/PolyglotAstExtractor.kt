@@ -1225,15 +1225,31 @@ class PolyglotAstExtractor {
             }
         }
 
-        private fun extractKotlinSupertypes(
+        private class HeaderDepthTracker(var paren: Int = 0, var angle: Int = 0) {
+            val isTopLevel: Boolean get() = paren == 0 && angle == 0
+
+            fun adjust(c: Char): Boolean {
+                when (c) {
+                    '(' -> paren++
+                    ')' -> if (paren > 0) paren--
+                    '<' -> angle++
+                    '>' -> if (angle > 0) angle--
+                    else -> return false
+                }
+                return true
+            }
+        }
+
+        private fun buildDeclarationHeader(
             lines: List<String>,
             startLine: Int,
             endLine: Int
-        ): List<Pair<String, String>> {
+        ): String {
             val safeEnd = minOf(lines.size, endLine)
             val headerBuilder = StringBuilder()
             for (lineNo in startLine..safeEnd) {
-                val line = if (lineNo == startLine) stripLeadingInlineAnnotations(lines[lineNo - 1]) else lines[lineNo - 1]
+                val raw = lines[lineNo - 1]
+                val line = if (lineNo == startLine) stripLeadingInlineAnnotations(raw) else raw
                 val clean = line.substringBefore("//")
                 val braceIdx = clean.indexOf('{')
                 if (braceIdx >= 0) {
@@ -1242,62 +1258,73 @@ class PolyglotAstExtractor {
                 }
                 headerBuilder.append(clean).append(' ')
             }
-            val header = headerBuilder.toString()
-            var parenDepth = 0
-            var angleDepth = 0
-            var colonIdx = -1
+            return headerBuilder.toString()
+        }
+
+        private fun findSupertypesColonIndex(header: String): Int {
+            val tracker = HeaderDepthTracker()
             for (i in header.indices) {
-                when (header[i]) {
-                    '(' -> parenDepth++
-                    ')' -> if (parenDepth > 0) parenDepth--
-                    '<' -> angleDepth++
-                    '>' -> if (angleDepth > 0) angleDepth--
-                    ':' -> if (parenDepth == 0 && angleDepth == 0) {
-                        val nextChar = if (i + 1 < header.length) header[i + 1] else ' '
-                        val prevChar = if (i > 0) header[i - 1] else ' '
-                        if (nextChar != ':' && prevChar != ':') {
-                            colonIdx = i
-                            break
-                        }
-                    }
+                val c = header[i]
+                if (tracker.adjust(c)) continue
+                if (c == ':' && tracker.isTopLevel && isStandaloneColon(header, i)) {
+                    return i
                 }
             }
-            if (colonIdx < 0) return emptyList()
-            val superPart = header.substring(colonIdx + 1)
+            return -1
+        }
 
-            // Split top-level comma-separated supertypes (ignoring commas inside (...) or <...>)
+        private fun isStandaloneColon(header: String, i: Int): Boolean {
+            val nextChar = if (i + 1 < header.length) header[i + 1] else ' '
+            val prevChar = if (i > 0) header[i - 1] else ' '
+            return nextChar != ':' && prevChar != ':'
+        }
+
+        private fun splitTopLevelSupertypes(superPart: String): List<String> {
             val parts = mutableListOf<String>()
             val current = StringBuilder()
-            var pDepth = 0
-            var aDepth = 0
+            val tracker = HeaderDepthTracker()
             for (c in superPart) {
-                when (c) {
-                    '(' -> { pDepth++; current.append(c) }
-                    ')' -> { if (pDepth > 0) pDepth--; current.append(c) }
-                    '<' -> { aDepth++; current.append(c) }
-                    '>' -> { if (aDepth > 0) aDepth--; current.append(c) }
-                    ',' -> if (pDepth == 0 && aDepth == 0) {
-                        parts.add(current.toString())
-                        current.clear()
-                    } else {
-                        current.append(c)
-                    }
-                    else -> current.append(c)
+                if (c == ',' && tracker.isTopLevel) {
+                    parts.add(current.toString())
+                    current.clear()
+                    continue
                 }
+                tracker.adjust(c)
+                current.append(c)
             }
             if (current.isNotEmpty()) parts.add(current.toString())
+            return parts
+        }
 
+        private fun parseSupertypeEntry(st: String): Pair<String, String>? {
+            val trimmed = st.trim()
+            val clean = trimmed.substringBefore("(").substringBefore("<").substringBefore(" by ").trim()
+                .substringAfterLast('.')
+            if (clean.isEmpty() || !clean[0].isUpperCase()) return null
+            val edgeType = if ("(" in trimmed.substringBefore(" by ")) "INHERITS" else "IMPLEMENTS"
+            return Pair(clean, edgeType)
+        }
+
+        private fun parseSupertypeEntries(parts: List<String>): List<Pair<String, String>> {
             val results = mutableListOf<Pair<String, String>>()
             for (st in parts) {
-                val trimmed = st.trim()
-                val clean = trimmed.substringBefore("(").substringBefore("<").substringBefore(" by ").trim()
-                    .substringAfterLast('.')
-                if (clean.isNotEmpty() && clean[0].isUpperCase()) {
-                    val edgeType = if ("(" in trimmed.substringBefore(" by ")) "INHERITS" else "IMPLEMENTS"
-                    results.add(Pair(clean, edgeType))
-                }
+                val entry = parseSupertypeEntry(st)
+                if (entry != null) results.add(entry)
             }
             return results
+        }
+
+        private fun extractKotlinSupertypes(
+            lines: List<String>,
+            startLine: Int,
+            endLine: Int
+        ): List<Pair<String, String>> {
+            val header = buildDeclarationHeader(lines, startLine, endLine)
+            val colonIdx = findSupertypesColonIndex(header)
+            if (colonIdx < 0) return emptyList()
+            val superPart = header.substring(colonIdx + 1)
+            val parts = splitTopLevelSupertypes(superPart)
+            return parseSupertypeEntries(parts)
         }
 
         private val NON_DOC_LINE_PREFIXES = listOf(
