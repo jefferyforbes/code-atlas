@@ -5,6 +5,7 @@ import atlas.model.AuditReport
 import atlas.model.ComplexityViolation
 import atlas.model.ComposeAuditResult
 import atlas.model.DescriptionSuggestion
+import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.model.LayerInversionViolation
 import atlas.model.PlanCollision
@@ -47,6 +48,28 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         )
     }
 
+    companion object {
+        private val COMPLEXITY_CANDIDATE_KINDS = setOf("function", "method", "composable")
+        private val DISABLED_DESCRIPTION_MODES = setOf("off", "none", "disabled", "false")
+        private val DOC_CANDIDATE_KINDS = setOf(
+            "class", "interface", "protocol", "function", "composable",
+            "object", "enum", "struct", "actor", "annotation", "expect_decl"
+        )
+        private val LOWER_TIER_LAYERS = setOf("presentation", "data", "infrastructure")
+        private val NON_PRESENTATION_LAYERS = setOf("application", "data", "infrastructure")
+        private val TERMINAL_PLAN_STATUSES = setOf("(merged)", "(completed)", "(done)", "(landed)", "(closed)")
+        private val CONTAINER_KINDS = setOf("class", "object", "interface", "struct")
+        private val DEAD_CODE_ENTRYPOINTS = setOf(
+            "main", "init", "run", "invoke", "Companion", "onCreate", "onStart",
+            "close", "dispose", "destroy", "shutdown", "stop"
+        )
+        private val EXCLUDED_DEAD_CODE_KINDS = setOf(
+            "module", "markdown_doc", "markdown_note", "plan_contract", "expect_decl", "actual_decl",
+            "typealias", "namespace", "variable", "composable", "file_scope", "endpoint", "url_ref", "enum",
+            "tag", "skill", "slash_command", "obsidian_note"
+        )
+    }
+
     /**
      * Evaluates function complexity thresholds and reports violating functions with severity
      * (WARNING for cognitive 11-15, HIGH for cognitive > 15).
@@ -60,39 +83,12 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         pathPrefixes: List<String>? = null
     ): List<ComplexityViolation> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
-        val candidateKinds = setOf("function", "method", "composable")
         val violations = mutableListOf<ComplexityViolation>()
 
         for (node in store.listNodes(projectId)) {
-            if (node.kind !in candidateKinds) continue
-            if (node.semioticLayer == "test" || node.archLayer == "test" || node.isTestDouble) continue
-            val relPath = node.fileId.substringAfter(':')
-            if (relPath.endsWith("__init__.py") || relPath.endsWith(".md")) continue
-            if (!matchesAnyPrefix(relPath, prefixes)) continue
-
+            if (!isComplexityCandidate(node, prefixes)) continue
             if (node.cognitiveComplexity > maxCognitive || node.cyclomaticComplexity > maxCyclomatic) {
-                val severity = if (node.cognitiveComplexity > 15) "HIGH" else "WARNING"
-                val lineSpan = if (node.endLine > node.startLine) {
-                    "L${node.startLine}-L${node.endLine}"
-                } else {
-                    "L${node.startLine}"
-                }
-                val inDeg = node.inDegree.toDouble()
-                val riskIndex = node.cognitiveComplexity.toDouble() * (1.0 + ln(1.0 + inDeg))
-                val roundedRisk = (riskIndex * 10.0).roundToInt() / 10.0
-                val message = "Function '${node.name}' exceeds complexity thresholds (Cognitive: ${node.cognitiveComplexity}/$maxCognitive, Cyclomatic: ${node.cyclomaticComplexity}/$maxCyclomatic, Risk: $roundedRisk)."
-                violations.add(
-                    ComplexityViolation(
-                        ruleId = "COMPLEXITY-001",
-                        severity = severity,
-                        message = message,
-                        nodeId = node.nodeId,
-                        lineSpan = lineSpan,
-                        riskIndex = roundedRisk,
-                        cognitiveComplexity = node.cognitiveComplexity,
-                        cyclomaticComplexity = node.cyclomaticComplexity
-                    )
-                )
+                violations.add(buildComplexityViolation(node, maxCognitive, maxCyclomatic))
             }
         }
 
@@ -100,6 +96,41 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
             compareByDescending<ComplexityViolation> { it.riskIndex }
                 .thenByDescending { it.cognitiveComplexity }
                 .thenBy { it.nodeId }
+        )
+    }
+
+    private fun isComplexityCandidate(node: GraphNode, prefixes: List<String>): Boolean {
+        if (node.kind !in COMPLEXITY_CANDIDATE_KINDS) return false
+        if (node.semioticLayer == "test" || node.archLayer == "test" || node.isTestDouble) return false
+        val relPath = node.fileId.substringAfter(':')
+        if (relPath.endsWith("__init__.py") || relPath.endsWith(".md")) return false
+        return matchesAnyPrefix(relPath, prefixes)
+    }
+
+    private fun buildComplexityViolation(
+        node: GraphNode,
+        maxCognitive: Int,
+        maxCyclomatic: Int
+    ): ComplexityViolation {
+        val severity = if (node.cognitiveComplexity > 15) "HIGH" else "WARNING"
+        val lineSpan = if (node.endLine > node.startLine) {
+            "L${node.startLine}-L${node.endLine}"
+        } else {
+            "L${node.startLine}"
+        }
+        val inDeg = node.inDegree.toDouble()
+        val riskIndex = node.cognitiveComplexity.toDouble() * (1.0 + ln(1.0 + inDeg))
+        val roundedRisk = (riskIndex * 10.0).roundToInt() / 10.0
+        val message = "Function '${node.name}' exceeds complexity thresholds (Cognitive: ${node.cognitiveComplexity}/$maxCognitive, Cyclomatic: ${node.cyclomaticComplexity}/$maxCyclomatic, Risk: $roundedRisk)."
+        return ComplexityViolation(
+            ruleId = "COMPLEXITY-001",
+            severity = severity,
+            message = message,
+            nodeId = node.nodeId,
+            lineSpan = lineSpan,
+            riskIndex = roundedRisk,
+            cognitiveComplexity = node.cognitiveComplexity,
+            cyclomaticComplexity = node.cyclomaticComplexity
         )
     }
 
@@ -116,63 +147,64 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
         mode: String = "domain-only"
     ): List<DescriptionSuggestion> {
         val normalizedMode = mode.trim().lowercase()
-        if (normalizedMode in setOf("off", "none", "disabled", "false")) {
+        if (normalizedMode in DISABLED_DESCRIPTION_MODES) {
             return emptyList()
         }
 
         val prefixes = normalizePathPrefixes(pathPrefixes)
-        val candidateKinds = setOf(
-            "class", "interface", "protocol", "function", "composable",
-            "object", "enum", "struct", "actor", "annotation", "expect_decl"
-        )
         val suggestions = mutableListOf<DescriptionSuggestion>()
 
         for (node in store.listNodes(projectId)) {
-            if (!node.isTopLevel) continue
-            if (node.kind !in candidateKinds) continue
-            // Ignore tests and test doubles
-            if (node.semioticLayer == "test" || node.archLayer == "test" || node.isTestDouble) continue
             val relPath = node.fileId.substringAfter(':')
-            if (relPath.endsWith("__init__.py") || relPath.endsWith(".md")) continue
-            if (!matchesAnyPrefix(relPath, prefixes)) continue
-
-            val inScope = when (normalizedMode) {
-                "all" -> true
-                "domain-only", "domain" -> node.archLayer == "domain"
-                else -> node.archLayer == "domain"
-            }
-            if (!inScope) continue
-
+            if (!isDescriptionCandidate(node, relPath, prefixes, normalizedMode)) continue
             if (node.description.isNullOrBlank()) {
-                val kindDesc = when (node.kind) {
-                    "class" -> "class"
-                    "interface", "protocol" -> "interface"
-                    "function", "composable" -> "function"
-                    "object" -> "object"
-                    "struct" -> "struct"
-                    "enum" -> "enum"
-                    "actor" -> "actor"
-                    "annotation" -> "annotation class"
-                    "expect_decl" -> "expect declaration"
-                    else -> node.kind
-                }
-                suggestions.add(
-                    DescriptionSuggestion(
-                        rule = "DOC-TOP-LEVEL",
-                        nodeId = node.nodeId,
-                        name = node.name,
-                        kind = node.kind,
-                        relPath = relPath,
-                        lineNumber = node.startLine,
-                        semioticLayer = node.semioticLayer,
-                        archLayer = node.archLayer,
-                        message = "Top-level $kindDesc '${node.name}' in layer '${node.archLayer}' is missing a doc description."
-                    )
-                )
+                suggestions.add(buildDescriptionSuggestion(node, relPath))
             }
         }
 
         return suggestions.sortedWith(compareBy({ it.relPath }, { it.lineNumber }))
+    }
+
+    private fun isDescriptionCandidate(
+        node: GraphNode,
+        relPath: String,
+        prefixes: List<String>,
+        mode: String
+    ): Boolean {
+        if (!node.isTopLevel) return false
+        if (node.kind !in DOC_CANDIDATE_KINDS) return false
+        if (node.semioticLayer == "test" || node.archLayer == "test" || node.isTestDouble) return false
+        if (relPath.endsWith("__init__.py") || relPath.endsWith(".md")) return false
+        if (!matchesAnyPrefix(relPath, prefixes)) return false
+        return if (mode == "all") true else node.archLayer == "domain"
+    }
+
+    private fun formatKindDescription(kind: String): String = when (kind) {
+        "class" -> "class"
+        "interface", "protocol" -> "interface"
+        "function", "composable" -> "function"
+        "object" -> "object"
+        "struct" -> "struct"
+        "enum" -> "enum"
+        "actor" -> "actor"
+        "annotation" -> "annotation class"
+        "expect_decl" -> "expect declaration"
+        else -> kind
+    }
+
+    private fun buildDescriptionSuggestion(node: GraphNode, relPath: String): DescriptionSuggestion {
+        val kindDesc = formatKindDescription(node.kind)
+        return DescriptionSuggestion(
+            rule = "DOC-TOP-LEVEL",
+            nodeId = node.nodeId,
+            name = node.name,
+            kind = node.kind,
+            relPath = relPath,
+            lineNumber = node.startLine,
+            semioticLayer = node.semioticLayer,
+            archLayer = node.archLayer,
+            message = "Top-level $kindDesc '${node.name}' in layer '${node.archLayer}' is missing a doc description."
+        )
     }
 
     private fun normalizePathPrefixes(pathPrefixes: List<String>?): List<String> {
@@ -229,39 +261,48 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
             edgeTypes = listOf("IMPORTS", "CALLS", "INHERITS", "IMPLEMENTS")
         )
         for (edge in edges) {
-            val src = nodesById[edge.sourceNodeId]
-            val tgt = nodesById[edge.targetNodeId]
-            if (src == null || tgt == null) continue
-            if (src.semioticLayer == "test" || tgt.semioticLayer == "test") continue
-            val srcRelPath = src.fileId.substringAfter(':')
-            if (!matchesAnyPrefix(srcRelPath, prefixes)) continue
-
-            if (src.archLayer == "domain" && tgt.archLayer in setOf("presentation", "data", "infrastructure")) {
-                val layerDesc = if (tgt.archLayer == "presentation") "Presentation/Pragmatic" else "Data/Infrastructure"
-                inversions.add(
-                    LayerInversionViolation(
-                        rule = "ARCH-LAYER-INVERSION",
-                        source = src.qualifiedName,
-                        target = tgt.qualifiedName,
-                        edgeType = edge.edgeType,
-                        lineNumber = edge.lineNumber,
-                        message = "Domain symbol '${src.name}' (${src.archLayer}) illegally references $layerDesc symbol '${tgt.name}' (${tgt.archLayer})."
-                    )
-                )
-            } else if (src.archLayer in setOf("application", "data", "infrastructure") && tgt.archLayer == "presentation") {
-                inversions.add(
-                    LayerInversionViolation(
-                        rule = "ARCH-LAYER-INVERSION",
-                        source = src.qualifiedName,
-                        target = tgt.qualifiedName,
-                        edgeType = edge.edgeType,
-                        lineNumber = edge.lineNumber,
-                        message = "Symbol '${src.name}' (${src.archLayer}) illegally references Presentation/Pragmatic symbol '${tgt.name}' (${tgt.archLayer})."
-                    )
-                )
+            val src = nodesById[edge.sourceNodeId] ?: continue
+            val tgt = nodesById[edge.targetNodeId] ?: continue
+            val violation = detectLayerInversionViolation(src, tgt, edge, prefixes)
+            if (violation != null) {
+                inversions.add(violation)
             }
         }
         return inversions
+    }
+
+    private fun detectLayerInversionViolation(
+        src: GraphNode,
+        tgt: GraphNode,
+        edge: GraphEdge,
+        prefixes: List<String>
+    ): LayerInversionViolation? {
+        if (src.semioticLayer == "test" || tgt.semioticLayer == "test") return null
+        val srcRelPath = src.fileId.substringAfter(':')
+        if (!matchesAnyPrefix(srcRelPath, prefixes)) return null
+
+        if (src.archLayer == "domain" && tgt.archLayer in LOWER_TIER_LAYERS) {
+            val layerDesc = if (tgt.archLayer == "presentation") "Presentation/Pragmatic" else "Data/Infrastructure"
+            return LayerInversionViolation(
+                rule = "ARCH-LAYER-INVERSION",
+                source = src.qualifiedName,
+                target = tgt.qualifiedName,
+                edgeType = edge.edgeType,
+                lineNumber = edge.lineNumber,
+                message = "Domain symbol '${src.name}' (${src.archLayer}) illegally references $layerDesc symbol '${tgt.name}' (${tgt.archLayer})."
+            )
+        }
+        if (src.archLayer in NON_PRESENTATION_LAYERS && tgt.archLayer == "presentation") {
+            return LayerInversionViolation(
+                rule = "ARCH-LAYER-INVERSION",
+                source = src.qualifiedName,
+                target = tgt.qualifiedName,
+                edgeType = edge.edgeType,
+                lineNumber = edge.lineNumber,
+                message = "Symbol '${src.name}' (${src.archLayer}) illegally references Presentation/Pragmatic symbol '${tgt.name}' (${tgt.archLayer})."
+            )
+        }
+        return null
     }
 
     fun checkPlan3dCollisions(
@@ -274,51 +315,62 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
 
         val planToFiles = mutableMapOf<String, MutableSet<String>>()
         val planToModules = mutableMapOf<String, MutableSet<String>>()
+        populatePlanScopes(planEdges, nodesById, prefixes, planToFiles, planToModules)
 
-        val terminalPlanStatuses = setOf("(merged)", "(completed)", "(done)", "(landed)", "(closed)")
+        return detectCollisionsBetweenPlans(planToFiles, planToModules)
+    }
+
+    private fun populatePlanScopes(
+        planEdges: List<GraphEdge>,
+        nodesById: Map<String, GraphNode>,
+        prefixes: List<String>,
+        planToFiles: MutableMap<String, MutableSet<String>>,
+        planToModules: MutableMap<String, MutableSet<String>>
+    ) {
         for (edge in planEdges) {
-            val planNode = nodesById[edge.sourceNodeId]
-            val targetNode = nodesById[edge.targetNodeId]
-            if (planNode == null || targetNode == null) continue
-            if (terminalPlanStatuses.any { planNode.signature.contains(it) }) {
-                continue
-            }
-            val planId = planNode.name
+            val planNode = nodesById[edge.sourceNodeId] ?: continue
+            val targetNode = nodesById[edge.targetNodeId] ?: continue
+            if (TERMINAL_PLAN_STATUSES.any { planNode.signature.contains(it) }) continue
             val relFile = targetNode.fileId.substringAfter(':')
             if (!matchesAnyPrefix(relFile, prefixes)) continue
-            planToFiles.getOrPut(planId) { mutableSetOf() }.add(relFile)
+            planToFiles.getOrPut(planNode.name) { mutableSetOf() }.add(relFile)
             if (targetNode.moduleId.isNotEmpty()) {
-                planToModules.getOrPut(planId) { mutableSetOf() }.add(targetNode.moduleId)
+                planToModules.getOrPut(planNode.name) { mutableSetOf() }.add(targetNode.moduleId)
             }
         }
+    }
 
+    private fun detectCollisionsBetweenPlans(
+        planToFiles: Map<String, Set<String>>,
+        planToModules: Map<String, Set<String>>
+    ): List<PlanCollision> {
         val collisions = mutableListOf<PlanCollision>()
         val planIds = planToFiles.keys.sorted()
         for (i in planIds.indices) {
-            val planA = planIds[i]
             for (j in (i + 1) until planIds.size) {
-                val planB = planIds[j]
-                val filesA = planToFiles[planA] ?: emptySet()
-                val filesB = planToFiles[planB] ?: emptySet()
-                val sharedFiles = (filesA intersect filesB).sorted()
-
-                val modsA = planToModules[planA] ?: emptySet()
-                val modsB = planToModules[planB] ?: emptySet()
-                val sharedMods = (modsA intersect modsB).sorted()
-
-                if (sharedFiles.isNotEmpty() || sharedMods.isNotEmpty()) {
-                    collisions.add(
-                        PlanCollision(
-                            planA = planA,
-                            planB = planB,
-                            sharedFiles = sharedFiles,
-                            sharedModules = sharedMods
-                        )
-                    )
+                checkPlanPairCollision(planIds[i], planIds[j], planToFiles, planToModules)?.let {
+                    collisions.add(it)
                 }
             }
         }
         return collisions
+    }
+
+    private fun checkPlanPairCollision(
+        planA: String,
+        planB: String,
+        planToFiles: Map<String, Set<String>>,
+        planToModules: Map<String, Set<String>>
+    ): PlanCollision? {
+        val sharedFiles = ((planToFiles[planA] ?: emptySet()) intersect (planToFiles[planB] ?: emptySet())).sorted()
+        val sharedMods = ((planToModules[planA] ?: emptySet()) intersect (planToModules[planB] ?: emptySet())).sorted()
+        if (sharedFiles.isEmpty() && sharedMods.isEmpty()) return null
+        return PlanCollision(
+            planA = planA,
+            planB = planB,
+            sharedFiles = sharedFiles,
+            sharedModules = sharedMods
+        )
     }
 
     /**
@@ -327,48 +379,66 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
      */
     fun detectDeadCode(projectId: String, pathPrefixes: List<String>? = null): List<GraphNode> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
-        val entrypointNames = setOf(
-            "main", "init", "run", "invoke", "Companion", "onCreate", "onStart",
-            "close", "dispose", "destroy", "shutdown", "stop"
-        )
-        val excludedKinds = setOf(
-            "module", "markdown_doc", "markdown_note", "plan_contract", "expect_decl", "actual_decl",
-            "typealias", "namespace", "variable", "composable", "file_scope", "endpoint", "url_ref", "enum",
-            "tag", "skill", "slash_command", "obsidian_note"
-        )
         val allNodes = store.listNodes(projectId)
+        val activeContainers = findContainersWithActiveChildren(allNodes)
+
+        return allNodes
+            .filter { isPotentiallyDeadSymbol(it, prefixes, activeContainers) }
+            .sortedWith(compareBy({ it.fileId }, { it.startLine }))
+    }
+
+    private fun findContainersWithActiveChildren(allNodes: List<GraphNode>): Set<String> {
         val containersWithActiveChildren = mutableSetOf<String>()
-        val nodesByFile = allNodes.groupBy { it.fileId }
-        for ((_, fileNodes) in nodesByFile) {
-            val containers = fileNodes.filter { it.kind in setOf("class", "object", "interface", "struct") }
+        for ((_, fileNodes) in allNodes.groupBy { it.fileId }) {
+            val containers = fileNodes.filter { it.kind in CONTAINER_KINDS }
             val activeChildren = fileNodes.filter { it.inDegree > 0 }
             for (container in containers) {
-                if (activeChildren.any { it.nodeId != container.nodeId && it.startLine >= container.startLine && it.endLine <= container.endLine }) {
+                if (hasActiveChild(container, activeChildren)) {
                     containersWithActiveChildren.add(container.nodeId)
                 }
             }
         }
+        return containersWithActiveChildren
+    }
 
-        return allNodes
-            .filter { node ->
-                val relFile = node.fileId.substringAfter(':')
-                matchesAnyPrefix(relFile, prefixes) &&
-                    node.inDegree == 0 &&
-                    node.semioticLayer != "test" &&
-                    node.archLayer != "test" &&
-                    !node.isTestDouble &&
-                    !node.fileId.endsWith(".md") &&
-                    node.kind !in excludedKinds &&
-                    node.name !in entrypointNames &&
-                    !node.name.endsWith("Test") &&
-                    !node.name.endsWith("Cli") &&
-                    !node.name.endsWith("Server") &&
-                    !node.signature.contains("override ") &&
-                    !node.signature.contains("@Preview") &&
-                    !node.signature.contains("@Test") &&
-                    node.nodeId !in containersWithActiveChildren
-            }
-            .sortedWith(compareBy({ it.fileId }, { it.startLine }))
+    private fun hasActiveChild(container: GraphNode, activeChildren: List<GraphNode>): Boolean {
+        return activeChildren.any {
+            it.nodeId != container.nodeId && it.startLine >= container.startLine && it.endLine <= container.endLine
+        }
+    }
+
+    private fun isExcludedByNameOrKind(node: GraphNode): Boolean {
+        if (node.kind in EXCLUDED_DEAD_CODE_KINDS) return true
+        if (node.name in DEAD_CODE_ENTRYPOINTS) return true
+        if (node.name.endsWith("Test")) return true
+        if (node.name.endsWith("Cli")) return true
+        if (node.name.endsWith("Server")) return true
+        return false
+    }
+
+    private fun isExcludedBySignature(node: GraphNode): Boolean {
+        if (node.signature.contains("override ")) return true
+        if (node.signature.contains("@Preview")) return true
+        if (node.signature.contains("@Test")) return true
+        return false
+    }
+
+    private fun isPotentiallyDeadSymbol(
+        node: GraphNode,
+        prefixes: List<String>,
+        activeContainers: Set<String>
+    ): Boolean {
+        if (node.inDegree != 0) return false
+        if (node.nodeId in activeContainers) return false
+        if (node.semioticLayer == "test") return false
+        if (node.archLayer == "test") return false
+        if (node.isTestDouble) return false
+        val relFile = node.fileId.substringAfter(':')
+        if (relFile.endsWith(".md")) return false
+        if (!matchesAnyPrefix(relFile, prefixes)) return false
+        if (isExcludedByNameOrKind(node)) return false
+        if (isExcludedBySignature(node)) return false
+        return true
     }
 }
 
