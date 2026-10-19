@@ -962,100 +962,155 @@ class PolyglotAstExtractor {
             return minOf(lines.size, startLine)
         }
 
-        private fun findPythonBlockEndLine(lines: List<String>, maskedLines: List<String>, startLine: Int): Int {
-            if (startLine > lines.size) return lines.size
-            val startIdx = startLine - 1
-            val declLine = lines[startIdx]
-            val baseIndent = declLine.takeWhile { it == ' ' || it == '\t' }.length
+        private val TRIPLE_QUOTE_TOKENS = setOf("\"\"\"", "'''")
 
+        private class PythonBlockScanState(val baseIndent: Int) {
             var parenDepth = 0
             var bracketDepth = 0
             var braceDepth = 0
             var headerEnded = false
             var inTripleQuote: String? = null
-            var lastContentLine = startLine
 
-            for (idx in startIdx until lines.size) {
-                val raw = lines[idx]
+            fun isBalanced(): Boolean {
+                if (inTripleQuote != null) return false
+                if (parenDepth != 0) return false
+                if (bracketDepth != 0) return false
+                if (braceDepth != 0) return false
+                return true
+            }
 
-                if (inTripleQuote != null) {
-                    val closePos = raw.indexOf(inTripleQuote)
-                    if (closePos >= 0) {
-                        inTripleQuote = null
-                    }
-                    lastContentLine = idx + 1
-                    continue
+            fun handleInTripleQuote(raw: String): Boolean {
+                val quote = inTripleQuote ?: return false
+                val closePos = raw.indexOf(quote)
+                if (closePos >= 0) {
+                    inTripleQuote = null
                 }
+                return true
+            }
 
-                val masked = if (idx < maskedLines.size) maskedLines[idx] else raw.substringBefore("#")
-                val trimmed = masked.trim()
-                if (trimmed.isEmpty()) continue
+            fun isBlockTerminated(isPastStart: Boolean, raw: String, trimmed: String): Boolean {
+                if (!isPastStart) return false
+                if (!headerEnded) return false
+                if (!isBalanced()) return false
+                val indent = raw.takeWhile { it == ' ' || it == '\t' }.length
+                if (indent > baseIndent) return false
+                if (trimmed.startsWith(")")) return false
+                if (trimmed.startsWith("]")) return false
+                if (trimmed.startsWith("}")) return false
+                return true
+            }
 
-                if (idx > startIdx && headerEnded && parenDepth == 0 && bracketDepth == 0 && braceDepth == 0) {
-                    val indent = raw.takeWhile { it == ' ' || it == '\t' }.length
-                    if (indent <= baseIndent && !trimmed.startsWith(")") && !trimmed.startsWith("]") && !trimmed.startsWith("}")) {
-                        break
-                    }
-                }
-
-                val stripped = raw.substringBefore("#")
-                var j = 0
-                while (j < stripped.length) {
-                    if (j + 2 < stripped.length) {
-                        val sub3 = stripped.substring(j, j + 3)
-                        if (sub3 == "\"\"\"" || sub3 == "'''") {
-                            val closeOnSameLine = stripped.indexOf(sub3, j + 3)
-                            if (closeOnSameLine >= 0) {
-                                j = closeOnSameLine + 3
-                                continue
-                            } else {
-                                inTripleQuote = sub3
-                                break
-                            }
-                        }
-                    }
-                    j++
-                }
-
-                for (i in masked.indices) {
-                    when (masked[i]) {
-                        '(' -> parenDepth++
-                        ')' -> if (parenDepth > 0) parenDepth--
-                        '[' -> bracketDepth++
-                        ']' -> if (bracketDepth > 0) bracketDepth--
-                        '{' -> braceDepth++
-                        '}' -> if (braceDepth > 0) braceDepth--
-                    }
-                }
-                if (inTripleQuote == null && parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 && trimmed.endsWith(":")) {
+            fun scanLine(raw: String, masked: String) {
+                scanTripleQuotes(raw.substringBefore("#"))
+                updateDepths(masked)
+                if (isBalanced() && masked.trim().endsWith(":")) {
                     headerEnded = true
                 }
-                lastContentLine = idx + 1
             }
-            return lastContentLine
+
+            private fun scanTripleQuotes(stripped: String) {
+                var j = 0
+                while (j < stripped.length) {
+                    j = stepTripleQuote(stripped, j)
+                    if (inTripleQuote != null) break
+                }
+            }
+
+            private fun stepTripleQuote(stripped: String, j: Int): Int {
+                if (j + 2 >= stripped.length) return j + 1
+                val sub3 = stripped.substring(j, j + 3)
+                if (sub3 !in TRIPLE_QUOTE_TOKENS) return j + 1
+                val closeOnSameLine = stripped.indexOf(sub3, j + 3)
+                if (closeOnSameLine >= 0) return closeOnSameLine + 3
+                inTripleQuote = sub3
+                return j + 3
+            }
+
+            private fun updateDepths(masked: String) {
+                for (i in masked.indices) {
+                    stepDepth(masked[i])
+                }
+            }
+
+            private fun stepDepth(ch: Char) {
+                when (ch) {
+                    '(' -> parenDepth++
+                    ')' -> decParen()
+                    '[' -> bracketDepth++
+                    ']' -> decBracket()
+                    '{' -> braceDepth++
+                    '}' -> decBrace()
+                }
+            }
+
+            private fun decParen() { if (parenDepth > 0) parenDepth-- }
+            private fun decBracket() { if (bracketDepth > 0) bracketDepth-- }
+            private fun decBrace() { if (braceDepth > 0) braceDepth-- }
+        }
+
+        private class PythonBlockScanner(
+            private val lines: List<String>,
+            private val maskedLines: List<String>,
+            private val startLine: Int,
+            baseIndent: Int
+        ) {
+            private val state = PythonBlockScanState(baseIndent)
+            private var lastContentLine = startLine
+
+            fun scan(startIdx: Int): Int {
+                for (idx in startIdx until lines.size) {
+                    if (processLine(idx, lines[idx])) break
+                }
+                return lastContentLine
+            }
+
+            private fun processLine(idx: Int, raw: String): Boolean {
+                if (state.handleInTripleQuote(raw)) {
+                    lastContentLine = idx + 1
+                    return false
+                }
+                val masked = resolveMaskedLine(idx, raw)
+                val trimmed = masked.trim()
+                if (trimmed.isEmpty()) return false
+
+                if (state.isBlockTerminated(idx >= startLine, raw, trimmed)) {
+                    return true
+                }
+                state.scanLine(raw, masked)
+                lastContentLine = idx + 1
+                return false
+            }
+
+            private fun resolveMaskedLine(idx: Int, raw: String): String {
+                if (idx < maskedLines.size) return maskedLines[idx]
+                return raw.substringBefore("#")
+            }
+        }
+
+        private fun findPythonBlockEndLine(lines: List<String>, maskedLines: List<String>, startLine: Int): Int {
+            if (startLine > lines.size) return lines.size
+            val startIdx = startLine - 1
+            val baseIndent = lines[startIdx].takeWhile { it == ' ' || it == '\t' }.length
+            return PythonBlockScanner(lines, maskedLines, startLine, baseIndent).scan(startIdx)
+        }
+
+        private fun scanMaskedHeader(state: PythonColonScanState, masked: String): Boolean {
+            for (i in masked.indices) {
+                stepColonScan(state, masked[i])
+            }
+            return state.isAtHeaderColon() && masked.endsWith(":")
         }
 
         private fun buildPythonHeaderSignature(lines: List<String>, maskedLines: List<String>, startLine: Int, endLine: Int): String {
             if (startLine > lines.size) return ""
             val safeEnd = minOf(lines.size, endLine)
             val parts = mutableListOf<String>()
-            var parenDepth = 0
-            var bracketDepth = 0
+            val state = PythonColonScanState()
             for (lineNo in startLine..safeEnd) {
                 val raw = lines[lineNo - 1].substringBefore("#").trim()
                 val masked = if (lineNo - 1 < maskedLines.size) maskedLines[lineNo - 1].trim() else raw
                 if (raw.isNotEmpty()) parts.add(raw)
-                for (c in masked) {
-                    when (c) {
-                        '(' -> parenDepth++
-                        ')' -> if (parenDepth > 0) parenDepth--
-                        '[' -> bracketDepth++
-                        ']' -> if (bracketDepth > 0) bracketDepth--
-                    }
-                }
-                if (parenDepth == 0 && bracketDepth == 0 && masked.endsWith(":")) {
-                    break
-                }
+                if (scanMaskedHeader(state, masked)) break
             }
             return parts.joinToString(" ").replace(Regex("""\s+"""), " ")
         }
@@ -2349,21 +2404,10 @@ class PolyglotAstExtractor {
         private fun findPythonHeaderEndLine(maskedLines: List<String>, startLine: Int, endLine: Int): Int {
             if (startLine > maskedLines.size) return startLine
             val safeEnd = minOf(maskedLines.size, endLine)
-            var parenDepth = 0
-            var bracketDepth = 0
+            val state = PythonColonScanState()
             for (lineNo in startLine..safeEnd) {
                 val masked = maskedLines[lineNo - 1].trim()
-                for (c in masked) {
-                    when (c) {
-                        '(' -> parenDepth++
-                        ')' -> if (parenDepth > 0) parenDepth--
-                        '[' -> bracketDepth++
-                        ']' -> if (bracketDepth > 0) bracketDepth--
-                    }
-                }
-                if (parenDepth == 0 && bracketDepth == 0 && masked.endsWith(":")) {
-                    return lineNo
-                }
+                if (scanMaskedHeader(state, masked)) return lineNo
             }
             return startLine
         }
