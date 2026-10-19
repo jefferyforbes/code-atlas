@@ -53,18 +53,25 @@ object PlatformFiles {
     fun mkdirs(path: String): Boolean {
         if (path.isEmpty() || exists(path)) return true
         val normalized = path.replace('\\', '/').trimEnd('/')
-        val parts = normalized.split('/')
         var current = if (normalized.startsWith("/")) "/" else ""
-        for (part in parts) {
+        for (part in normalized.split('/')) {
             if (part.isEmpty()) continue
-            current = if (current == "/" || current.isEmpty()) "$current$part" else "$current/$part"
-            if (!exists(current)) {
-                if (mkdir(current, 0b111101101.toUShort()) != 0 && errno != EEXIST) {
-                    return false
-                }
+            current = joinPathSegment(current, part)
+            if (!ensureDirectoryExists(current)) {
+                return false
             }
         }
         return true
+    }
+
+    private fun joinPathSegment(base: String, part: String): String {
+        return if (base == "/" || base.isEmpty()) "$base$part" else "$base/$part"
+    }
+
+    private fun ensureDirectoryExists(dirPath: String): Boolean {
+        if (exists(dirPath)) return true
+        val mode = 0b111101101.toUShort()
+        return mkdir(dirPath, mode) == 0 || errno == EEXIST
     }
 
     fun readBytes(path: String): ByteArray {
@@ -178,31 +185,49 @@ object PlatformFiles {
         val result = mutableListOf<String>()
         val visitedDirs = mutableSetOf<String>()
         val rootCanon = canonicalPath(dirPath).trimEnd('/')
-        fun isInsideRoot(canonPath: String): Boolean {
-            return rootCanon.isEmpty() || canonPath == rootCanon || canonPath.startsWith("$rootCanon/")
-        }
-        fun scan(curr: String) {
-            val canon = canonicalPath(curr)
-            if (!isInsideRoot(canon)) return
-            if (!visitedDirs.add(canon)) return
-            val entries = listDirectory(curr)
-            for (entry in entries) {
-                val full = if (curr.endsWith("/")) "$curr$entry" else "$curr/$entry"
-                if (isDirectory(full)) {
-                    if (shouldSkipDir != null && shouldSkipDir(entry)) {
-                        continue
-                    }
-                    scan(full)
-                } else if (isRegularFile(full)) {
-                    val fileCanon = canonicalPath(full)
-                    if (isInsideRoot(fileCanon)) {
-                        result.add(full)
-                    }
-                }
-            }
-        }
-        scan(dirPath)
+        scanDirectoryRecursively(dirPath, rootCanon, visitedDirs, result, shouldSkipDir)
         return result
+    }
+
+    private fun isPathInsideRoot(rootCanon: String, canonPath: String): Boolean {
+        if (rootCanon.isEmpty()) return true
+        if (canonPath == rootCanon) return true
+        return canonPath.startsWith("$rootCanon/")
+    }
+
+    private fun scanDirectoryRecursively(
+        curr: String,
+        rootCanon: String,
+        visitedDirs: MutableSet<String>,
+        result: MutableList<String>,
+        shouldSkipDir: ((dirName: String) -> Boolean)?
+    ) {
+        val canon = canonicalPath(curr)
+        if (!isPathInsideRoot(rootCanon, canon)) return
+        if (!visitedDirs.add(canon)) return
+        for (entry in listDirectory(curr)) {
+            processDirectoryEntry(curr, entry, rootCanon, visitedDirs, result, shouldSkipDir)
+        }
+    }
+
+    private fun processDirectoryEntry(
+        curr: String,
+        entry: String,
+        rootCanon: String,
+        visitedDirs: MutableSet<String>,
+        result: MutableList<String>,
+        shouldSkipDir: ((dirName: String) -> Boolean)?
+    ) {
+        val full = if (curr.endsWith("/")) "$curr$entry" else "$curr/$entry"
+        if (isDirectory(full)) {
+            if (shouldSkipDir?.invoke(entry) != true) {
+                scanDirectoryRecursively(full, rootCanon, visitedDirs, result, shouldSkipDir)
+            }
+            return
+        }
+        if (isRegularFile(full) && isPathInsideRoot(rootCanon, canonicalPath(full))) {
+            result.add(full)
+        }
     }
 
     fun parentOf(path: String): String {
