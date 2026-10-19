@@ -3,11 +3,14 @@ package atlas.mcp
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -225,6 +228,88 @@ class AtlasMcpServerTest {
             val parsedObj = json.parseToJsonElement(objIdResp).jsonObject
             assertEquals(JsonNull, parsedObj["id"])
             assertEquals(-32600, parsedObj["error"]?.jsonObject?.get("code")?.jsonPrimitive?.int)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun testToolDefinitionsMatchStandardsAndExposeV061Capabilities() {
+        val server = AtlasMcpServer(workspaceRoot = ".")
+        try {
+            val listResp = server.processJsonRpcMessage("""{"jsonrpc": "2.0", "id": 40, "method": "tools/list"}""")
+            assertNotNull(listResp)
+            val parsed = json.parseToJsonElement(listResp).jsonObject
+            val tools = parsed["result"]?.jsonObject?.get("tools")?.jsonArray
+            assertNotNull(tools)
+
+            val toolMap = tools.associateBy { it.jsonObject["name"]?.jsonPrimitive?.content ?: "" }
+            assertTrue("atlas_query" in toolMap)
+            assertTrue("atlas_audit" in toolMap)
+            assertTrue("figma_audit" in toolMap)
+            assertTrue("figma_scope" in toolMap)
+
+            // Verify descriptions are <= 25 words
+            for (toolElem in tools) {
+                val tObj = toolElem.jsonObject
+                val name = tObj["name"]?.jsonPrimitive?.content ?: ""
+                val desc = tObj["description"]?.jsonPrimitive?.content ?: ""
+                val wordCount = desc.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.size
+                assertTrue(wordCount in 1..25, "Tool '$name' description has $wordCount words (max 25)")
+
+                // Verify parameter descriptions are <= 25 words
+                val props = tObj["inputSchema"]?.jsonObject?.get("properties")?.jsonObject ?: continue
+                for ((paramName, paramSchema) in props) {
+                    val pDesc = paramSchema.jsonObject["description"]?.jsonPrimitive?.content ?: ""
+                    val pWords = pDesc.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.size
+                    assertTrue(pWords in 1..25, "Param '$paramName' in '$name' has $pWords words (max 25)")
+                }
+            }
+
+            // Verify atlas_query action enum includes "explore"
+            val queryProps = toolMap["atlas_query"]!!.jsonObject["inputSchema"]!!.jsonObject["properties"]!!.jsonObject
+            val queryActions = queryProps["action"]!!.jsonObject["enum"]!!.jsonArray.map { it.jsonPrimitive.content }
+            assertTrue("explore" in queryActions, "atlas_query action enum must include 'explore'")
+
+            // Verify atlas_audit action enum includes "architect_context" and properties include "depth"
+            val auditProps = toolMap["atlas_audit"]!!.jsonObject["inputSchema"]!!.jsonObject["properties"]!!.jsonObject
+            val auditActions = auditProps["action"]!!.jsonObject["enum"]!!.jsonArray.map { it.jsonPrimitive.content }
+            assertTrue("architect_context" in auditActions, "atlas_audit action enum must include 'architect_context'")
+            assertTrue("depth" in auditProps, "atlas_audit must declare 'depth' parameter")
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun testAtlasQueryExploreAndArchitectContextExecution() {
+        val server = AtlasMcpServer(workspaceRoot = ".")
+        try {
+            // Test atlas_query action: explore
+            val exploreResp = server.processJsonRpcMessage(
+                """{"jsonrpc": "2.0", "id": 50, "method": "tools/call", "params": {"name": "atlas_query", "arguments": {"project": "test", "action": "explore", "target": "NonExistent"}}}"""
+            )
+            assertNotNull(exploreResp)
+            val parsedExplore = json.parseToJsonElement(exploreResp).jsonObject
+            assertEquals(50, parsedExplore["id"]?.jsonPrimitive?.int)
+            val exploreErr = parsedExplore["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
+            assertFalse(exploreErr, "atlas_query explore must not return error")
+            val exploreContent = parsedExplore["result"]?.jsonObject?.get("content")?.jsonArray
+            assertNotNull(exploreContent)
+            assertTrue(exploreContent.size > 0)
+
+            // Test atlas_audit action: architect_context
+            val contextResp = server.processJsonRpcMessage(
+                """{"jsonrpc": "2.0", "id": 51, "method": "tools/call", "params": {"name": "atlas_audit", "arguments": {"project": "test", "action": "architect_context", "targets": ["NonExistent"]}}}"""
+            )
+            assertNotNull(contextResp)
+            val parsedContext = json.parseToJsonElement(contextResp).jsonObject
+            assertEquals(51, parsedContext["id"]?.jsonPrimitive?.int)
+            val contextErr = parsedContext["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
+            assertFalse(contextErr, "atlas_audit architect_context must not return error")
+            val contextContent = parsedContext["result"]?.jsonObject?.get("content")?.jsonArray
+            assertNotNull(contextContent)
+            assertTrue(contextContent.size > 0)
         } finally {
             server.close()
         }

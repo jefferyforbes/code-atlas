@@ -198,6 +198,10 @@ class AtlasMcpServer(
                     }
                     put("description", "Audit, synthesis, Compose compliance, complexity audit, learning, or indexing action to execute.")
                 }
+                putJsonObject("depth") {
+                    put("type", "integer")
+                    put("description", "Maximum traversal depth for architect context synthesis (default: 2).")
+                }
                 putJsonObject("threshold") {
                     put("type", "integer")
                     put("description", "Cognitive complexity threshold for Gate 1 complexity audit (default: 10).")
@@ -615,12 +619,12 @@ class AtlasMcpServer(
         val baseTools = listOf(
             buildJsonObject {
                 put("name", "atlas_query")
-                put("description", "Query indexed polyglot AST symbols, callers, callees, blast radius, Compose stability, or live source slices.")
+                put("description", "Query indexed polyglot AST symbols, structural skeletons, explore semantics, callers, callees, blast radius, or Compose stability.")
                 put("inputSchema", querySchema)
             },
             buildJsonObject {
                 put("name", "atlas_audit")
-                put("description", "Audit architectural layers, Compose Gate 1 compliance, Doctor fixes, or synthesize 3D scopes.")
+                put("description", "Audit architecture layers, Compose stability, complexity doctor, synthesize 3D scopes, or assemble architect context.")
                 put("inputSchema", auditSchema)
             },
             buildJsonObject {
