@@ -618,100 +618,147 @@ class PolyglotAstExtractor {
             var inBacktick = false
         }
 
-        private fun cleanLine(line: String, state: LexerState = LexerState()): String {
+        private class LineCleanerSession(
+            private val line: String,
+            private val state: LexerState
+        ) {
             val sb = StringBuilder()
             var i = 0
-            while (i < line.length) {
+
+            fun clean(): String {
+                while (i < line.length) {
+                    if (handleActiveState()) continue
+                    if (handleDelimiterStart()) continue
+                    if (isLineCommentStart(line, i)) break
+                    sb.append(line[i])
+                    i++
+                }
+                return sb.toString()
+            }
+
+            private fun handleActiveState(): Boolean {
                 if (state.inBlockComment) {
-                    if (line[i] == '*' && i + 1 < line.length && line[i + 1] == '/') {
-                        state.inBlockComment = false
-                        i += 2
-                    } else {
-                        i++
-                    }
-                    continue
+                    i = resumeBlockComment(line, i, state)
+                    return true
                 }
                 if (state.inTripleQuote) {
-                    if (line[i] == '"' && i + 2 < line.length && line[i + 1] == '"' && line[i + 2] == '"') {
-                        state.inTripleQuote = false
-                        i += 3
-                    } else {
-                        i++
-                    }
-                    continue
+                    i = resumeTripleQuote(line, i, state)
+                    return true
                 }
                 if (state.inBacktick) {
-                    if (line[i] == '\\' && i + 1 < line.length) {
-                        i += 2
-                    } else if (line[i] == '`') {
-                        state.inBacktick = false
-                        i++
-                    } else {
-                        i++
-                    }
-                    continue
+                    i = resumeBacktick(line, i, state)
+                    return true
                 }
+                return false
+            }
 
-                // Check for block comment start
-                if (line[i] == '/' && i + 1 < line.length && line[i + 1] == '*') {
+            private fun handleDelimiterStart(): Boolean {
+                if (isBlockCommentStart(line, i)) {
                     state.inBlockComment = true
                     i += 2
-                    continue
+                    return true
                 }
-                // Check for line comment start
-                if (line[i] == '/' && i + 1 < line.length && line[i + 1] == '/') {
-                    break
-                }
-                // Check for triple quote start
-                if (line[i] == '"' && i + 2 < line.length && line[i + 1] == '"' && line[i + 2] == '"') {
+                if (isTripleQuoteStart(line, i)) {
                     state.inTripleQuote = true
                     i += 3
-                    continue
+                    return true
                 }
-                // Check for single-line double-quoted string
                 if (line[i] == '"') {
-                    i++
-                    while (i < line.length && line[i] != '"') {
-                        if (line[i] == '\\' && i + 1 < line.length) i += 2 else i++
-                    }
-                    if (i < line.length && line[i] == '"') i++
-                    continue
+                    i = skipQuotedString(line, i, '"')
+                    return true
                 }
-                // Check for single-line single-quoted string / char
                 if (line[i] == '\'') {
-                    i++
-                    while (i < line.length && line[i] != '\'') {
-                        if (line[i] == '\\' && i + 1 < line.length) i += 2 else i++
-                    }
-                    if (i < line.length && line[i] == '\'') i++
-                    continue
+                    i = skipQuotedString(line, i, '\'')
+                    return true
                 }
-                // Check for backtick (JS/TS template literal or Kotlin identifier)
                 if (line[i] == '`') {
-                    i++
-                    var closed = false
-                    while (i < line.length) {
-                        if (line[i] == '\\' && i + 1 < line.length) {
-                            i += 2
-                            continue
-                        }
-                        if (line[i] == '`') {
-                            closed = true
-                            i++
-                            break
-                        }
-                        i++
-                    }
-                    if (!closed) {
-                        state.inBacktick = true
-                    }
+                    i = skipBacktickLiteral(line, i, state)
+                    return true
+                }
+                return false
+            }
+        }
+
+        private fun resumeBlockComment(line: String, pos: Int, state: LexerState): Int {
+            if (line[pos] == '*') {
+                if (pos + 1 < line.length && line[pos + 1] == '/') {
+                    state.inBlockComment = false
+                    return pos + 2
+                }
+            }
+            return pos + 1
+        }
+
+        private fun isTripleQuoteTokenAt(line: String, pos: Int): Boolean {
+            if (pos + 2 >= line.length) return false
+            return line[pos] == '"' && line[pos + 1] == '"' && line[pos + 2] == '"'
+        }
+
+        private fun resumeTripleQuote(line: String, pos: Int, state: LexerState): Int {
+            if (isTripleQuoteTokenAt(line, pos)) {
+                state.inTripleQuote = false
+                return pos + 3
+            }
+            return pos + 1
+        }
+
+        private fun resumeBacktick(line: String, pos: Int, state: LexerState): Int {
+            if (line[pos] == '\\' && pos + 1 < line.length) {
+                return pos + 2
+            }
+            if (line[pos] == '`') {
+                state.inBacktick = false
+                return pos + 1
+            }
+            return pos + 1
+        }
+
+        private fun isBlockCommentStart(line: String, pos: Int): Boolean {
+            if (pos + 1 >= line.length) return false
+            return line[pos] == '/' && line[pos + 1] == '*'
+        }
+
+        private fun isLineCommentStart(line: String, pos: Int): Boolean {
+            if (pos + 1 >= line.length) return false
+            return line[pos] == '/' && line[pos + 1] == '/'
+        }
+
+        private fun isTripleQuoteStart(line: String, pos: Int): Boolean {
+            return isTripleQuoteTokenAt(line, pos)
+        }
+
+        private fun skipQuotedString(line: String, startPos: Int, delimiter: Char): Int {
+            var pos = startPos + 1
+            while (pos < line.length && line[pos] != delimiter) {
+                if (line[pos] == '\\' && pos + 1 < line.length) pos += 2 else pos++
+            }
+            if (pos < line.length && line[pos] == delimiter) pos++
+            return pos
+        }
+
+        private fun skipBacktickLiteral(line: String, startPos: Int, state: LexerState): Int {
+            var pos = startPos + 1
+            var closed = false
+            while (pos < line.length) {
+                if (line[pos] == '\\' && pos + 1 < line.length) {
+                    pos += 2
                     continue
                 }
-
-                sb.append(line[i])
-                i++
+                if (line[pos] == '`') {
+                    closed = true
+                    pos++
+                    break
+                }
+                pos++
             }
-            return sb.toString()
+            if (!closed) {
+                state.inBacktick = true
+            }
+            return pos
+        }
+
+        private fun cleanLine(line: String, state: LexerState = LexerState()): String {
+            return LineCleanerSession(line, state).clean()
         }
 
         private fun cleanLinesFrom(lines: List<String>, startIdx: Int): List<String> {
@@ -723,39 +770,51 @@ class PolyglotAstExtractor {
             return result
         }
 
-        private fun isNewDeclarationStart(trimmed: String): Boolean {
-            if (trimmed.startsWith("@") || trimmed.startsWith("#[")) return true
-            val words = trimmed.split(' ', '\t', '(', ':', '<')
+        private val DECL_KEYWORDS = setOf(
+            "fun", "class", "interface", "object", "typealias", "val", "var",
+            "def",
+            "func", "struct", "protocol", "actor", "enum", "extension", "let",
+            "function", "const", "type",
+            "fn", "trait", "mod", "impl",
+            "namespace"
+        )
+
+        private val MODIFIER_KEYWORDS = setOf(
+            "public", "private", "protected", "internal", "open", "abstract", "sealed",
+            "override", "expect", "actual", "inline", "suspend", "data", "value",
+            "export", "default", "declare", "readonly", "static", "final", "mutating",
+            "fileprivate", "nonisolated", "isolated", "indirect",
+            "pub", "async", "unsafe", "extern", "virtual", "constexpr"
+        )
+
+        private fun isAnnotationOrAttribute(trimmed: String): Boolean {
+            return trimmed.startsWith("@") || trimmed.startsWith("#[")
+        }
+
+        private fun extractDeclarationWords(trimmed: String): List<String> {
+            return trimmed.split(' ', '\t', '(', ':', '<')
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
-            if (words.isEmpty()) return false
+        }
 
-            val declKeywords = setOf(
-                "fun", "class", "interface", "object", "typealias", "val", "var",
-                "def",
-                "func", "struct", "protocol", "actor", "enum", "extension", "let",
-                "function", "const", "type",
-                "fn", "trait", "mod", "impl",
-                "namespace"
-            )
-            val modifierKeywords = setOf(
-                "public", "private", "protected", "internal", "open", "abstract", "sealed",
-                "override", "expect", "actual", "inline", "suspend", "data", "value",
-                "export", "default", "declare", "readonly", "static", "final", "mutating",
-                "fileprivate", "nonisolated", "isolated", "indirect",
-                "pub", "async", "unsafe", "extern", "virtual", "constexpr"
-            )
-
-            val firstWord = words.first()
-            if (firstWord in declKeywords) return true
-            if (firstWord in modifierKeywords) {
-                if (words.size == 1) return true
-                for (w in words.drop(1)) {
-                    if (w in declKeywords) return true
-                    if (w !in modifierKeywords) break
-                }
+        private fun hasDeclAfterModifiers(words: List<String>): Boolean {
+            if (words.size == 1) return true
+            for (w in words.drop(1)) {
+                if (w in DECL_KEYWORDS) return true
+                if (w !in MODIFIER_KEYWORDS) return false
             }
             return false
+        }
+
+        private fun isNewDeclarationStart(trimmed: String): Boolean {
+            if (isAnnotationOrAttribute(trimmed)) return true
+            val words = extractDeclarationWords(trimmed)
+            if (words.isEmpty()) return false
+
+            val firstWord = words.first()
+            if (firstWord in DECL_KEYWORDS) return true
+            if (firstWord !in MODIFIER_KEYWORDS) return false
+            return hasDeclAfterModifiers(words)
         }
 
         private fun hasDeclarationKeyword(str: String): Boolean {
