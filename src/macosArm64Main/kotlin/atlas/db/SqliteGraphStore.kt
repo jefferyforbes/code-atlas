@@ -488,23 +488,6 @@ class SqliteGraphStore(val dbPath: String) {
         return result
     }
 
-    fun needsReindex(projectId: String, relPath: String, sha256: String, mtime: Double): Boolean {
-        val fileId = "$projectId:$relPath"
-        val stmt = db.prepare("SELECT sha256, mtime FROM files WHERE file_id = ?;")
-        stmt.bindString(1, fileId)
-        try {
-            if (!stmt.step()) return true
-            val rowSha = stmt.columnString(0)
-            val rowMtime = stmt.columnDouble(1)
-            if (abs(rowMtime - mtime) < 1e-6 && rowSha == sha256) {
-                return false
-            }
-            return rowSha != sha256
-        } finally {
-            stmt.close()
-        }
-    }
-
     fun replaceBatchRawSymbolEdges(projectId: String, fileEdgesMap: Map<String, List<GraphEdge>>) {
         if (fileEdgesMap.isEmpty()) return
         withSavepoint("sp_batch_raw_edges") {
@@ -679,7 +662,10 @@ class SqliteGraphStore(val dbPath: String) {
             """
             DELETE FROM edges
             WHERE project_id = ?
-              AND edge_type NOT IN ('PLAN_SCOPES_FILE', 'WIKILINK_REFS', 'CODE_SPAN_REFS', 'URL_REFS');
+              AND edge_type NOT IN (
+                  'PLAN_SCOPES_FILE', 'WIKILINK_REFS', 'CODE_SPAN_REFS', 'URL_REFS',
+                  'TAGGED_WITH', 'TRIGGERS_SKILL', 'DEPENDS_ON_SKILL'
+              );
             """.trimIndent()
         )
         try {
@@ -981,6 +967,8 @@ class SqliteGraphStore(val dbPath: String) {
                           AND target_node_id NOT LIKE '%:vault_ref#%'
                           AND target_node_id NOT LIKE 'url_ref#%'
                           AND target_node_id NOT LIKE '%:url_ref#%'
+                          AND target_node_id NOT LIKE 'skill#%'
+                          AND target_node_id NOT LIKE '%:skill#%'
                           AND target_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
                         )
                       );
@@ -3147,26 +3135,6 @@ class SqliteGraphStore(val dbPath: String) {
             stmt.close()
         }
         return results
-    }
-
-    fun queryDistinctInstantiatedTargets(fileKey: String): Set<String> {
-        val stmt = db.prepare(
-            """
-            SELECT DISTINCT target_node_id
-            FROM figma_edges
-            WHERE file_key = ? AND edge_type = 'INSTANTIATES';
-            """.trimIndent()
-        )
-        val targets = mutableSetOf<String>()
-        try {
-            stmt.bindString(1, fileKey)
-            while (stmt.step()) {
-                targets.add(stmt.columnString(0))
-            }
-        } finally {
-            stmt.close()
-        }
-        return targets
     }
 
     fun queryCircularFillInHugViolations(fileKey: String): List<FigmaViolation> {
