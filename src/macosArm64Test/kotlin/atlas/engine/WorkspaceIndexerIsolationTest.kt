@@ -207,5 +207,60 @@ class WorkspaceIndexerIsolationTest {
             cleanDir(tmpDir)
         }
     }
+
+    @Test
+    fun testIncrementalMarkdownReevaluationOnCodeChange() {
+        val tmpDir = makeTempDir()
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+
+        try {
+            val srcDir = "$tmpDir/src/main/kotlin/atlas/demo"
+            PlatformFiles.mkdirs(srcDir)
+            val codeFile = "$srcDir/Alpha.kt"
+            PlatformFiles.writeText(
+                codeFile,
+                """
+                package atlas.demo
+                class Alpha
+                """.trimIndent()
+            )
+
+            val docsDir = "$tmpDir/docs"
+            PlatformFiles.mkdirs(docsDir)
+            val docFile = "$docsDir/readme.md"
+            PlatformFiles.writeText(
+                docFile,
+                """
+                # Readme
+                Links to `Alpha`.
+                """.trimIndent()
+            )
+
+            val indexer = WorkspaceIndexer(tmpDir, store)
+
+            val res1 = indexer.indexWorkspace("test_proj")
+            assertEquals(2, res1["files_indexed"]?.jsonPrimitive?.intOrNull)
+
+            val res2 = indexer.indexWorkspace("test_proj")
+            assertEquals(0, res2["files_indexed"]?.jsonPrimitive?.intOrNull)
+
+            PlatformFiles.writeText(
+                codeFile,
+                """
+                package atlas.demo
+                class Alpha {
+                    fun beta() = 1
+                }
+                """.trimIndent()
+            )
+            val res3 = indexer.indexWorkspace("test_proj")
+            assertEquals(1, res3["files_indexed"]?.jsonPrimitive?.intOrNull)
+            assertTrue(res3["files_skipped"]?.jsonPrimitive?.intOrNull!! >= 1)
+        } finally {
+            store.close()
+            cleanDir(tmpDir)
+        }
+    }
 }
 
