@@ -202,79 +202,122 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         val unstableParamTotal = allNodes.sumOf { it.unstableParamCount + it.runtimeParamCount }
 
         return when (action.lowercase()) {
-            "cascade", "compose_cascade" -> {
-                val rootNode = if (!target.isNullOrBlank()) {
-                    store.getComposeNode(projectSlug, target)
-                } else {
-                    allNodes.firstOrNull { !it.isSkippable } ?: allNodes.firstOrNull()
-                }
-                val cascade = if (rootNode != null) {
-                    store.queryComposeCascade(projectSlug, rootNode.nodeId, maxDepth)
-                } else emptyList()
-                ComposeQueryResult(
-                    project = projectSlug,
-                    action = "cascade",
-                    strongSkipping = strongSkipping,
-                    totalComposables = total,
-                    skippableCount = skippableCount,
-                    skippablePct = skippablePct,
-                    unstableParamTotal = unstableParamTotal,
-                    cascade = cascade
-                )
-            }
-            "blame", "compose_blame" -> {
-                val targetNode = if (!target.isNullOrBlank()) {
-                    store.getComposeNode(projectSlug, target)
-                } else {
-                    allNodes.firstOrNull { !it.isSkippable } ?: allNodes.firstOrNull()
-                }
-                val blame = if (targetNode != null) {
-                    store.queryComposeBlame(projectSlug, targetNode.nodeId)
-                } else emptyList()
-                ComposeQueryResult(
-                    project = projectSlug,
-                    action = "blame",
-                    strongSkipping = strongSkipping,
-                    totalComposables = total,
-                    skippableCount = skippableCount,
-                    skippablePct = skippablePct,
-                    unstableParamTotal = unstableParamTotal,
-                    blame = blame
-                )
-            }
-            else -> {
-                val filteredNodes = if (!target.isNullOrBlank()) {
-                    allNodes.filter {
-                        it.nodeId == target || it.fqName == target || it.fqName.endsWith(".$target") || it.filePath.contains(target)
-                    }
-                } else allNodes
-
-                val summaries = filteredNodes.map { n ->
-                    val unstableParams = (paramsByNode[n.nodeId] ?: emptyList())
-                        .filter { it.stability in setOf("UNSTABLE", "RUNTIME", "UNCERTAIN") }
-                    ComposeQueryResult.NodeSummary(
-                        nodeId = n.nodeId,
-                        fqname = n.fqName,
-                        filePath = n.filePath,
-                        line = n.startLine,
-                        sourceSet = n.sourceSet,
-                        isSkippable = n.isSkippable,
-                        unstableParams = unstableParams,
-                        provenance = n.provenance
-                    )
-                }
-                ComposeQueryResult(
-                    project = projectSlug,
-                    action = "summary",
-                    strongSkipping = strongSkipping,
-                    totalComposables = total,
-                    skippableCount = skippableCount,
-                    skippablePct = skippablePct,
-                    unstableParamTotal = unstableParamTotal,
-                    nodes = summaries
-                )
-            }
+            "cascade", "compose_cascade" -> queryCascade(
+                projectSlug, allNodes, target, maxDepth, strongSkipping,
+                total, skippableCount, skippablePct, unstableParamTotal
+            )
+            "blame", "compose_blame" -> queryBlame(
+                projectSlug, allNodes, target, strongSkipping,
+                total, skippableCount, skippablePct, unstableParamTotal
+            )
+            else -> querySummary(
+                projectSlug, allNodes, paramsByNode, target, strongSkipping,
+                total, skippableCount, skippablePct, unstableParamTotal
+            )
         }
+    }
+
+    private fun resolveTargetOrFirstUnskippable(projectSlug: String, allNodes: List<ComposeNodeRecord>, target: String?): ComposeNodeRecord? {
+        if (!target.isNullOrBlank()) {
+            return store.getComposeNode(projectSlug, target)
+        }
+        return allNodes.firstOrNull { !it.isSkippable } ?: allNodes.firstOrNull()
+    }
+
+    private fun queryCascade(
+        projectSlug: String,
+        allNodes: List<ComposeNodeRecord>,
+        target: String?,
+        maxDepth: Int,
+        strongSkipping: Boolean,
+        total: Int,
+        skippableCount: Int,
+        skippablePct: Double,
+        unstableParamTotal: Int
+    ): ComposeQueryResult {
+        val rootNode = resolveTargetOrFirstUnskippable(projectSlug, allNodes, target)
+        val cascade = if (rootNode != null) {
+            store.queryComposeCascade(projectSlug, rootNode.nodeId, maxDepth)
+        } else emptyList()
+        return ComposeQueryResult(
+            project = projectSlug,
+            action = "cascade",
+            strongSkipping = strongSkipping,
+            totalComposables = total,
+            skippableCount = skippableCount,
+            skippablePct = skippablePct,
+            unstableParamTotal = unstableParamTotal,
+            cascade = cascade
+        )
+    }
+
+    private fun queryBlame(
+        projectSlug: String,
+        allNodes: List<ComposeNodeRecord>,
+        target: String?,
+        strongSkipping: Boolean,
+        total: Int,
+        skippableCount: Int,
+        skippablePct: Double,
+        unstableParamTotal: Int
+    ): ComposeQueryResult {
+        val targetNode = resolveTargetOrFirstUnskippable(projectSlug, allNodes, target)
+        val blame = if (targetNode != null) {
+            store.queryComposeBlame(projectSlug, targetNode.nodeId)
+        } else emptyList()
+        return ComposeQueryResult(
+            project = projectSlug,
+            action = "blame",
+            strongSkipping = strongSkipping,
+            totalComposables = total,
+            skippableCount = skippableCount,
+            skippablePct = skippablePct,
+            unstableParamTotal = unstableParamTotal,
+            blame = blame
+        )
+    }
+
+    private fun querySummary(
+        projectSlug: String,
+        allNodes: List<ComposeNodeRecord>,
+        paramsByNode: Map<String, List<ComposeParamRecord>>,
+        target: String?,
+        strongSkipping: Boolean,
+        total: Int,
+        skippableCount: Int,
+        skippablePct: Double,
+        unstableParamTotal: Int
+    ): ComposeQueryResult {
+        val filteredNodes = if (!target.isNullOrBlank()) {
+            allNodes.filter {
+                it.nodeId == target || it.fqName == target || it.fqName.endsWith(".$target") || it.filePath.contains(target)
+            }
+        } else allNodes
+
+        val summaries = filteredNodes.map { n ->
+            val unstableParams = (paramsByNode[n.nodeId] ?: emptyList())
+                .filter { it.stability in setOf("UNSTABLE", "RUNTIME", "UNCERTAIN") }
+            ComposeQueryResult.NodeSummary(
+                nodeId = n.nodeId,
+                fqname = n.fqName,
+                filePath = n.filePath,
+                line = n.startLine,
+                sourceSet = n.sourceSet,
+                isSkippable = n.isSkippable,
+                unstableParams = unstableParams,
+                provenance = n.provenance
+            )
+        }
+        return ComposeQueryResult(
+            project = projectSlug,
+            action = "summary",
+            strongSkipping = strongSkipping,
+            totalComposables = total,
+            skippableCount = skippableCount,
+            skippablePct = skippablePct,
+            unstableParamTotal = unstableParamTotal,
+            nodes = summaries
+        )
     }
 
     fun auditCompose(
@@ -286,40 +329,76 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         val paramsByNode = store.listComposeParamsForProject(projectSlug)
         val traceMetrics = store.listComposeTraceMetrics(projectSlug)
 
+        val (violations, countsByRule) = collectAuditViolations(violatingNodes, paramsByNode, strongSkipping)
+        val (rawUnclamped, overallScore, status) = computeAuditScore(violations)
+        val realityItems = evaluateRealityCheckLattice(allNodes, traceMetrics)
+        val polishDelta = buildRemainingPolishDelta(allNodes)
+
+        return ComposeAuditResult(
+            project = projectSlug,
+            status = status,
+            overallScore = overallScore,
+            rawUnclampedScore = round1(rawUnclamped),
+            gate1Target = GATE1_CEILING,
+            passThreshold = PASS_THRESHOLD,
+            totalComposables = allNodes.size,
+            skippableComposables = allNodes.count { it.isSkippable },
+            strongSkippingMode = strongSkipping,
+            violationCounts = countsByRule.filterValues { it > 0 },
+            violations = violations,
+            realityCheck = realityItems,
+            remainingPolishDelta = polishDelta
+        )
+    }
+
+    private fun collectAuditViolations(
+        violatingNodes: List<ComposeNodeRecord>,
+        paramsByNode: Map<String, List<ComposeParamRecord>>,
+        strongSkipping: Boolean
+    ): Pair<List<ComposeAuditResult.Violation>, Map<String, Int>> {
         val violations = mutableListOf<ComposeAuditResult.Violation>()
         val countsByRule = linkedMapOf<String, Int>()
         RULES.forEach { countsByRule[it.ruleId] = 0 }
 
         for (node in violatingNodes) {
             val nodeParams = paramsByNode[node.nodeId] ?: emptyList()
-            for (rule in RULES) {
-                if ((node.violationMask and rule.bit) != 0) {
-                    // Under Strong Skipping mode, COMPOSE-STAB-001 deduction is halved (-2.5) if no runtime trace confirms hotspot,
-                    // but still reported so agents don't rely on accidental reference equality.
-                    val effDeduction = if (strongSkipping && rule.ruleId == "COMPOSE-STAB-001" && node.provenance == "STATIC_INFERRED") {
-                        2.5
-                    } else {
-                        rule.deduction
-                    }
-                    countsByRule[rule.ruleId] = (countsByRule[rule.ruleId] ?: 0) + 1
-                    violations.add(
-                        ComposeAuditResult.Violation(
-                            ruleId = rule.ruleId,
-                            severity = rule.severity,
-                            pointDeduction = effDeduction,
-                            nodeId = node.nodeId,
-                            filePath = node.filePath,
-                            line = node.startLine,
-                            message = rule.defaultMessage(node, nodeParams),
-                            remediation = rule.remediation(node, nodeParams),
-                            provenance = node.provenance
-                        )
-                    )
-                }
-            }
+            evaluateNodeViolations(node, nodeParams, strongSkipping, countsByRule, violations)
         }
+        return Pair(violations, countsByRule)
+    }
 
-        // Compute RawScore with per-rule 25.0 deduction cap, then clamp to Gate 1 <= 100.0 ceiling
+    private fun evaluateNodeViolations(
+        node: ComposeNodeRecord,
+        nodeParams: List<ComposeParamRecord>,
+        strongSkipping: Boolean,
+        countsByRule: MutableMap<String, Int>,
+        violations: MutableList<ComposeAuditResult.Violation>
+    ) {
+        for (rule in RULES) {
+            if ((node.violationMask and rule.bit) == 0) continue
+            val effDeduction = if (strongSkipping && rule.ruleId == "COMPOSE-STAB-001" && node.provenance == "STATIC_INFERRED") {
+                2.5
+            } else {
+                rule.deduction
+            }
+            countsByRule[rule.ruleId] = (countsByRule[rule.ruleId] ?: 0) + 1
+            violations.add(
+                ComposeAuditResult.Violation(
+                    ruleId = rule.ruleId,
+                    severity = rule.severity,
+                    pointDeduction = effDeduction,
+                    nodeId = node.nodeId,
+                    filePath = node.filePath,
+                    line = node.startLine,
+                    message = rule.defaultMessage(node, nodeParams),
+                    remediation = rule.remediation(node, nodeParams),
+                    provenance = node.provenance
+                )
+            )
+        }
+    }
+
+    private fun computeAuditScore(violations: List<ComposeAuditResult.Violation>): Triple<Double, Double, String> {
         var totalDeduction = 0.0
         for (rule in RULES) {
             val ruleViolations = violations.filter { it.ruleId == rule.ruleId }
@@ -329,48 +408,61 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         val rawUnclamped = (100.0 - totalDeduction).coerceIn(0.0, 100.0)
         val overallScore = round1(min(GATE1_CEILING, rawUnclamped))
         val status = if (overallScore >= PASS_THRESHOLD) "PASS" else "FAIL"
+        return Triple(rawUnclamped, overallScore, status)
+    }
 
-        // Evaluate Reality Check Lattice on traced nodes
+    private fun evaluateRealityCheckLattice(
+        allNodes: List<ComposeNodeRecord>,
+        traceMetrics: Map<String, Triple<Int, Int, String>>
+    ): List<ComposeAuditResult.RealityItem> {
         val realityItems = mutableListOf<ComposeAuditResult.RealityItem>()
         val json = Json { ignoreUnknownKeys = true }
         for (node in allNodes) {
             val trace = traceMetrics[node.nodeId] ?: continue
-            val recomp = trace.first
-            val skip = trace.second
-            val totalRuns = (recomp + skip).coerceAtLeast(1)
-            val recomposeRatio = recomp.toDouble() / totalRuns.toDouble()
-            val skipRatio = skip.toDouble() / totalRuns.toDouble()
-            val hasStaticInstability = !node.isSkippable || node.unstableParamCount > 0 || node.runtimeParamCount > 0
+            realityItems.add(classifyRealityItem(node, trace, json))
+        }
+        return realityItems
+    }
 
-            val classification = when {
-                hasStaticInstability && recomp >= 10 && recomposeRatio >= 0.50 -> "CONFIRMED"
-                hasStaticInstability && (recomp <= 2 || skipRatio > 0.80) -> "FALSE_ALARM"
-                !hasStaticInstability && recomp >= 10 && skip == 0 -> "SILENT_WASTE"
-                else -> "HEALTHY"
-            }
+    private fun classifyRealityItem(
+        node: ComposeNodeRecord,
+        trace: Triple<Int, Int, String>,
+        json: Json
+    ): ComposeAuditResult.RealityItem {
+        val recomp = trace.first
+        val skip = trace.second
+        val totalRuns = (recomp + skip).coerceAtLeast(1)
+        val recomposeRatio = recomp.toDouble() / totalRuns.toDouble()
+        val skipRatio = skip.toDouble() / totalRuns.toDouble()
+        val hasStaticInstability = !node.isSkippable || node.unstableParamCount > 0 || node.runtimeParamCount > 0
 
-            val dirtyList = try {
-                json.parseToJsonElement(trace.third).jsonArray.map { it.jsonPrimitive.content }
-            } catch (_: Throwable) {
-                emptyList()
-            }
-
-            realityItems.add(
-                ComposeAuditResult.RealityItem(
-                    nodeId = node.nodeId,
-                    fqname = node.fqName,
-                    classification = classification,
-                    staticSkippable = node.isSkippable,
-                    unstableParamCount = node.unstableParamCount,
-                    recompositionCount = recomp,
-                    skipCount = skip,
-                    dirtyParams = dirtyList
-                )
-            )
+        val classification = when {
+            hasStaticInstability && recomp >= 10 && recomposeRatio >= 0.50 -> "CONFIRMED"
+            hasStaticInstability && (recomp <= 2 || skipRatio > 0.80) -> "FALSE_ALARM"
+            !hasStaticInstability && recomp >= 10 && skip == 0 -> "SILENT_WASTE"
+            else -> "HEALTHY"
         }
 
-        // Mandatory Remaining 5% Polish Delta when score >= 90.0 (or always populated for Gate 1 guidance)
-        val polishDelta = listOf(
+        val dirtyList = try {
+            json.parseToJsonElement(trace.third).jsonArray.map { it.jsonPrimitive.content }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+
+        return ComposeAuditResult.RealityItem(
+            nodeId = node.nodeId,
+            fqname = node.fqName,
+            classification = classification,
+            staticSkippable = node.isSkippable,
+            unstableParamCount = node.unstableParamCount,
+            recompositionCount = recomp,
+            skipCount = skip,
+            dirtyParams = dirtyList
+        )
+    }
+
+    private fun buildRemainingPolishDelta(allNodes: List<ComposeNodeRecord>): List<ComposeAuditResult.PolishItem> {
+        return listOf(
             ComposeAuditResult.PolishItem(
                 category = "Runtime Recomposition Verification",
                 target = allNodes.firstOrNull { it.provenance != "RUNTIME_TRACED" }?.fqName ?: "Top-level Screen Composables",
@@ -391,22 +483,6 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
                 target = "@Preview Annotations",
                 recommendation = "Add @PreviewLightDark and @PreviewFontScale annotations to verify optical alignment, contrast, and text reflow under 200% font scaling."
             )
-        )
-
-        return ComposeAuditResult(
-            project = projectSlug,
-            status = status,
-            overallScore = overallScore,
-            rawUnclampedScore = round1(rawUnclamped),
-            gate1Target = GATE1_CEILING,
-            passThreshold = PASS_THRESHOLD,
-            totalComposables = allNodes.size,
-            skippableComposables = allNodes.count { it.isSkippable },
-            strongSkippingMode = strongSkipping,
-            violationCounts = countsByRule.filterValues { it > 0 },
-            violations = violations,
-            realityCheck = realityItems,
-            remainingPolishDelta = polishDelta
         )
     }
 
