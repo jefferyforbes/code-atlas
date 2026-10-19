@@ -34,7 +34,7 @@ import kotlinx.serialization.json.putJsonObject
  */
 class AtlasCli {
     companion object {
-        const val VERSION = "0.5.2"
+        const val VERSION = "0.6.0"
         const val SUMMARY_CEILING_BYTES = 400
 
         private val jsonPretty = Json { prettyPrint = true }
