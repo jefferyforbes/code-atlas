@@ -21,6 +21,8 @@ class PlatformFilesTest {
             "../../../../etc/passwd" to "etc_passwd",
             "../secret" to "secret",
             "foo/bar/baz" to "foo_bar_baz",
+            "foo/. ./bar" to "foo_bar",
+            ". . / . ." to "unnamed",
             "foo\\bar\\baz" to "foo_bar_baz",
             "..\\..\\windows\\system32" to "windows_system32",
             "..." to "unnamed",

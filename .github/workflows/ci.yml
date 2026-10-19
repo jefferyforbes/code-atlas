@@ -58,6 +58,9 @@ jobs:
       - name: Run Atlas Architectural Audit Quality Gate
         run: ./gradlew atlasAudit --no-daemon
 
+      - name: Run Atlas Complexity Ratchet Quality Gate
+        run: ./gradlew atlasComplexityAudit --no-daemon
+
       - name: Package Release Binary
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -112,3 +115,6 @@ jobs:
 
       - name: Run Atlas Architectural Audit Quality Gate
         run: ./gradlew atlasAudit --no-daemon
+
+      - name: Run Atlas Complexity Ratchet Quality Gate
+        run: ./gradlew atlasComplexityAudit --no-daemon

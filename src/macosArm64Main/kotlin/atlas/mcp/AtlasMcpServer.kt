@@ -284,6 +284,14 @@ class AtlasMcpServer(
                     put("type", "integer")
                     put("description", "Maximum cyclomatic complexity threshold for audit_complexity (default: 15).")
                 }
+                putJsonObject("ratchet") {
+                    put("type", "integer")
+                    put("description", "Maximum allowed violations for audit_complexity ratchet gate.")
+                }
+                putJsonObject("baseline") {
+                    put("type", "string")
+                    put("description", "Explicit baseline violation count or path to baseline JSON file.")
+                }
                 putJsonObject("split") {
                     put("type", "boolean")
                     put("description", "Enable BOOST-003 file splitting during remediation (default: true).")
@@ -693,7 +701,53 @@ class AtlasMcpServer(
                     maxCyclomatic = maxCyclomatic,
                     pathPrefixes = if (targets.isNotEmpty()) targets else null
                 )
-                val passed = violations.isEmpty()
+
+                var resolvedRatchet: Int? = args["ratchet"]?.jsonPrimitive?.intOrNull
+                    ?: args["max_violations"]?.jsonPrimitive?.intOrNull
+                    ?: args["baseline"]?.jsonPrimitive?.intOrNull
+
+                if (resolvedRatchet == null) {
+                    val explicitFile = if (args["baseline"]?.jsonPrimitive?.intOrNull == null) {
+                        args["baseline"]?.jsonPrimitive?.contentOrNull
+                    } else null
+
+                    val candidatePaths = listOfNotNull(
+                        explicitFile,
+                        "$workspaceRoot/.atlas/complexity-baseline.json",
+                        "$workspaceRoot/complexity-baseline.json",
+                        ".atlas/complexity-baseline.json",
+                        "complexity-baseline.json"
+                    ).distinct()
+
+                    for (cPath in candidatePaths) {
+                        val resolvedPath = if (PlatformFiles.exists(cPath)) {
+                            cPath
+                        } else if (!cPath.startsWith("/") && PlatformFiles.exists("$workspaceRoot/$cPath")) {
+                            "$workspaceRoot/$cPath"
+                        } else {
+                            null
+                        }
+                        if (resolvedPath != null) {
+                            try {
+                                val text = PlatformFiles.readText(resolvedPath)
+                                val parsed = json.parseToJsonElement(text).jsonObject
+                                val fileProject = parsed["project"]?.jsonPrimitive?.contentOrNull
+                                if (fileProject == null || fileProject == project) {
+                                    resolvedRatchet = parsed["ratchet"]?.jsonPrimitive?.intOrNull
+                                        ?: parsed["total_violations"]?.jsonPrimitive?.intOrNull
+                                        ?: parsed["max_violations"]?.jsonPrimitive?.intOrNull
+                                    if (resolvedRatchet != null) break
+                                }
+                            } catch (e: Exception) {
+                                PlatformFiles.logWarning("AtlasMcpServer", "Failed to parse complexity baseline from $resolvedPath: ${e.message}")
+                            }
+                        }
+                    }
+                }
+
+                val passed = if (resolvedRatchet != null) violations.size <= resolvedRatchet else violations.isEmpty()
+                val baselineDelta = resolvedRatchet?.let { violations.size - it }
+
                 buildJsonObject {
                     put("project", project)
                     put("passed", passed)
@@ -702,6 +756,12 @@ class AtlasMcpServer(
                     put("total_violations", violations.size)
                     put("high_severity_count", violations.count { it.severity == "HIGH" })
                     put("warning_count", violations.count { it.severity == "WARNING" })
+                    if (resolvedRatchet != null) {
+                        put("ratchet", resolvedRatchet)
+                        if (baselineDelta != null) {
+                            put("baseline_delta", baselineDelta)
+                        }
+                    }
                     put("violations", json.encodeToJsonElement(violations))
                 }
             }
@@ -920,8 +980,18 @@ class AtlasMcpServer(
             }
 
             val rawId = req["id"]
-            val reqId = if (rawId is JsonPrimitive) rawId else if (rawId != null) JsonNull else null
             val hasId = req.containsKey("id")
+            if (hasId && rawId !is JsonPrimitive) {
+                return json.encodeToString(buildJsonObject {
+                    put("jsonrpc", "2.0")
+                    put("id", JsonNull)
+                    putJsonObject("error") {
+                        put("code", -32600)
+                        put("message", "Invalid Request: 'id' must be a primitive string, number, or null")
+                    }
+                })
+            }
+            val reqId = if (rawId is JsonPrimitive) rawId else null
 
             val methodElement = req["method"]
             val methodPrimitive = methodElement as? JsonPrimitive
@@ -953,40 +1023,50 @@ class AtlasMcpServer(
             val params = paramsElement ?: buildJsonObject {}
 
             val resp = when (method) {
-                "initialize" -> buildJsonObject {
-                    put("jsonrpc", "2.0")
-                    if (reqId != null) put("id", reqId)
-                    putJsonObject("result") {
-                        put("protocolVersion", "2024-11-05")
-                        putJsonObject("capabilities") {
-                            putJsonObject("tools") {}
-                        }
-                        putJsonObject("serverInfo") {
-                            put("name", "atlas")
-                            put("version", "0.5.2")
+                "initialize" -> {
+                    if (!hasId) null
+                    else buildJsonObject {
+                        put("jsonrpc", "2.0")
+                        put("id", reqId ?: JsonNull)
+                        putJsonObject("result") {
+                            put("protocolVersion", "2024-11-05")
+                            putJsonObject("capabilities") {
+                                putJsonObject("tools") {}
+                            }
+                            putJsonObject("serverInfo") {
+                                put("name", "atlas")
+                                put("version", "0.5.2")
+                            }
                         }
                     }
                 }
-                "ping" -> buildJsonObject {
-                    put("jsonrpc", "2.0")
-                    if (reqId != null) put("id", reqId)
-                    putJsonObject("result") {}
+                "ping" -> {
+                    if (!hasId) null
+                    else buildJsonObject {
+                        put("jsonrpc", "2.0")
+                        put("id", reqId ?: JsonNull)
+                        putJsonObject("result") {}
+                    }
                 }
                 "notifications/initialized", "notifications/cancelled" -> null
-                "tools/list" -> buildJsonObject {
-                    put("jsonrpc", "2.0")
-                    if (reqId != null) put("id", reqId)
-                    putJsonObject("result") {
-                        put("tools", json.encodeToJsonElement(toolDefinitions()))
+                "tools/list" -> {
+                    if (!hasId) null
+                    else buildJsonObject {
+                        put("jsonrpc", "2.0")
+                        put("id", reqId ?: JsonNull)
+                        putJsonObject("result") {
+                            put("tools", json.encodeToJsonElement(toolDefinitions()))
+                        }
                     }
                 }
                 "tools/call" -> {
                     val nameElement = params["name"]
                     val namePrimitive = nameElement as? JsonPrimitive
                     if (namePrimitive == null || !namePrimitive.isString) {
+                        if (!hasId) return null
                         return json.encodeToString(buildJsonObject {
                             put("jsonrpc", "2.0")
-                            if (reqId != null) put("id", reqId)
+                            put("id", reqId ?: JsonNull)
                             putJsonObject("error") {
                                 put("code", -32602)
                                 put("message", "Invalid params: 'name' must be a string")
@@ -997,9 +1077,10 @@ class AtlasMcpServer(
 
                     val argsElement = params["arguments"]
                     if (argsElement != null && argsElement !is JsonObject) {
+                        if (!hasId) return null
                         return json.encodeToString(buildJsonObject {
                             put("jsonrpc", "2.0")
-                            if (reqId != null) put("id", reqId)
+                            put("id", reqId ?: JsonNull)
                             putJsonObject("error") {
                                 put("code", -32602)
                                 put("message", "Invalid params: 'arguments' must be an object")
@@ -1010,26 +1091,30 @@ class AtlasMcpServer(
 
                     try {
                         val out = callTool(tName, tArgs)
-                        val isToolErr = out.containsKey("error")
-                        buildJsonObject {
-                            put("jsonrpc", "2.0")
-                            if (reqId != null) put("id", reqId)
-                            putJsonObject("result") {
-                                putJsonArray("content") {
-                                    addJsonObject {
-                                        put("type", "text")
-                                        put("text", json.encodeToString(out))
+                        if (!hasId) null
+                        else {
+                            val isToolErr = out.containsKey("error")
+                            buildJsonObject {
+                                put("jsonrpc", "2.0")
+                                put("id", reqId ?: JsonNull)
+                                putJsonObject("result") {
+                                    putJsonArray("content") {
+                                        addJsonObject {
+                                            put("type", "text")
+                                            put("text", json.encodeToString(out))
+                                        }
                                     }
-                                }
-                                if (isToolErr) {
-                                    put("isError", true)
+                                    if (isToolErr) {
+                                        put("isError", true)
+                                    }
                                 }
                             }
                         }
                     } catch (e: Throwable) {
-                        buildJsonObject {
+                        if (!hasId) null
+                        else buildJsonObject {
                             put("jsonrpc", "2.0")
-                            if (reqId != null) put("id", reqId)
+                            put("id", reqId ?: JsonNull)
                             putJsonObject("result") {
                                 putJsonArray("content") {
                                     addJsonObject {
@@ -1045,10 +1130,10 @@ class AtlasMcpServer(
                     }
                 }
                 else -> {
-                    if (reqId == null) return null
+                    if (!hasId) return null
                     buildJsonObject {
                         put("jsonrpc", "2.0")
-                        put("id", reqId)
+                        put("id", reqId ?: JsonNull)
                         putJsonObject("error") {
                             put("code", -32601)
                             put("message", "Method not found: $method")
@@ -1057,7 +1142,7 @@ class AtlasMcpServer(
                 }
             }
 
-            if (resp == null) null else json.encodeToString(resp)
+            if (!hasId || resp == null) null else json.encodeToString(resp)
         } catch (e: Throwable) {
             json.encodeToString(buildJsonObject {
                 put("jsonrpc", "2.0")
