@@ -297,4 +297,128 @@ class ComplexityRatchetTest {
             cleanDir(tempDir)
         }
     }
+
+    @Test
+    fun testTwoTierRatchetPassAndFailViaMcpTool() {
+        val tempDir = makeTempDir()
+        val dbPath = makeTempDb()
+        val store = SqliteGraphStore(dbPath)
+        try {
+            // node1: cognitive 12 -> WARNING
+            val node1 = GraphNode(
+                nodeId = "proj:src/A.kt#fnA",
+                projectId = "proj",
+                fileId = "proj:src/A.kt",
+                name = "fnA",
+                qualifiedName = "atlas.sample.fnA",
+                kind = "function",
+                startLine = 1,
+                endLine = 20,
+                cognitiveComplexity = 12,
+                cyclomaticComplexity = 5
+            )
+            // node2: cognitive 18 -> HIGH
+            val node2 = GraphNode(
+                nodeId = "proj:src/B.kt#fnB",
+                projectId = "proj",
+                fileId = "proj:src/B.kt",
+                name = "fnB",
+                qualifiedName = "atlas.sample.fnB",
+                kind = "function",
+                startLine = 1,
+                endLine = 30,
+                cognitiveComplexity = 18,
+                cyclomaticComplexity = 8
+            )
+            store.upsertNodesAndEdges("proj", listOf(node1, node2), emptyList())
+
+            val server = AtlasMcpServer(workspaceRoot = tempDir, customDbPath = dbPath)
+
+            // Case 1: Total ratchet = 2, High ratchet = 1 -> Both pass
+            val resBothPass = server.callTool("atlas_audit", buildJsonObject {
+                put("action", "audit_complexity")
+                put("project", "proj")
+                put("ratchet", 2)
+                put("high_ratchet", 1)
+            })
+            assertTrue(resBothPass["passed"]?.jsonPrimitive?.booleanOrNull ?: false)
+            assertEquals(2, resBothPass["total_violations"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, resBothPass["high_severity_count"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, resBothPass["warning_count"]?.jsonPrimitive?.intOrNull)
+            assertEquals(2, resBothPass["ratchet"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, resBothPass["high_ratchet"]?.jsonPrimitive?.intOrNull)
+            assertEquals(0, resBothPass["baseline_delta"]?.jsonPrimitive?.intOrNull)
+            assertEquals(0, resBothPass["high_delta"]?.jsonPrimitive?.intOrNull)
+
+            // Case 2: Total ratchet = 5 (passes), but High ratchet = 0 (fails because 1 HIGH > 0)
+            // Hardening verification: new HIGH violation cannot hide behind high total ratchet!
+            val resHighFails = server.callTool("atlas_audit", buildJsonObject {
+                put("action", "audit_complexity")
+                put("project", "proj")
+                put("ratchet", 5)
+                put("high_ratchet", 0)
+            })
+            assertFalse(resHighFails["passed"]?.jsonPrimitive?.booleanOrNull ?: true, "Must fail when high violations exceed high_ratchet")
+            assertEquals(5, resHighFails["ratchet"]?.jsonPrimitive?.intOrNull)
+            assertEquals(0, resHighFails["high_ratchet"]?.jsonPrimitive?.intOrNull)
+            assertEquals(-3, resHighFails["baseline_delta"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, resHighFails["high_delta"]?.jsonPrimitive?.intOrNull)
+
+            // Case 3: Read both ratchets from complexity-baseline.json file
+            val baselinePath = "$tempDir/complexity-baseline.json"
+            PlatformFiles.writeText(
+                baselinePath,
+                """{"project": "proj", "ratchet": 2, "high_severity_count": 0, "total_violations": 2}"""
+            )
+            val resBaselineHighFail = server.callTool("atlas_audit", buildJsonObject {
+                put("action", "audit_complexity")
+                put("project", "proj")
+            })
+            assertFalse(resBaselineHighFail["passed"]?.jsonPrimitive?.booleanOrNull ?: true, "Must fail because high_severity_count is 0 in baseline")
+            assertEquals(0, resBaselineHighFail["high_ratchet"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, resBaselineHighFail["high_delta"]?.jsonPrimitive?.intOrNull)
+
+            server.close()
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+            cleanDir(tempDir)
+        }
+    }
+
+    @Test
+    fun testCliHighRatchetFlag() {
+        val tempDir = makeTempDir()
+        val dbPath = makeTempDb()
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val highNode = GraphNode(
+                nodeId = "cli-proj:src/Main.kt#heavy",
+                projectId = "cli-proj",
+                fileId = "cli-proj:src/Main.kt",
+                name = "heavy",
+                qualifiedName = "heavy",
+                kind = "function",
+                startLine = 1,
+                cognitiveComplexity = 25
+            )
+            store.upsertNodesAndEdges("cli-proj", listOf(highNode), emptyList())
+
+            // 1. Total ratchet passes (5), but --high-ratchet is 0 -> exit code 1
+            val exitFail = AtlasCli.run(
+                arrayOf("audit", "--complexity", "--project", "cli-proj", "--db", dbPath, "--workspace", tempDir, "--ratchet", "5", "--high-ratchet", "0")
+            )
+            assertEquals(1, exitFail)
+
+            // 2. Both pass (--ratchet 5, --high-ratchet 1) -> exit code 0
+            val exitPass = AtlasCli.run(
+                arrayOf("audit", "--complexity", "--project", "cli-proj", "--db", dbPath, "--workspace", tempDir, "--ratchet", "5", "--high-ratchet", "1")
+            )
+            assertEquals(0, exitPass)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+            cleanDir(tempDir)
+        }
+    }
 }

@@ -92,6 +92,7 @@ class AtlasCli {
             var thresholdArg: Int? = null
             var maxCyclomaticArg: Int? = null
             var ratchetArg: Int? = null
+            var highRatchetArg: Int? = null
             var baselineArg: String? = null
             var saveBaseline = false
             var saveBaselinePath: String? = null
@@ -166,6 +167,9 @@ class AtlasCli {
                     arg.startsWith("--max-cyclomatic=") -> maxCyclomaticArg = arg.substringAfter('=').toIntOrNull()
                     arg == "--ratchet" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> ratchetArg = argv[++idx].toIntOrNull()
                     arg.startsWith("--ratchet=") -> ratchetArg = arg.substringAfter('=').toIntOrNull()
+                    (arg == "--high-ratchet" || arg == "--max-high-violations") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> highRatchetArg = argv[++idx].toIntOrNull()
+                    arg.startsWith("--high-ratchet=") -> highRatchetArg = arg.substringAfter('=').toIntOrNull()
+                    arg.startsWith("--max-high-violations=") -> highRatchetArg = arg.substringAfter('=').toIntOrNull()
                     arg == "--baseline" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> baselineArg = argv[++idx]
                     arg.startsWith("--baseline=") -> baselineArg = arg.substringAfter('=')
                     arg == "--save-baseline" -> {
@@ -343,6 +347,7 @@ class AtlasCli {
                         threshold = thresholdArg,
                         maxCyclomatic = maxCyclomaticArg,
                         ratchet = ratchetArg,
+                        highRatchet = highRatchetArg,
                         baseline = baselineArg,
                         saveBaseline = saveBaseline,
                         saveBaselinePath = saveBaselinePath,
@@ -1305,6 +1310,7 @@ class AtlasCli {
             threshold: Int?,
             maxCyclomatic: Int? = null,
             ratchet: Int? = null,
+            highRatchet: Int? = null,
             baseline: String? = null,
             saveBaseline: Boolean = false,
             saveBaselinePath: String? = null,
@@ -1325,6 +1331,7 @@ class AtlasCli {
                 if (threshold != null) put("threshold", threshold)
                 if (maxCyclomatic != null) put("max_cyclomatic", maxCyclomatic)
                 if (effectiveRatchet != null) put("ratchet", effectiveRatchet)
+                if (highRatchet != null) put("high_ratchet", highRatchet)
                 if (effectiveBaselineFile != null) put("baseline", effectiveBaselineFile)
             }
             val res = server.callTool("atlas_audit", toolArgs)
@@ -1337,6 +1344,8 @@ class AtlasCli {
             val maxCyc = data["max_cyclomatic"]?.jsonPrimitive?.intOrNull ?: (maxCyclomatic ?: 15)
             val resolvedRatchet = data["ratchet"]?.jsonPrimitive?.intOrNull
             val baselineDelta = data["baseline_delta"]?.jsonPrimitive?.intOrNull
+            val resolvedHighRatchet = data["high_ratchet"]?.jsonPrimitive?.intOrNull
+            val highDelta = data["high_delta"]?.jsonPrimitive?.intOrNull
 
             if (saveBaseline) {
                 val targetPath = saveBaselinePath ?: if (workspaceRoot == ".") "complexity-baseline.json" else "$workspaceRoot/complexity-baseline.json"
@@ -1364,10 +1373,19 @@ class AtlasCli {
                 " ratchet=$resolvedRatchet (delta=$deltaStr)"
             } else ""
 
+            val highRatchetStr = if (resolvedHighRatchet != null) {
+                val hDeltaStr = when {
+                    highDelta == null -> "0"
+                    highDelta > 0 -> "+$highDelta"
+                    else -> "$highDelta"
+                }
+                " high_ratchet=$resolvedHighRatchet (delta=$hDeltaStr)"
+            } else ""
+
             val text = if (isJson) {
                 jsonPretty.encodeToString(data)
             } else {
-                "[Complexity Audit] project=$project passed=$passed threshold=$thresh violations=$total$ratchetStr (HIGH=$high, WARNING=$warn)"
+                "[Complexity Audit] project=$project passed=$passed threshold=$thresh violations=$total$ratchetStr$highRatchetStr (HIGH=$high, WARNING=$warn)"
             }
             println(truncateSummary(text, isJson))
             return if (saveBaseline || passed) 0 else 1
@@ -1573,6 +1591,7 @@ class AtlasCli {
                   --complexity             Run Gate 1 function complexity audit rule (exit code 0/1)
                   --threshold <int>        Cognitive complexity threshold for audit or query (default: 10)
                   --ratchet <int>          Maximum allowed violations for complexity audit ratchet
+                  --high-ratchet <int>     Maximum allowed high severity violations for complexity audit ratchet
                   --baseline <int|file>    Explicit baseline violation count or path to baseline JSON file
                   --save-baseline [path]   Save current complexity violations as baseline JSON file
                   --description-mode <m>   Filter mode for description suggestions (domain-only, all, off; default: domain-only)

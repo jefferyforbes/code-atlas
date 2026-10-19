@@ -1022,7 +1022,10 @@ class AtlasMcpServer(
                     ?: args["max_violations"]?.jsonPrimitive?.intOrNull
                     ?: args["baseline"]?.jsonPrimitive?.intOrNull
 
-                if (resolvedRatchet == null) {
+                var resolvedHighRatchet: Int? = args["high_ratchet"]?.jsonPrimitive?.intOrNull
+                    ?: args["max_high_violations"]?.jsonPrimitive?.intOrNull
+
+                if (resolvedRatchet == null || resolvedHighRatchet == null) {
                     val explicitFile = if (args["baseline"]?.jsonPrimitive?.intOrNull == null) {
                         args["baseline"]?.jsonPrimitive?.contentOrNull
                     } else null
@@ -1049,10 +1052,17 @@ class AtlasMcpServer(
                                 val parsed = json.parseToJsonElement(text).jsonObject
                                 val fileProject = parsed["project"]?.jsonPrimitive?.contentOrNull
                                 if (fileProject == null || fileProject == project) {
-                                    resolvedRatchet = parsed["ratchet"]?.jsonPrimitive?.intOrNull
-                                        ?: parsed["total_violations"]?.jsonPrimitive?.intOrNull
-                                        ?: parsed["max_violations"]?.jsonPrimitive?.intOrNull
-                                    if (resolvedRatchet != null) break
+                                    if (resolvedRatchet == null) {
+                                        resolvedRatchet = parsed["ratchet"]?.jsonPrimitive?.intOrNull
+                                            ?: parsed["total_violations"]?.jsonPrimitive?.intOrNull
+                                            ?: parsed["max_violations"]?.jsonPrimitive?.intOrNull
+                                    }
+                                    if (resolvedHighRatchet == null) {
+                                        resolvedHighRatchet = parsed["high_ratchet"]?.jsonPrimitive?.intOrNull
+                                            ?: parsed["high_severity_count"]?.jsonPrimitive?.intOrNull
+                                            ?: parsed["max_high_violations"]?.jsonPrimitive?.intOrNull
+                                    }
+                                    if (resolvedRatchet != null || resolvedHighRatchet != null) break
                                 }
                             } catch (e: Exception) {
                                 PlatformFiles.logWarning("AtlasMcpServer", "Failed to parse complexity baseline from $resolvedPath: ${e.message}")
@@ -1061,8 +1071,15 @@ class AtlasMcpServer(
                     }
                 }
 
-                val passed = if (resolvedRatchet != null) violations.size <= resolvedRatchet else violations.isEmpty()
+                val highCount = violations.count { it.severity == "HIGH" }
+                val warningCount = violations.count { it.severity == "WARNING" }
+
+                val totalPassed = if (resolvedRatchet != null) violations.size <= resolvedRatchet else violations.isEmpty()
+                val highPassed = if (resolvedHighRatchet != null) highCount <= resolvedHighRatchet else true
+                val passed = totalPassed && highPassed
+
                 val baselineDelta = resolvedRatchet?.let { violations.size - it }
+                val highDelta = resolvedHighRatchet?.let { highCount - it }
 
                 buildJsonObject {
                     put("project", project)
@@ -1070,12 +1087,18 @@ class AtlasMcpServer(
                     put("threshold", threshold)
                     put("max_cyclomatic", maxCyclomatic)
                     put("total_violations", violations.size)
-                    put("high_severity_count", violations.count { it.severity == "HIGH" })
-                    put("warning_count", violations.count { it.severity == "WARNING" })
+                    put("high_severity_count", highCount)
+                    put("warning_count", warningCount)
                     if (resolvedRatchet != null) {
                         put("ratchet", resolvedRatchet)
                         if (baselineDelta != null) {
                             put("baseline_delta", baselineDelta)
+                        }
+                    }
+                    if (resolvedHighRatchet != null) {
+                        put("high_ratchet", resolvedHighRatchet)
+                        if (highDelta != null) {
+                            put("high_delta", highDelta)
                         }
                     }
                     put("violations", json.encodeToJsonElement(violations))

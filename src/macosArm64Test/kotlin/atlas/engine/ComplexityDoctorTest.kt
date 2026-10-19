@@ -589,4 +589,123 @@ class ComplexityDoctorTest {
             cleanDir(tmpDir)
         }
     }
+
+    @Test
+    fun testAnalyzeSourceWithPreExtractedNodes() {
+        val tmpDir = makeTempDir()
+        try {
+            val relPath = "src/SampleService.kt"
+            val fullPath = "$tmpDir/$relPath"
+            PlatformFiles.mkdirs("$tmpDir/src")
+            val source = """
+                package atlas.sample
+
+                class SampleService {
+                    fun runTask(flag: Boolean): Int {
+                        if (flag) {
+                            return 1
+                        }
+                        return 0
+                    }
+                }
+            """.trimIndent()
+            PlatformFiles.writeText(fullPath, source)
+
+            val engine = ComplexityDoctorEngine(workspaceRoot = tmpDir)
+            val extracted = atlas.extract.PolyglotAstExtractor.extractFile("test-proj", relPath, source)
+            val preExtractedNodes = extracted.first
+
+            val prescriptions = engine.analyzeSource(
+                filePath = relPath,
+                sourceText = source,
+                nodeId = "atlas.sample.SampleService.runTask",
+                projectId = "test-proj",
+                preExtractedNodes = preExtractedNodes
+            )
+            assertTrue(prescriptions.isEmpty())
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testRunDoctorWithMultipleNodesInSameFileUsesFileLevelExtraction() {
+        val tmpDir = makeTempDir()
+        val dbPath = makeTempDb()
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val relPath = "src/MultiComplex.kt"
+            val fullPath = "$tmpDir/$relPath"
+            PlatformFiles.mkdirs("$tmpDir/src")
+            val source = """
+                package atlas.sample
+
+                class MultiComplex {
+                    fun f1(x: List<String>?, flag: Boolean): Int {
+                        if (flag && x != null) {
+                            var count = 0
+                            for (item in x) {
+                                if (item.length > 3) {
+                                    if (item.startsWith("A")) count++
+                                }
+                            }
+                            return count
+                        }
+                        return 0
+                    }
+
+                    fun f2(y: List<String>?, flag: Boolean): Int {
+                        if (flag && y != null) {
+                            var count = 0
+                            for (item in y) {
+                                if (item.length > 5) {
+                                    if (item.endsWith("Z")) count++
+                                }
+                            }
+                            return count
+                        }
+                        return 0
+                    }
+                }
+            """.trimIndent()
+            PlatformFiles.writeText(fullPath, source)
+
+            val node1 = GraphNode(
+                nodeId = "test-proj:$relPath#f1",
+                projectId = "test-proj",
+                fileId = "test-proj:$relPath",
+                name = "f1",
+                qualifiedName = "atlas.sample.MultiComplex.f1",
+                kind = "function",
+                startLine = 4,
+                endLine = 16,
+                cognitiveComplexity = 12,
+                cyclomaticComplexity = 5
+            )
+            val node2 = GraphNode(
+                nodeId = "test-proj:$relPath#f2",
+                projectId = "test-proj",
+                fileId = "test-proj:$relPath",
+                name = "f2",
+                qualifiedName = "atlas.sample.MultiComplex.f2",
+                kind = "function",
+                startLine = 18,
+                endLine = 30,
+                cognitiveComplexity = 12,
+                cyclomaticComplexity = 5
+            )
+            store.upsertNodesAndEdges("test-proj", listOf(node1, node2), emptyList())
+
+            val engine = ComplexityDoctorEngine(store = store, workspaceRoot = tmpDir)
+            val report = engine.runDoctor("test-proj", minCognitive = 10)
+
+            assertTrue(report.totalPrescriptions >= 2, "Expected prescriptions for both f1 and f2, got ${report.totalPrescriptions}")
+            assertTrue(report.prescriptions.any { it.targetNodeId.contains("f1") })
+            assertTrue(report.prescriptions.any { it.targetNodeId.contains("f2") })
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+            cleanDir(tmpDir)
+        }
+    }
 }
