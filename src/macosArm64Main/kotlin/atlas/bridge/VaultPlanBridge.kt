@@ -375,47 +375,86 @@ object VaultPlanBridge {
         return Pair(docNodes, edges)
     }
 
-    fun extractFrontmatterScalar(markdownText: String, key: String): String {
-        if (!markdownText.startsWith("---")) return ""
+    private fun extractFrontmatterText(markdownText: String): String? {
+        if (!markdownText.startsWith("---")) return null
         val parts = markdownText.split("---", limit = 3)
-        if (parts.size < 3) return ""
+        if (parts.size < 3) return null
+        return parts[1]
+    }
+
+    private fun extractFrontmatterLines(markdownText: String): List<String>? {
+        return extractFrontmatterText(markdownText)?.lines()
+    }
+
+    fun extractFrontmatterScalar(markdownText: String, key: String): String {
+        val fmText = extractFrontmatterText(markdownText) ?: return ""
         val pattern = Regex("""(?m)^\s*${Regex.escape(key)}\s*:\s*(.+)$""")
-        val match = pattern.find(parts[1]) ?: return ""
+        val match = pattern.find(fmText) ?: return ""
         return match.groupValues[1].trim().trim('\'', '"')
     }
 
-    fun extractScopedFiles(markdownText: String): List<String> {
-        if (!markdownText.startsWith("---")) return emptyList()
-        val parts = markdownText.split("---", limit = 3)
-        if (parts.size < 3) return emptyList()
-        val fmLines = parts[1].lines()
+    private class ScopedFilesState {
         var inScope = false
         var inFiles = false
         val scoped = mutableListOf<String>()
-        for (line in fmLines) {
+
+        fun processLine(line: String) {
             val stripped = line.trim()
             val indent = line.length - line.trimStart().length
-            if (indent == 0 && stripped.startsWith("scope:")) {
+            if (indent == 0) {
+                handleRootLine(stripped)
+                return
+            }
+            if (!inScope) return
+            handleScopedLine(stripped, indent)
+        }
+
+        private fun handleRootLine(stripped: String) {
+            if (stripped.startsWith("scope:")) {
                 inScope = true
                 inFiles = false
-                continue
-            }
-            if (indent == 0 && stripped.isNotEmpty() && !stripped.startsWith("#")) {
+            } else if (stripped.isNotEmpty() && !stripped.startsWith("#")) {
                 inScope = false
                 inFiles = false
             }
-            if (inScope && (indent == 2 || indent == 4) && stripped.startsWith("files:")) {
+        }
+
+        private fun handleScopedLine(stripped: String, indent: Int) {
+            val isKeyLevel = indent == 2 || indent == 4
+            if (isKeyLevel && stripped.startsWith("files:")) {
                 inFiles = true
-                continue
-            }
-            if (inScope && (indent == 2 || indent == 4) && stripped.endsWith(":") && !stripped.startsWith("-")) {
+            } else if (isKeyLevel && stripped.endsWith(":") && !stripped.startsWith("-")) {
                 inFiles = false
-            }
-            if (inScope && inFiles && stripped.startsWith("- ")) {
+            } else if (inFiles && stripped.startsWith("- ")) {
                 scoped.add(stripped.removePrefix("- ").trim())
             }
         }
-        return scoped
+    }
+
+    fun extractScopedFiles(markdownText: String): List<String> {
+        val fmLines = extractFrontmatterLines(markdownText) ?: return emptyList()
+        val state = ScopedFilesState()
+        for (line in fmLines) {
+            state.processLine(line)
+        }
+        return state.scoped
+    }
+
+    private fun appendAsteriskPattern(glob: String, currentIndex: Int, sb: StringBuilder): Int {
+        var i = currentIndex
+        val hasNext = i + 1 < glob.length
+        if (hasNext && glob[i + 1] == '*') {
+            i++
+            if (i + 1 < glob.length && glob[i + 1] == '/') {
+                i++
+                sb.append("(?:.*/)?")
+            } else {
+                sb.append(".*")
+            }
+        } else {
+            sb.append("[^/]*")
+        }
+        return i
     }
 
     fun globToRegex(glob: String): Regex {
@@ -423,23 +462,9 @@ object VaultPlanBridge {
         var i = 0
         while (i < glob.length) {
             when (val c = glob[i]) {
-                '*' -> {
-                    if (i + 1 < glob.length && glob[i + 1] == '*') {
-                        i++
-                        if (i + 1 < glob.length && glob[i + 1] == '/') {
-                            i++
-                            sb.append("(?:.*/)?")
-                        } else {
-                            sb.append(".*")
-                        }
-                    } else {
-                        sb.append("[^/]*")
-                    }
-                }
+                '*' -> i = appendAsteriskPattern(glob, i, sb)
                 '?' -> sb.append("[^/]")
-                '.', '(', ')', '+', '|', '^', '$', '@', '%', '[', ']', '{', '}' -> {
-                    sb.append('\\').append(c)
-                }
+                '.', '(', ')', '+', '|', '^', '$', '@', '%', '[', ']', '{', '}' -> sb.append('\\').append(c)
                 '\\' -> sb.append('/')
                 else -> sb.append(c)
             }
@@ -449,109 +474,127 @@ object VaultPlanBridge {
         return Regex(sb.toString())
     }
 
-    fun extractFrontmatterTags(markdownText: String): List<String> {
-        if (!markdownText.startsWith("---")) return emptyList()
-        val parts = markdownText.split("---", limit = 3)
-        if (parts.size < 3) return emptyList()
-        val fmLines = parts[1].lines()
-        val tags = mutableListOf<String>()
+    private fun cleanTagItem(raw: String): String? {
+        val clean = raw.trim().trim('\'', '"').removePrefix("#")
+        return clean.ifEmpty { null }
+    }
+
+    private fun parseInlineTags(value: String): List<String> {
+        val unbracketed = if (value.startsWith("[") && value.endsWith("]")) {
+            value.removePrefix("[").removeSuffix("]")
+        } else {
+            value
+        }
+        return unbracketed.split(',').mapNotNull { cleanTagItem(it) }
+    }
+
+    private class FrontmatterTagsState {
         var inTagsBlock = false
-        for (line in fmLines) {
+        val tags = mutableListOf<String>()
+
+        fun processLine(line: String) {
             val trimmed = line.trim()
             val indent = line.length - line.trimStart().length
-            if (indent == 0 && (trimmed.startsWith("tags:") || trimmed.startsWith("tag:"))) {
-                val afterColon = trimmed.substringAfter(':').trim()
-                if (afterColon.startsWith("[") && afterColon.endsWith("]")) {
-                    val items = afterColon.removePrefix("[").removeSuffix("]").split(',')
-                    for (item in items) {
-                        val clean = item.trim().trim('\'', '"').removePrefix("#")
-                        if (clean.isNotEmpty()) tags.add(clean)
-                    }
-                    inTagsBlock = false
-                    continue
-                } else if (afterColon.isNotEmpty()) {
-                    val items = afterColon.trim('\'', '"').split(',')
-                    for (item in items) {
-                        val clean = item.trim().trim('\'', '"').removePrefix("#")
-                        if (clean.isNotEmpty()) tags.add(clean)
-                    }
-                    inTagsBlock = false
-                    continue
-                }
-                inTagsBlock = true
-                continue
-            }
-            if (indent == 0 && trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
-                inTagsBlock = false
+            if (indent == 0) {
+                handleRootLine(trimmed)
+                return
             }
             if (inTagsBlock && (indent == 2 || indent == 4) && trimmed.startsWith("- ")) {
-                val clean = trimmed.removePrefix("- ").trim().trim('\'', '"').removePrefix("#")
-                if (clean.isNotEmpty()) tags.add(clean)
+                cleanTagItem(trimmed.removePrefix("- "))?.let { tags.add(it) }
             }
         }
-        return tags.distinct()
+
+        private fun handleRootLine(trimmed: String) {
+            if (trimmed.startsWith("tags:") || trimmed.startsWith("tag:")) {
+                val afterColon = trimmed.substringAfter(':').trim()
+                if (afterColon.isNotEmpty()) {
+                    tags.addAll(parseInlineTags(afterColon))
+                    inTagsBlock = false
+                } else {
+                    inTagsBlock = true
+                }
+            } else if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+                inTagsBlock = false
+            }
+        }
+    }
+
+    fun extractFrontmatterTags(markdownText: String): List<String> {
+        val fmLines = extractFrontmatterLines(markdownText) ?: return emptyList()
+        val state = FrontmatterTagsState()
+        for (line in fmLines) {
+            state.processLine(line)
+        }
+        return state.tags.distinct()
+    }
+
+    private val CODE_FENCE_RE = Regex("""(?s)(```|~~~).*?\1""")
+    private val INLINE_CODE_RE = Regex("""`[^`\n]+`""")
+    private val HTML_COMMENT_RE = Regex("""(?s)<!--.*?-->""")
+    private val WIKILINK_MASK_RE = Regex("""\[\[[^\]]+\]\]""")
+    private val MD_LINK_MASK_RE = Regex("""\[[^\]]*\]\([^)]+\)""")
+    private val HEADING_MASK_RE = Regex("""(?m)^[ \t]*#{1,6}\s+.*$""")
+    private val TAG_SCAN_RE = Regex("""(?:^|[\s(.,;:!?'"\[\]{}])#([A-Za-z][A-Za-z0-9_/-]{1,60})""")
+
+    private fun blankFrontmatter(text: String): String {
+        if (!text.startsWith("---")) return text
+        val endIdx = text.indexOf("\n---", 3)
+        if (endIdx == -1) return text
+        val fmLines = text.substring(0, endIdx + 4).count { it == '\n' }
+        val remainder = text.substring(endIdx + 4)
+        return "\n".repeat(fmLines) + remainder
+    }
+
+    private fun maskMultilineBlocks(text: String, regex: Regex): String {
+        return regex.replace(text) { m ->
+            m.value.map { if (it == '\n') '\n' else ' ' }.joinToString("")
+        }
+    }
+
+    private fun maskSingleLineSpans(text: String, regex: Regex): String {
+        return regex.replace(text) { m -> " ".repeat(m.value.length) }
+    }
+
+    private fun sanitizeMarkdownForInlineTags(markdownText: String): String {
+        var text = blankFrontmatter(markdownText)
+        text = maskMultilineBlocks(text, CODE_FENCE_RE)
+        text = maskSingleLineSpans(text, INLINE_CODE_RE)
+        text = maskMultilineBlocks(text, HTML_COMMENT_RE)
+        text = maskSingleLineSpans(text, WIKILINK_MASK_RE)
+        text = maskSingleLineSpans(text, MD_LINK_MASK_RE)
+        return maskSingleLineSpans(text, HEADING_MASK_RE)
+    }
+
+    private fun isValidInlineTag(rawTag: String): Boolean {
+        if (rawTag.length < 2) return false
+        val isHex = (rawTag.length == 3 || rawTag.length == 6 || rawTag.length == 8) &&
+            rawTag.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+        return !isHex
+    }
+
+    private fun hasTrailingWordChar(text: String, lastIndex: Int): Boolean {
+        val nextCharIdx = lastIndex + 1
+        return nextCharIdx < text.length && text[nextCharIdx].isLetterOrDigit()
     }
 
     fun extractSanitizedInlineTags(markdownText: String): List<Pair<String, Int>> {
-        var text = markdownText
-        if (text.startsWith("---")) {
-            val endIdx = text.indexOf("\n---", 3)
-            if (endIdx != -1) {
-                val fmLines = text.substring(0, endIdx + 4).count { it == '\n' }
-                val remainder = text.substring(endIdx + 4)
-                text = "\n".repeat(fmLines) + remainder
-            }
-        }
-
-        val codeFenceRe = Regex("""(?s)(```|~~~).*?\1""")
-        text = codeFenceRe.replace(text) { m ->
-            m.value.map { if (it == '\n') '\n' else ' ' }.joinToString("")
-        }
-
-        val inlineCodeRe = Regex("""`[^`\n]+`""")
-        text = inlineCodeRe.replace(text) { m ->
-            " ".repeat(m.value.length)
-        }
-
-        val htmlCommentRe = Regex("""(?s)<!--.*?-->""")
-        text = htmlCommentRe.replace(text) { m ->
-            m.value.map { if (it == '\n') '\n' else ' ' }.joinToString("")
-        }
-
-        val wikiRe = Regex("""\[\[[^\]]+\]\]""")
-        text = wikiRe.replace(text) { m -> " ".repeat(m.value.length) }
-
-        val mdLinkRe = Regex("""\[[^\]]*\]\([^)]+\)""")
-        text = mdLinkRe.replace(text) { m -> " ".repeat(m.value.length) }
-
-        val headingRe = Regex("""(?m)^[ \t]*#{1,6}\s+.*$""")
-        text = headingRe.replace(text) { m -> " ".repeat(m.value.length) }
-
-        val tagRe = Regex("""(?:^|[\s(.,;:!?'"\[\]{}])#([A-Za-z][A-Za-z0-9_/-]{1,60})""")
+        val text = sanitizeMarkdownForInlineTags(markdownText)
         val results = mutableListOf<Pair<String, Int>>()
 
         var currentLine = 1
         var lastIdx = 0
-        for (match in tagRe.findAll(text)) {
+        for (match in TAG_SCAN_RE.findAll(text)) {
             val hashRelIdx = match.value.indexOf('#')
             val hashIdx = match.range.first + hashRelIdx
             currentLine += text.substring(lastIdx, hashIdx).count { it == '\n' }
             lastIdx = hashIdx
 
-            val nextCharIdx = match.range.last + 1
-            if (nextCharIdx < text.length) {
-                val nextChar = text[nextCharIdx]
-                if (nextChar.isLetterOrDigit()) continue
-            }
+            if (hasTrailingWordChar(text, match.range.last)) continue
 
             val rawTag = match.groupValues[1].trimEnd('/', '-', '_')
-            if (rawTag.length < 2) continue
-
-            val isHex = (rawTag.length == 3 || rawTag.length == 6 || rawTag.length == 8) &&
-                rawTag.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
-            if (isHex) continue
-
-            results.add(Pair(rawTag, currentLine))
+            if (isValidInlineTag(rawTag)) {
+                results.add(Pair(rawTag, currentLine))
+            }
         }
         return results
     }
