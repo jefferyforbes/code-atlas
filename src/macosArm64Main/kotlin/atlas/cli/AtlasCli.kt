@@ -34,7 +34,7 @@ import kotlinx.serialization.json.putJsonObject
  */
 class AtlasCli {
     companion object {
-        const val VERSION = "0.6.0"
+        const val VERSION = "0.6.1"
         const val SUMMARY_CEILING_BYTES = 400
 
         private val jsonPretty = Json { prettyPrint = true }
@@ -143,7 +143,7 @@ class AtlasCli {
                         command = "query"
                         action = "shortest_path"
                     }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "fix" || arg == "remedy" || arg == "remediate" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "serve" || arg == "explore" || arg == "callers" || arg == "callees" || arg == "impact" || arg == "status" || arg == "files" || arg == "search" || arg == "node" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" || arg == "init" || arg == "migrate-tools" || arg == "migrate_tools" -> {
+                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "fix" || arg == "remedy" || arg == "remediate" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "serve" || arg == "explore" || arg == "context" || arg == "callers" || arg == "callees" || arg == "impact" || arg == "status" || arg == "files" || arg == "search" || arg == "node" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" || arg == "init" || arg == "migrate-tools" || arg == "migrate_tools" -> {
                         command = when (arg) {
                             "dead_code" -> "dead-code"
                             "record_memory" -> "record-memory"
@@ -412,6 +412,18 @@ class AtlasCli {
                         println(text)
                         return 0
                     }
+                    "context" -> {
+                        val effectiveServer = server.resolveServerForProject(project, workspace)
+                        val targetsList = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
+                        val res = effectiveServer.architectContextEngine.synthesizeContext(
+                            projectId = project,
+                            seedTargets = targetsList,
+                            depth = depth
+                        )
+                        val text = if (isJson) jsonPretty.encodeToString(res) else res.inlineMarkdown
+                        println(text)
+                        return 0
+                    }
                     "callers" -> {
                         val effectiveServer = server.resolveServerForProject(project, workspace)
                         val res = effectiveServer.codegraphEngine.callers(project, target, file = fileKey, limit = limit)
@@ -520,6 +532,26 @@ class AtlasCli {
                                 println(truncateSummary(text, false))
                             }
                             return if (report.totalOccurrences == 0) 0 else 1
+                        }
+                        if (action == "architect_context" || action == "architect-context") {
+                            val toolArgs = buildJsonObject {
+                                put("action", "architect_context")
+                                put("project", project)
+                                if (filterPaths.isNotEmpty()) {
+                                    putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                                }
+                                put("depth", depth)
+                            }
+                            val res = server.callTool("atlas_audit", toolArgs)
+                            if (isJson) {
+                                println(jsonPretty.encodeToString(res))
+                            } else {
+                                val md = res["inlineMarkdown"]?.jsonPrimitive?.contentOrNull
+                                    ?: res["inline_markdown"]?.jsonPrimitive?.contentOrNull
+                                    ?: jsonPretty.encodeToString(res)
+                                println(md)
+                            }
+                            return 0
                         }
                         val toolArgs = buildJsonObject {
                             put("action", "verify_architecture")
@@ -722,6 +754,23 @@ class AtlasCli {
                         return if (valid) 0 else 1
                     }
                     "query" -> {
+                        if (action == "explore") {
+                            val queryText = if (target.isNotEmpty()) target else paths.joinToString(" ")
+                            val toolArgs = buildJsonObject {
+                                put("action", "explore")
+                                put("project", project)
+                                put("target", queryText)
+                                put("limit", limit)
+                            }
+                            val res = server.callTool("atlas_query", toolArgs)
+                            if (isJson) {
+                                println(jsonPretty.encodeToString(res))
+                            } else {
+                                val text = res["text"]?.jsonPrimitive?.contentOrNull ?: jsonPretty.encodeToString(res)
+                                println(text)
+                            }
+                            return 0
+                        }
                         val toolArgs = buildJsonObject {
                             put("action", action)
                             put("project", project)
@@ -1713,6 +1762,7 @@ class AtlasCli {
                   files              List indexed source files and symbol distribution
                   status             Report indexed graph status, node counts, and storage metrics
                   explore            Explore codebase semantics and matched files for query
+                  context            Synthesize 3D Concurrency Scope and structural skeletons for task
                   synthesize-scope   Synthesize 3D Concurrency Scope (files, modules, architecture)
                   audit              Verify Clean Architecture layers, Single Declaration Principle, or complexity
                   fix                Remediate architecture violations (BOOST-003 AST split & layer inversions)
