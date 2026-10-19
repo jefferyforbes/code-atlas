@@ -13,7 +13,9 @@ import atlas.engine.ScopeSynthesizer
 import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkMemoryStore
 import atlas.engine.WorkspaceIndexer
+import atlas.engine.ArchitectContextEngine
 import atlas.extract.UrlTargetResolver
+import atlas.model.ArchitectContextResult
 import atlas.model.ComplexityScoreRecord
 import atlas.util.PlatformFiles
 import kotlin.math.ln
@@ -74,6 +76,7 @@ class AtlasMcpServer(
     val remediationVerifier: AutonomousRemediationVerifier
     val remediationEngine: ArchitectureRemediationEngine
     val codegraphEngine: CodegraphCompatibilityEngine
+    val architectContextEngine: ArchitectContextEngine
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -100,6 +103,7 @@ class AtlasMcpServer(
         remediationVerifier = AutonomousRemediationVerifier(workspaceRoot, store)
         remediationEngine = ArchitectureRemediationEngine(workspaceRoot, store, remediationVerifier)
         codegraphEngine = CodegraphCompatibilityEngine(store, workspaceRoot)
+        architectContextEngine = ArchitectContextEngine(store, synthesizer, workspaceRoot, artifactsDir)
     }
 
     fun toolDefinitions(): List<JsonObject> {
@@ -125,6 +129,7 @@ class AtlasMcpServer(
                         add("compose_blame")
                         add("complexity")
                         add("url")
+                        add("explore")
                     }
                     put("description", "Query operation to execute against the indexed polyglot code, Compose stability, complexity, and vault graph.")
                 }
@@ -135,6 +140,10 @@ class AtlasMcpServer(
                 putJsonObject("target") {
                     put("type", "string")
                     put("description", "Symbol name, qualified identifier, file path, or search query string.")
+                }
+                putJsonObject("query") {
+                    put("type", "string")
+                    put("description", "Search query or exploration target (alias for target).")
                 }
                 putJsonObject("secondary_target") {
                     put("type", "string")
@@ -189,8 +198,13 @@ class AtlasMcpServer(
                         add("audit_complexity")
                         add("complexity_doctor")
                         add("migrate_tools")
+                        add("architect_context")
                     }
                     put("description", "Audit, synthesis, Compose compliance, complexity audit, learning, or indexing action to execute.")
+                }
+                putJsonObject("depth") {
+                    put("type", "integer")
+                    put("description", "Maximum traversal depth for architect context synthesis (default: 2).")
                 }
                 putJsonObject("threshold") {
                     put("type", "integer")
@@ -221,6 +235,11 @@ class AtlasMcpServer(
                     put("type", "array")
                     putJsonObject("items") { put("type", "string") }
                     put("description", "Seed symbols, file paths, plan names, or Figma nodes to scope, audit, or record outcomes.")
+                }
+                putJsonObject("seeds") {
+                    put("type", "array")
+                    putJsonObject("items") { put("type", "string") }
+                    put("description", "Seed symbols, file paths, or nodes (alias for targets).")
                 }
                 putJsonObject("outcome") {
                     put("type", "string")
@@ -609,12 +628,12 @@ class AtlasMcpServer(
         val baseTools = listOf(
             buildJsonObject {
                 put("name", "atlas_query")
-                put("description", "Query indexed polyglot AST symbols, callers, callees, blast radius, Compose stability, or live source slices.")
+                put("description", "Query indexed polyglot AST symbols, structural skeletons, explore semantics, callers, callees, blast radius, or Compose stability.")
                 put("inputSchema", querySchema)
             },
             buildJsonObject {
                 put("name", "atlas_audit")
-                put("description", "Audit architectural layers, Compose Gate 1 compliance, Doctor fixes, or synthesize 3D scopes.")
+                put("description", "Audit architecture layers, Compose stability, complexity doctor, synthesize 3D scopes, or assemble architect context.")
                 put("inputSchema", auditSchema)
             },
             buildJsonObject {
@@ -773,7 +792,9 @@ class AtlasMcpServer(
     private fun handleQuery(args: JsonObject): JsonObject {
         val action = args["action"]?.jsonPrimitive?.content ?: "status"
         val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
-        val target = args["target"]?.jsonPrimitive?.content ?: ""
+        val target = args["target"]?.jsonPrimitive?.content
+            ?: args["query"]?.jsonPrimitive?.content
+            ?: ""
         val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 2
         val includeSource = args["include_source"]?.jsonPrimitive?.booleanOrNull ?: false
         val strongSkipping = args["strong_skipping"]?.jsonPrimitive?.booleanOrNull ?: true
@@ -870,6 +891,10 @@ class AtlasMcpServer(
                     put("results", json.encodeToJsonElement(results))
                 }
             }
+            "explore" -> {
+                val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 12
+                return codegraphEngine.explore(project, target, maxFiles = limit)
+            }
         }
 
         val node = store.getNode(project, target)
@@ -940,7 +965,10 @@ class AtlasMcpServer(
     private fun handleAudit(args: JsonObject): JsonObject {
         val action = args["action"]?.jsonPrimitive?.content ?: "verify_architecture"
         val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
-        val targets = args["targets"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+        val targets = (args["targets"]?.jsonArray?.map { it.jsonPrimitive.content }
+            ?: args["seeds"]?.jsonArray?.map { it.jsonPrimitive.content }
+            ?: listOfNotNull(args["target"]?.jsonPrimitive?.contentOrNull?.ifBlank { null }))
+            .filter { it.isNotBlank() }
         val stabilityConfigPath = args["stability_config_path"]?.jsonPrimitive?.contentOrNull
         val compilerReportsDir = args["compiler_reports_dir"]?.jsonPrimitive?.contentOrNull
         val traceLogPath = args["trace_log_path"]?.jsonPrimitive?.contentOrNull
@@ -974,6 +1002,15 @@ class AtlasMcpServer(
                     put("yaml_block", rec.toYamlBlock())
                     put("annotations", json.encodeToJsonElement(scopeAnnotations))
                 }
+            }
+            "architect_context" -> {
+                val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 2
+                val result = architectContextEngine.synthesizeContext(
+                    projectId = project,
+                    seedTargets = targets,
+                    depth = depth
+                )
+                json.encodeToJsonElement(result).jsonObject
             }
             "verify_architecture" -> {
                 val descMode = args["description_mode"]?.jsonPrimitive?.contentOrNull ?: "domain-only"
@@ -1464,7 +1501,7 @@ class AtlasMcpServer(
                             }
                             putJsonObject("serverInfo") {
                                 put("name", "atlas")
-                                put("version", "0.6.0")
+                                put("version", "0.6.1")
                             }
                         }
                     }
