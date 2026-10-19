@@ -32,7 +32,25 @@ class ArchitectContextEngine(
         depth: Int = 2
     ): ArchitectContextResult {
         val cleanSeeds = seedTargets.map { it.trim().trim('\'', '"') }.filter { it.isNotEmpty() }
-        val effectiveSeeds = if (cleanSeeds.isEmpty()) listOf("all") else cleanSeeds
+        if (cleanSeeds.isEmpty()) {
+            val emptyMd = "# Architect Context: (none)\n\nNo seed symbols or files provided. Specify 'targets' or 'seeds' to synthesize 3D Concurrency Scope."
+            return ArchitectContextResult(
+                projectId = projectId,
+                queryOrSeeds = emptyList(),
+                aciScore = 0.0,
+                isFastPath = true,
+                files = emptyList(),
+                modules = emptyList(),
+                architectureLayers = emptyList(),
+                collidingPlans = emptyList(),
+                godNodesTouched = emptyList(),
+                seedSymbols = emptyList(),
+                spilled = false,
+                spilloverPath = null,
+                inlineMarkdown = emptyMd
+            )
+        }
+        val effectiveSeeds = cleanSeeds
 
         val seedNodes = resolveSeedNodes(projectId, effectiveSeeds)
         val resolvedTargetStrings = if (seedNodes.isNotEmpty()) {

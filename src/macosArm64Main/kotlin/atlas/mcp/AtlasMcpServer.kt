@@ -141,6 +141,10 @@ class AtlasMcpServer(
                     put("type", "string")
                     put("description", "Symbol name, qualified identifier, file path, or search query string.")
                 }
+                putJsonObject("query") {
+                    put("type", "string")
+                    put("description", "Search query or exploration target (alias for target).")
+                }
                 putJsonObject("secondary_target") {
                     put("type", "string")
                     put("description", "Destination symbol or node identifier when computing shortest_path.")
@@ -231,6 +235,11 @@ class AtlasMcpServer(
                     put("type", "array")
                     putJsonObject("items") { put("type", "string") }
                     put("description", "Seed symbols, file paths, plan names, or Figma nodes to scope, audit, or record outcomes.")
+                }
+                putJsonObject("seeds") {
+                    put("type", "array")
+                    putJsonObject("items") { put("type", "string") }
+                    put("description", "Seed symbols, file paths, or nodes (alias for targets).")
                 }
                 putJsonObject("outcome") {
                     put("type", "string")
@@ -783,7 +792,9 @@ class AtlasMcpServer(
     private fun handleQuery(args: JsonObject): JsonObject {
         val action = args["action"]?.jsonPrimitive?.content ?: "status"
         val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
-        val target = args["target"]?.jsonPrimitive?.content ?: ""
+        val target = args["target"]?.jsonPrimitive?.content
+            ?: args["query"]?.jsonPrimitive?.content
+            ?: ""
         val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 2
         val includeSource = args["include_source"]?.jsonPrimitive?.booleanOrNull ?: false
         val strongSkipping = args["strong_skipping"]?.jsonPrimitive?.booleanOrNull ?: true
@@ -954,7 +965,10 @@ class AtlasMcpServer(
     private fun handleAudit(args: JsonObject): JsonObject {
         val action = args["action"]?.jsonPrimitive?.content ?: "verify_architecture"
         val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
-        val targets = args["targets"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+        val targets = (args["targets"]?.jsonArray?.map { it.jsonPrimitive.content }
+            ?: args["seeds"]?.jsonArray?.map { it.jsonPrimitive.content }
+            ?: listOfNotNull(args["target"]?.jsonPrimitive?.contentOrNull?.ifBlank { null }))
+            .filter { it.isNotBlank() }
         val stabilityConfigPath = args["stability_config_path"]?.jsonPrimitive?.contentOrNull
         val compilerReportsDir = args["compiler_reports_dir"]?.jsonPrimitive?.contentOrNull
         val traceLogPath = args["trace_log_path"]?.jsonPrimitive?.contentOrNull

@@ -197,13 +197,14 @@ class ArchitectContextEngineTest {
 
             val res = engine.synthesizeContext("proj", listOf("LargeSystem"), depth = 1)
             assertTrue(res.spilled, "Must mark as spilled")
-            assertNotNull(res.spilloverPath, "Spillover path must be provided")
-            assertTrue(PlatformFiles.exists(res.spilloverPath!!), "Spillover file must exist on disk")
+            val path = res.spilloverPath
+            assertNotNull(path, "Spillover path must be provided")
+            assertTrue(PlatformFiles.exists(path), "Spillover file must exist on disk")
 
-            val diskContent = PlatformFiles.readText(res.spilloverPath!!)
+            val diskContent = PlatformFiles.readText(path)
             assertTrue(diskContent.contains("3D Concurrency Boundary"), "Spillover file must have full context")
             assertTrue(res.inlineMarkdown.contains("Spilled to Disk"), "Inline markdown must indicate spillover")
-            assertTrue(res.inlineMarkdown.contains(res.spilloverPath!!), "Inline markdown must link to file")
+            assertTrue(res.inlineMarkdown.contains(path), "Inline markdown must link to file")
         } finally {
             store.close()
             PlatformFiles.deleteRecursively(tmpDir)

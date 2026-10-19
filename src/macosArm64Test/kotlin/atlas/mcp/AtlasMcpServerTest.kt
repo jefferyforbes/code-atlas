@@ -266,16 +266,18 @@ class AtlasMcpServerTest {
                 }
             }
 
-            // Verify atlas_query action enum includes "explore"
+            // Verify atlas_query action enum includes "explore" and properties include "query"
             val queryProps = toolMap["atlas_query"]!!.jsonObject["inputSchema"]!!.jsonObject["properties"]!!.jsonObject
             val queryActions = queryProps["action"]!!.jsonObject["enum"]!!.jsonArray.map { it.jsonPrimitive.content }
             assertTrue("explore" in queryActions, "atlas_query action enum must include 'explore'")
+            assertTrue("query" in queryProps, "atlas_query must declare 'query' parameter")
 
-            // Verify atlas_audit action enum includes "architect_context" and properties include "depth"
+            // Verify atlas_audit action enum includes "architect_context" and properties include "depth" and "seeds"
             val auditProps = toolMap["atlas_audit"]!!.jsonObject["inputSchema"]!!.jsonObject["properties"]!!.jsonObject
             val auditActions = auditProps["action"]!!.jsonObject["enum"]!!.jsonArray.map { it.jsonPrimitive.content }
             assertTrue("architect_context" in auditActions, "atlas_audit action enum must include 'architect_context'")
             assertTrue("depth" in auditProps, "atlas_audit must declare 'depth' parameter")
+            assertTrue("seeds" in auditProps, "atlas_audit must declare 'seeds' parameter")
         } finally {
             server.close()
         }
@@ -285,31 +287,74 @@ class AtlasMcpServerTest {
     fun testAtlasQueryExploreAndArchitectContextExecution() {
         val server = AtlasMcpServer(workspaceRoot = ".")
         try {
-            // Test atlas_query action: explore
-            val exploreResp = server.processJsonRpcMessage(
+            // 1. Test atlas_query action: explore with target
+            val exploreResp1 = server.processJsonRpcMessage(
                 """{"jsonrpc": "2.0", "id": 50, "method": "tools/call", "params": {"name": "atlas_query", "arguments": {"project": "test", "action": "explore", "target": "NonExistent"}}}"""
             )
-            assertNotNull(exploreResp)
-            val parsedExplore = json.parseToJsonElement(exploreResp).jsonObject
-            assertEquals(50, parsedExplore["id"]?.jsonPrimitive?.int)
-            val exploreErr = parsedExplore["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
-            assertFalse(exploreErr, "atlas_query explore must not return error")
-            val exploreContent = parsedExplore["result"]?.jsonObject?.get("content")?.jsonArray
-            assertNotNull(exploreContent)
-            assertTrue(exploreContent.size > 0)
+            assertNotNull(exploreResp1)
+            val parsedExplore1 = json.parseToJsonElement(exploreResp1).jsonObject
+            assertEquals(50, parsedExplore1["id"]?.jsonPrimitive?.int)
+            val exploreErr1 = parsedExplore1["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
+            assertFalse(exploreErr1, "atlas_query explore with target must not return error")
+            val exploreContent1 = parsedExplore1["result"]?.jsonObject?.get("content")?.jsonArray
+            assertNotNull(exploreContent1)
+            assertTrue(exploreContent1.size > 0)
 
-            // Test atlas_audit action: architect_context
-            val contextResp = server.processJsonRpcMessage(
-                """{"jsonrpc": "2.0", "id": 51, "method": "tools/call", "params": {"name": "atlas_audit", "arguments": {"project": "test", "action": "architect_context", "targets": ["NonExistent"]}}}"""
+            // 2. Test atlas_query action: explore with query alias
+            val exploreResp2 = server.processJsonRpcMessage(
+                """{"jsonrpc": "2.0", "id": 51, "method": "tools/call", "params": {"name": "atlas_query", "arguments": {"project": "test", "action": "explore", "query": "NonExistent"}}}"""
             )
-            assertNotNull(contextResp)
-            val parsedContext = json.parseToJsonElement(contextResp).jsonObject
-            assertEquals(51, parsedContext["id"]?.jsonPrimitive?.int)
-            val contextErr = parsedContext["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
-            assertFalse(contextErr, "atlas_audit architect_context must not return error")
-            val contextContent = parsedContext["result"]?.jsonObject?.get("content")?.jsonArray
-            assertNotNull(contextContent)
-            assertTrue(contextContent.size > 0)
+            assertNotNull(exploreResp2)
+            val parsedExplore2 = json.parseToJsonElement(exploreResp2).jsonObject
+            assertEquals(51, parsedExplore2["id"]?.jsonPrimitive?.int)
+            val exploreErr2 = parsedExplore2["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
+            assertFalse(exploreErr2, "atlas_query explore with query alias must not return error")
+            val exploreContent2 = parsedExplore2["result"]?.jsonObject?.get("content")?.jsonArray
+            assertNotNull(exploreContent2)
+            assertTrue(exploreContent2.size > 0)
+
+            // 3. Test atlas_audit action: architect_context with targets array
+            val contextResp1 = server.processJsonRpcMessage(
+                """{"jsonrpc": "2.0", "id": 52, "method": "tools/call", "params": {"name": "atlas_audit", "arguments": {"project": "test", "action": "architect_context", "targets": ["NonExistent"]}}}"""
+            )
+            assertNotNull(contextResp1)
+            val parsedContext1 = json.parseToJsonElement(contextResp1).jsonObject
+            assertEquals(52, parsedContext1["id"]?.jsonPrimitive?.int)
+            val contextErr1 = parsedContext1["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
+            assertFalse(contextErr1, "atlas_audit architect_context with targets must not return error")
+            val contextContent1 = parsedContext1["result"]?.jsonObject?.get("content")?.jsonArray
+            assertNotNull(contextContent1)
+            assertTrue(contextContent1.size > 0)
+
+            // 4. Test atlas_audit action: architect_context with singular target
+            val contextResp2 = server.processJsonRpcMessage(
+                """{"jsonrpc": "2.0", "id": 53, "method": "tools/call", "params": {"name": "atlas_audit", "arguments": {"project": "test", "action": "architect_context", "target": "NonExistent"}}}"""
+            )
+            assertNotNull(contextResp2)
+            val parsedContext2 = json.parseToJsonElement(contextResp2).jsonObject
+            assertEquals(53, parsedContext2["id"]?.jsonPrimitive?.int)
+            val contextErr2 = parsedContext2["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
+            assertFalse(contextErr2, "atlas_audit architect_context with singular target must not return error")
+
+            // 5. Test atlas_audit action: architect_context with seeds alias array
+            val contextResp3 = server.processJsonRpcMessage(
+                """{"jsonrpc": "2.0", "id": 54, "method": "tools/call", "params": {"name": "atlas_audit", "arguments": {"project": "test", "action": "architect_context", "seeds": ["NonExistent"]}}}"""
+            )
+            assertNotNull(contextResp3)
+            val parsedContext3 = json.parseToJsonElement(contextResp3).jsonObject
+            assertEquals(54, parsedContext3["id"]?.jsonPrimitive?.int)
+            val contextErr3 = parsedContext3["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
+            assertFalse(contextErr3, "atlas_audit architect_context with seeds alias must not return error")
+
+            // 6. Test atlas_audit action: architect_context with empty seeds (fast safe return)
+            val contextResp4 = server.processJsonRpcMessage(
+                """{"jsonrpc": "2.0", "id": 55, "method": "tools/call", "params": {"name": "atlas_audit", "arguments": {"project": "test", "action": "architect_context"}}}"""
+            )
+            assertNotNull(contextResp4)
+            val parsedContext4 = json.parseToJsonElement(contextResp4).jsonObject
+            assertEquals(55, parsedContext4["id"]?.jsonPrimitive?.int)
+            val contextErr4 = parsedContext4["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
+            assertFalse(contextErr4, "atlas_audit architect_context with empty seeds must not return error")
         } finally {
             server.close()
         }
