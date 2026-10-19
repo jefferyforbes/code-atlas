@@ -47,6 +47,28 @@ class AtlasNativeTest {
 
         val snakeSegments = NameSegmentTokenizer.tokenize("render_audio_stream")
         assertEquals(listOf("render", "audio", "stream"), snakeSegments)
+
+        // Accented Latin characters preserved
+        val accentedSegments = NameSegmentTokenizer.tokenize("CaféMenuController")
+        assertEquals(listOf("café", "menu", "controller"), accentedSegments)
+
+        val umlautSegments = NameSegmentTokenizer.tokenize("ÜberManager")
+        assertEquals(listOf("über", "manager"), umlautSegments)
+
+        // CJK characters preserved
+        val cjkSegments = NameSegmentTokenizer.tokenize("用户服务_QueryHandler")
+        assertEquals(listOf("用户服务", "query", "handler"), cjkSegments)
+
+        val japaneseSegments = NameSegmentTokenizer.tokenize("日本語_Class")
+        assertEquals(listOf("日本語", "class"), japaneseSegments)
+
+        // Single CJK ideograph preserved
+        val singleCjk = NameSegmentTokenizer.tokenize("图")
+        assertEquals(listOf("图"), singleCjk)
+
+        // Single ASCII letters filtered
+        val singleAscii = NameSegmentTokenizer.tokenize("a_b_c")
+        assertEquals(emptyList(), singleAscii)
     }
 
     @Test
