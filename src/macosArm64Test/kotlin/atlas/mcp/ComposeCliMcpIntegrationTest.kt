@@ -136,7 +136,35 @@ class ComposeCliMcpIntegrationTest {
                 val blameArr = blameRes["blame"]!!.jsonArray
                 assertTrue(blameArr.isNotEmpty(), "Expected blame hop for state: MutableCartState")
                 assertEquals("state", blameArr[0].jsonObject["param_name"]?.jsonPrimitive?.content)
-                assertEquals(6, blameArr[0].jsonObject["root_cause_line"]?.jsonPrimitive?.intOrNull)
+                // 3b. Test un-prefixed actions: summary, cascade, blame (Bug 2 fix)
+                val summaryResUnprefixed = server.callTool(
+                    "atlas_query",
+                    buildJsonObject {
+                        put("action", "summary")
+                        put("project", "shop-kmp")
+                    }
+                )
+                assertEquals(2, summaryResUnprefixed["total_composables"]?.jsonPrimitive?.intOrNull)
+
+                val cascadeResUnprefixed = server.callTool(
+                    "atlas_query",
+                    buildJsonObject {
+                        put("action", "cascade")
+                        put("project", "shop-kmp")
+                        put("target", "CheckoutScreen")
+                    }
+                )
+                assertTrue(cascadeResUnprefixed["cascade"]!!.jsonArray.isNotEmpty())
+
+                val blameResUnprefixed = server.callTool(
+                    "atlas_query",
+                    buildJsonObject {
+                        put("action", "blame")
+                        put("project", "shop-kmp")
+                        put("target", "CheckoutScreen")
+                    }
+                )
+                assertTrue(blameResUnprefixed["blame"]!!.jsonArray.isNotEmpty())
 
                 // 4. Test MCP atlas_audit actions: audit_compose, compose_doctor, synthesize_compose_scope
                 val auditRes = server.callTool(

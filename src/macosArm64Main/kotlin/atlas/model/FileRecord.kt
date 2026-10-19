@@ -2,6 +2,9 @@ package atlas.model
 
 import kotlinx.serialization.Serializable
 
+/**
+ * Indexed file entity tracking relative path, language, layer classification, hash digest, and declaration counts.
+ */
 @Serializable
 data class FileRecord(
     val fileId: String,

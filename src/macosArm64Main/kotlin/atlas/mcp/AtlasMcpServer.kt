@@ -117,8 +117,11 @@ class AtlasMcpServer(
                         add("god_nodes")
                         add("shortest_path")
                         add("status")
+                        add("summary")
                         add("compose_summary")
+                        add("cascade")
                         add("compose_cascade")
+                        add("blame")
                         add("compose_blame")
                         add("complexity")
                         add("url")
@@ -788,7 +791,7 @@ class AtlasMcpServer(
                 }
             }
             "url" -> return store.searchByUrl(project, target)
-            "compose_summary", "compose_cascade", "compose_blame" -> {
+            "summary", "compose_summary", "cascade", "compose_cascade", "blame", "compose_blame" -> {
                 val mappedAction = action.removePrefix("compose_")
                 val res = composeEngine.queryCompose(
                     projectSlug = project,

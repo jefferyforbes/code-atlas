@@ -3,6 +3,9 @@ package atlas.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/**
+ * Detailed complexity metrics, afferent coupling risk index, and maintainability grade for a function or node.
+ */
 @Serializable
 data class ComplexityScoreRecord(
     @SerialName("node_id") val nodeId: String,

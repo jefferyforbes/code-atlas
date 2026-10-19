@@ -362,7 +362,7 @@ class AtlasCli {
                     )
                 }
 
-                if (subsystem == "compose" || (command == "audit" && isComposeAuditFlag) || command == "doctor") {
+                if (subsystem == "compose" || (command == "query" && action in setOf("summary", "cascade", "blame", "compose_summary", "compose_cascade", "compose_blame")) || (command == "audit" && isComposeAuditFlag) || command == "doctor") {
                     val effCmd = if (command == "audit" && isComposeAuditFlag) "audit" else command
                     return runComposeCommand(
                         server = server,
@@ -1517,6 +1517,14 @@ class AtlasCli {
                   init               Configure and install git pre-commit/pre-push hooks in repository
                   index              Incrementally index workspace AST symbols and markdown notes
                   query              Query AST symbols, callers, callees, blast radius, or status
+                  search             Search indexed symbols and code snippets across project
+                  callers            List upstream callers for a symbol or file
+                  callees            List downstream callees for a symbol or file
+                  impact             Compute downstream blast-radius and impact tree for a symbol
+                  node               Inspect detailed node attributes, signature, and live source
+                  files              List indexed source files and symbol distribution
+                  status             Report indexed graph status, node counts, and storage metrics
+                  explore            Explore codebase semantics and matched files for query
                   synthesize-scope   Synthesize 3D Concurrency Scope (files, modules, architecture)
                   audit              Verify Clean Architecture layers, Single Declaration Principle, or complexity
                   fix                Remediate architecture violations (BOOST-003 AST split & layer inversions)

@@ -3,6 +3,9 @@ package atlas.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/**
+ * Architectural complexity violation record flagging functions exceeding cognitive or cyclomatic thresholds.
+ */
 @Serializable
 data class ComplexityViolation(
     @SerialName("rule_id") val ruleId: String = "COMPLEXITY-001",

@@ -3,6 +3,9 @@ package atlas.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/**
+ * Indexed metadata and compiler stability characteristics of a Jetpack Compose @Composable node.
+ */
 @Serializable
 data class ComposeNodeRecord(
     @SerialName("node_id") val nodeId: String,

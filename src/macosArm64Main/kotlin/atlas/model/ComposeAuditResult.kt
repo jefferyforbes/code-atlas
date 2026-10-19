@@ -3,6 +3,9 @@ package atlas.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/**
+ * Deterministic Jetpack Compose Gate 1 compliance and stability audit evaluation result.
+ */
 @Serializable
 data class ComposeAuditResult(
     val project: String,
