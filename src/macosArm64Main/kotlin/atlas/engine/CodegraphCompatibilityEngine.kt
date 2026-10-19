@@ -122,6 +122,10 @@ class CodegraphCompatibilityEngine(
         val targetFiles = nodesByFile.keys.take(maxFiles)
 
         for (fileRelPath in targetFiles) {
+            if (sb.length > 2800) {
+                sb.append("// Truncated to stay within 3.5 KB token budget\n\n")
+                break
+            }
             val fileNodes = nodesByFile[fileRelPath] ?: emptyList()
             sb.append("## $fileRelPath\n")
             for (node in fileNodes.take(3)) {
@@ -131,18 +135,46 @@ class CodegraphCompatibilityEngine(
     }
 
     private fun appendNodeSourcePreview(projectId: String, sb: StringBuilder, node: GraphNode, fileRelPath: String) {
-        val slice = store.sliceLiveSource(workspaceRoot, projectId, node)
         val lang = detectLanguage(fileRelPath)
         sb.append("```$lang\n")
-        if (slice.source.isNotEmpty()) {
-            sb.append(slice.source).append("\n")
-        } else {
-            sb.append("// ${node.kind} ${node.name} (lines ${node.startLine}-${node.endLine})\n")
-            if (!node.signature.isNullOrEmpty()) {
-                sb.append("${node.signature}\n")
-            }
-        }
+        val skeleton = formatNodeSkeleton(projectId, node, fileRelPath)
+        sb.append(skeleton).append("\n")
         sb.append("```\n\n")
+    }
+
+    private fun formatNodeSkeleton(projectId: String, node: GraphNode, fileRelPath: String): String {
+        val sb = StringBuilder()
+        sb.append("// line ").append(node.startLine).append(" [").append(node.kind).append("]\n")
+        if (node.kind == "class" || node.kind == "interface" || node.kind == "object" || node.kind == "struct") {
+            val header = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}"
+            sb.append(header)
+            if (!header.endsWith("{") && !header.endsWith(":")) {
+                sb.append(" {")
+            }
+            sb.append("\n")
+
+            val fileNodes = store.getNodesForFile(projectId, fileRelPath)
+            val members = fileNodes.filter { m ->
+                m.startLine > node.startLine && m.endLine <= node.endLine &&
+                    m.nodeId != node.nodeId &&
+                    (m.kind == "method" || m.kind == "function" || m.kind == "property" || m.kind == "field")
+            }
+
+            for (m in members.take(6)) {
+                val sig = if (m.signature.isNotEmpty()) m.signature else "${m.kind} ${m.name}"
+                sb.append("  ").append(sig).append("\n")
+            }
+            if (members.size > 6) {
+                sb.append("  // ... and ").append(members.size - 6).append(" more members\n")
+            }
+            if (header.endsWith("{") || !header.endsWith(":")) {
+                sb.append("}")
+            }
+        } else {
+            val sig = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}()"
+            sb.append(sig)
+        }
+        return sb.toString().trimEnd()
     }
 
     private fun appendCallRelationships(projectId: String, sb: StringBuilder, matchedNodes: List<GraphNode>) {
