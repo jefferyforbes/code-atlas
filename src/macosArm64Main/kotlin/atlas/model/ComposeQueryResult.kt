@@ -3,6 +3,9 @@ package atlas.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/**
+ * Query response payload aggregating Compose stability summary statistics, cascade paths, or parameter blame chains.
+ */
 @Serializable
 data class ComposeQueryResult(
     val project: String,

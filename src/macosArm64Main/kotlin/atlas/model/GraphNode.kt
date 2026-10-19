@@ -2,6 +2,9 @@ package atlas.model
 
 import kotlinx.serialization.Serializable
 
+/**
+ * Primary symbol or structural declaration node in the polyglot knowledge graph with architectural classifications.
+ */
 @Serializable
 data class GraphNode(
     val nodeId: String,

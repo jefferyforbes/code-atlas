@@ -3,6 +3,9 @@ package atlas.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/**
+ * Multi-dimensional complexity metrics vector tracking cyclomatic, cognitive, nesting, SLOC, and parameter counts.
+ */
 @Serializable
 data class ComplexityVector(
     val cyclomatic: Int = 1,

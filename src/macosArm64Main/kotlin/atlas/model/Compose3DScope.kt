@@ -3,6 +3,9 @@ package atlas.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/**
+ * 3D Concurrency Scope synthesized for Jetpack Compose features, isolating stable models and composition locals.
+ */
 @Serializable
 data class Compose3DScope(
     val project: String,

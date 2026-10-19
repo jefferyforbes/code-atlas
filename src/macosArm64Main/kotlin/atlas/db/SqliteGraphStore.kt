@@ -28,12 +28,12 @@ class SqliteGraphStore(val dbPath: String) {
 
     private fun migrateLegacySchema() {
         try {
-            val stmt = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='figma_nodes';")
             var sqlDef = ""
-            if (stmt.step()) {
-                sqlDef = stmt.columnString(0)
+            db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='figma_nodes';").use { stmt ->
+                if (stmt.step()) {
+                    sqlDef = stmt.columnString(0)
+                }
             }
-            stmt.close()
             if (sqlDef.contains("node_id TEXT NOT NULL UNIQUE")) {
                 db.exec("DROP TABLE IF EXISTS figma_spatial_index;")
                 db.exec("DROP TABLE IF EXISTS figma_nodes;")
@@ -480,7 +480,7 @@ class SqliteGraphStore(val dbPath: String) {
     }
 
     fun getFileRecordsMap(projectId: String): Map<String, Pair<String, Double>> {
-        val stmt = db.prepare("SELECT rel_path, sha256, mtime FROM files WHERE project_id = ?;")
+        val stmt = db.prepare("SELECT rel_path, sha256, mtime FROM files WHERE project_id = ? AND rel_path != '__endpoints__';")
         stmt.bindString(1, projectId)
         val result = mutableMapOf<String, Pair<String, Double>>()
         try {
@@ -805,7 +805,7 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun listIndexedFiles(projectId: String): List<String> {
         val res = mutableListOf<String>()
-        val stmt = db.prepare("SELECT rel_path FROM files WHERE project_id = ?;")
+        val stmt = db.prepare("SELECT rel_path FROM files WHERE project_id = ? AND rel_path != '__endpoints__';")
         stmt.bindString(1, projectId)
         try {
             while (stmt.step()) {
@@ -2081,7 +2081,7 @@ class SqliteGraphStore(val dbPath: String) {
             """
             SELECT file_id, project_id, rel_path, language, module_id, source_set,
                    semiotic_layer, arch_layer, sha256, mtime, loc, top_level_decl_count
-            FROM files WHERE project_id = ? ORDER BY rel_path ASC;
+            FROM files WHERE project_id = ? AND rel_path != '__endpoints__' ORDER BY rel_path ASC;
             """.trimIndent()
         )
         stmt.bindString(1, projectId)
@@ -2140,13 +2140,12 @@ class SqliteGraphStore(val dbPath: String) {
         } else {
             "SELECT edge_id, project_id, source_node_id, target_node_id, edge_type, provenance, confidence, line_number FROM edges WHERE project_id = ?;"
         }
-        val stmt = db.prepare(sql)
-        stmt.bindString(1, projectId)
-        if (edgeTypes != null && edgeTypes.isNotEmpty()) {
-            edgeTypes.forEachIndexed { i, t -> stmt.bindString(2 + i, t) }
-        }
-        val results = mutableListOf<GraphEdge>()
-        try {
+        return db.prepare(sql).use { stmt ->
+            stmt.bindString(1, projectId)
+            if (edgeTypes != null && edgeTypes.isNotEmpty()) {
+                edgeTypes.forEachIndexed { i, t -> stmt.bindString(2 + i, t) }
+            }
+            val results = mutableListOf<GraphEdge>()
             while (stmt.step()) {
                 results.add(
                     GraphEdge(
@@ -2161,52 +2160,38 @@ class SqliteGraphStore(val dbPath: String) {
                     )
                 )
             }
-        } finally {
-            stmt.close()
+            results
         }
-        return results
     }
 
     fun getStats(projectId: String): GraphStats {
-        val filesStmt = db.prepare("SELECT COUNT(*) FROM files WHERE project_id = ?;")
-        val filesCount = try {
-            filesStmt.bindString(1, projectId)
-            if (filesStmt.step()) filesStmt.columnInt(0) else 0
-        } finally {
-            filesStmt.close()
+        val filesCount = db.prepare("SELECT COUNT(*) FROM files WHERE project_id = ? AND rel_path != '__endpoints__';").use { stmt ->
+            stmt.bindString(1, projectId)
+            if (stmt.step()) stmt.columnInt(0) else 0
         }
 
-        val nodesStmt = db.prepare("SELECT COUNT(*) FROM nodes WHERE project_id = ?;")
-        val nodesCount = try {
-            nodesStmt.bindString(1, projectId)
-            if (nodesStmt.step()) nodesStmt.columnInt(0) else 0
-        } finally {
-            nodesStmt.close()
+        val nodesCount = db.prepare("SELECT COUNT(*) FROM nodes WHERE project_id = ?;").use { stmt ->
+            stmt.bindString(1, projectId)
+            if (stmt.step()) stmt.columnInt(0) else 0
         }
 
-        val edgesStmt = db.prepare("SELECT COUNT(*) FROM edges WHERE project_id = ?;")
-        val edgesCount = try {
-            edgesStmt.bindString(1, projectId)
-            if (edgesStmt.step()) edgesStmt.columnInt(0) else 0
-        } finally {
-            edgesStmt.close()
+        val edgesCount = db.prepare("SELECT COUNT(*) FROM edges WHERE project_id = ?;").use { stmt ->
+            stmt.bindString(1, projectId)
+            if (stmt.step()) stmt.columnInt(0) else 0
         }
 
-        val provStmt = db.prepare(
+        val provMap = mutableMapOf<String, Int>()
+        db.prepare(
             """
             SELECT provenance, COUNT(*)
             FROM edges WHERE project_id = ?
             GROUP BY provenance;
             """.trimIndent()
-        )
-        val provMap = mutableMapOf<String, Int>()
-        try {
-            provStmt.bindString(1, projectId)
-            while (provStmt.step()) {
-                provMap[provStmt.columnString(0)] = provStmt.columnInt(1)
+        ).use { stmt ->
+            stmt.bindString(1, projectId)
+            while (stmt.step()) {
+                provMap[stmt.columnString(0)] = stmt.columnInt(1)
             }
-        } finally {
-            provStmt.close()
         }
 
         return GraphStats(

@@ -2,6 +2,9 @@ package atlas.model
 
 import kotlinx.serialization.Serializable
 
+/**
+ * Directed relationship edge connecting two nodes in the polyglot knowledge graph with provenance and confidence metadata.
+ */
 @Serializable
 data class GraphEdge(
     val edgeId: String,

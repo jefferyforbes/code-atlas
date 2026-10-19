@@ -161,4 +161,81 @@ class NativeSqliteStatementTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testSqliteGraphStoreVirtualFileEndpointsExclusionAndListEdges() {
+        val dbPath = "/tmp/atlas_store_endpoints_${getpid()}_${Random.nextInt(100000, 999999)}.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            store.upsertFileRecord(
+                projectId = "p1",
+                relPath = "src/Main.kt",
+                language = "kotlin",
+                moduleId = "main",
+                sourceSet = "main",
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                sha256 = "hash1",
+                mtime = 1.0,
+                loc = 50,
+                topLevelDeclCount = 1
+            )
+            // Ensure virtual file record
+            store.ensureVirtualFileRecord("p1", "__endpoints__")
+
+            // getStats must exclude __endpoints__
+            val stats = store.getStats("p1")
+            assertEquals(1, stats.files, "Virtual file __endpoints__ must not distort file count in getStats")
+
+            // listIndexedFiles must exclude __endpoints__
+            val indexedFiles = store.listIndexedFiles("p1")
+            assertEquals(listOf("src/Main.kt"), indexedFiles)
+
+            // getFileRecordsMap must exclude __endpoints__
+            val recordsMap = store.getFileRecordsMap("p1")
+            assertEquals(setOf("src/Main.kt"), recordsMap.keys)
+
+            // listFiles must exclude __endpoints__
+            val fileRecords = store.listFiles("p1")
+            assertEquals(1, fileRecords.size)
+            assertEquals("src/Main.kt", fileRecords[0].relPath)
+
+            // listEdges with .use lifecycle
+            val node1 = atlas.model.GraphNode(
+                nodeId = "p1:src/Main.kt#n1",
+                projectId = "p1",
+                fileId = "src/Main.kt",
+                name = "n1",
+                qualifiedName = "n1",
+                kind = "function"
+            )
+            val node2 = atlas.model.GraphNode(
+                nodeId = "p1:src/Main.kt#n2",
+                projectId = "p1",
+                fileId = "src/Main.kt",
+                name = "n2",
+                qualifiedName = "n2",
+                kind = "function"
+            )
+            store.upsertNodesAndEdges(
+                projectId = "p1",
+                nodes = listOf(node1, node2),
+                edges = listOf(
+                    atlas.model.GraphEdge(
+                        edgeId = "e1",
+                        projectId = "p1",
+                        sourceNodeId = node1.nodeId,
+                        targetNodeId = node2.nodeId,
+                        edgeType = "CALLS"
+                    )
+                )
+            )
+            val edges = store.listEdges("p1", listOf("CALLS"))
+            assertEquals(1, edges.size)
+            assertEquals("e1", edges[0].edgeId)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }
