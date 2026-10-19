@@ -3,6 +3,9 @@ package atlas.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/**
+ * Prescriptive remediation report synthesizing prioritized refactoring actions for unstable Compose functions.
+ */
 @Serializable
 data class ComposeDoctorReport(
     val project: String,

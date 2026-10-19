@@ -3,6 +3,9 @@ package atlas.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/**
+ * Prioritized complexity reduction prescriptions and automated remediation outcome report.
+ */
 @Serializable
 data class ComplexityDoctorReport(
     val project: String,

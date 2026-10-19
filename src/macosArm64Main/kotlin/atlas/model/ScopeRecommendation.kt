@@ -2,6 +2,9 @@ package atlas.model
 
 import kotlinx.serialization.Serializable
 
+/**
+ * Recommended 3D Concurrency Scope boundary defining safe file globs, modules, and layers for task dispatch.
+ */
 @Serializable
 data class ScopeRecommendation(
     val projectId: String,
