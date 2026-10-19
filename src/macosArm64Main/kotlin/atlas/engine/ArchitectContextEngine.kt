@@ -142,30 +142,7 @@ class ArchitectContextEngine(
         sb.append(" [").append(node.archLayer).append(":").append(node.semioticLayer).append("]\n")
 
         if (node.kind == "class" || node.kind == "interface" || node.kind == "object" || node.kind == "struct") {
-            val header = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}"
-            sb.append(header)
-            if (!header.endsWith("{") && !header.endsWith(":")) {
-                sb.append(" {")
-            }
-            sb.append("\n")
-
-            val fileNodes = store.getNodesForFile(projectId, relPath)
-            val members = fileNodes.filter { m ->
-                m.startLine > node.startLine && m.endLine <= node.endLine &&
-                    m.nodeId != node.nodeId &&
-                    (m.kind == "method" || m.kind == "function" || m.kind == "property" || m.kind == "field")
-            }
-
-            for (m in members.take(8)) {
-                val sig = if (m.signature.isNotEmpty()) m.signature else "${m.kind} ${m.name}"
-                sb.append("  ").append(sig).append("\n")
-            }
-            if (members.size > 8) {
-                sb.append("  // ... and ").append(members.size - 8).append(" more members\n")
-            }
-            if (header.endsWith("{") || !header.endsWith(":")) {
-                sb.append("}\n")
-            }
+            formatClassSkeleton(projectId, node, relPath, sb)
         } else {
             val sig = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}"
             sb.append(sig).append("\n")
@@ -173,62 +150,116 @@ class ArchitectContextEngine(
         return sb.toString().trimEnd()
     }
 
-    private fun resolveSeedNodes(projectId: String, seedTargets: List<String>): List<GraphNode> {
-        val resolved = mutableListOf<GraphNode>()
-        val seenNodeIds = mutableSetOf<String>()
+    private fun formatClassSkeleton(projectId: String, node: GraphNode, relPath: String, sb: StringBuilder) {
+        val header = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}"
+        sb.append(header)
+        if (!header.endsWith("{") && !header.endsWith(":")) {
+            sb.append(" {")
+        }
+        sb.append("\n")
 
+        appendMemberSignatures(projectId, node, relPath, sb)
+
+        if (header.endsWith("{") || !header.endsWith(":")) {
+            sb.append("}\n")
+        }
+    }
+
+    private fun appendMemberSignatures(projectId: String, node: GraphNode, relPath: String, sb: StringBuilder) {
+        val fileNodes = store.getNodesForFile(projectId, relPath)
+        val members = fileNodes.filter { m ->
+            m.startLine > node.startLine && m.endLine <= node.endLine &&
+                m.nodeId != node.nodeId &&
+                (m.kind == "method" || m.kind == "function" || m.kind == "property" || m.kind == "field")
+        }
+
+        for (m in members.take(8)) {
+            val sig = if (m.signature.isNotEmpty()) m.signature else "${m.kind} ${m.name}"
+            sb.append("  ").append(sig).append("\n")
+        }
+        if (members.size > 8) {
+            sb.append("  // ... and ").append(members.size - 8).append(" more members\n")
+        }
+    }
+
+    private fun resolveSeedNodes(projectId: String, seedTargets: List<String>): List<GraphNode> {
+        val seenNodeIds = mutableSetOf<String>()
         val isNaturalPrompt = seedTargets.size == 1 &&
             seedTargets[0].contains(' ') &&
             !seedTargets[0].contains('/') &&
             !seedTargets[0].contains('.')
 
         if (isNaturalPrompt) {
-            val tokens = tokenizePrompt(seedTargets[0])
-            for (token in tokens) {
-                val direct = store.getNode(projectId, token)
-                if (direct != null && seenNodeIds.add(direct.nodeId)) {
-                    resolved.add(direct)
-                }
-                val partials = store.searchNodes(projectId, token, limit = 3)
-                for (p in partials) {
-                    if (seenNodeIds.add(p.nodeId)) {
-                        resolved.add(p)
-                    }
-                }
-            }
-            val phraseMatches = store.searchNodes(projectId, seedTargets[0], limit = 4)
-            for (p in phraseMatches) {
-                if (seenNodeIds.add(p.nodeId)) {
-                    resolved.add(p)
-                }
-            }
-            return resolved
+            return resolveNaturalPromptSeeds(projectId, seedTargets[0], seenNodeIds)
         }
+        return resolveExplicitTargetSeeds(projectId, seedTargets, seenNodeIds)
+    }
 
-        for (target in seedTargets) {
-            val clean = target.removePrefix("./").replace('\\', '/')
-            val direct = store.getNode(projectId, clean)
-            if (direct != null && seenNodeIds.add(direct.nodeId)) {
-                resolved.add(direct)
-                continue
-            }
-            if (clean.contains('/') || clean.contains('.')) {
-                val fileNodes = store.getNodesForFile(projectId, clean)
-                for (fn in fileNodes) {
-                    if (fn.isTopLevel && seenNodeIds.add(fn.nodeId)) {
-                        resolved.add(fn)
-                    }
-                }
-            } else {
-                val matches = store.searchNodes(projectId, clean, limit = 3)
-                for (m in matches) {
-                    if (seenNodeIds.add(m.nodeId)) {
-                        resolved.add(m)
-                    }
-                }
+    private fun resolveNaturalPromptSeeds(projectId: String, prompt: String, seenNodeIds: MutableSet<String>): List<GraphNode> {
+        val resolved = mutableListOf<GraphNode>()
+        for (token in tokenizePrompt(prompt)) {
+            resolveTokenSeeds(projectId, token, seenNodeIds, resolved)
+        }
+        val phraseMatches = store.searchNodes(projectId, prompt, limit = 4)
+        for (p in phraseMatches) {
+            if (seenNodeIds.add(p.nodeId)) {
+                resolved.add(p)
             }
         }
         return resolved
+    }
+
+    private fun resolveTokenSeeds(projectId: String, token: String, seenNodeIds: MutableSet<String>, resolved: MutableList<GraphNode>) {
+        val direct = store.getNode(projectId, token)
+        if (direct != null && seenNodeIds.add(direct.nodeId)) {
+            resolved.add(direct)
+        }
+        val partials = store.searchNodes(projectId, token, limit = 3)
+        for (p in partials) {
+            if (seenNodeIds.add(p.nodeId)) {
+                resolved.add(p)
+            }
+        }
+    }
+
+    private fun resolveExplicitTargetSeeds(projectId: String, seedTargets: List<String>, seenNodeIds: MutableSet<String>): List<GraphNode> {
+        val resolved = mutableListOf<GraphNode>()
+        for (target in seedTargets) {
+            resolveSingleTargetSeed(projectId, target, seenNodeIds, resolved)
+        }
+        return resolved
+    }
+
+    private fun resolveSingleTargetSeed(projectId: String, target: String, seenNodeIds: MutableSet<String>, resolved: MutableList<GraphNode>) {
+        val clean = target.removePrefix("./").replace('\\', '/')
+        val direct = store.getNode(projectId, clean)
+        if (direct != null && seenNodeIds.add(direct.nodeId)) {
+            resolved.add(direct)
+            return
+        }
+        if (clean.contains('/') || clean.contains('.')) {
+            resolveFileSeeds(projectId, clean, seenNodeIds, resolved)
+        } else {
+            resolveFuzzySeeds(projectId, clean, seenNodeIds, resolved)
+        }
+    }
+
+    private fun resolveFileSeeds(projectId: String, clean: String, seenNodeIds: MutableSet<String>, resolved: MutableList<GraphNode>) {
+        val fileNodes = store.getNodesForFile(projectId, clean)
+        for (fn in fileNodes) {
+            if (fn.isTopLevel && seenNodeIds.add(fn.nodeId)) {
+                resolved.add(fn)
+            }
+        }
+    }
+
+    private fun resolveFuzzySeeds(projectId: String, clean: String, seenNodeIds: MutableSet<String>, resolved: MutableList<GraphNode>) {
+        val matches = store.searchNodes(projectId, clean, limit = 3)
+        for (m in matches) {
+            if (seenNodeIds.add(m.nodeId)) {
+                resolved.add(m)
+            }
+        }
     }
 
     private fun buildCallHierarchy(projectId: String, primaryNodes: List<GraphNode>): List<String> {
@@ -281,23 +312,28 @@ class ArchitectContextEngine(
     ): String {
         val sb = StringBuilder()
         sb.append("# Architect Context: ").append(seedTargets.firstOrNull() ?: projectId).append("\n\n")
+        appendConcurrencyBoundarySection(sb, scopeFiles, scopeModules, architecture, aciScore, isFastPath, collidingPlans, godNodesTouched)
+        appendSkeletonsSection(sb, skeletons)
+        appendCallHierarchySection(sb, callHierarchy)
+        return sb.toString().trimEnd()
+    }
 
+    private fun appendConcurrencyBoundarySection(
+        sb: StringBuilder,
+        scopeFiles: List<String>,
+        scopeModules: List<String>,
+        architecture: List<String>,
+        aciScore: Double,
+        isFastPath: Boolean,
+        collidingPlans: List<String>,
+        godNodesTouched: List<String>
+    ) {
         sb.append("## 1. 3D Concurrency Boundary\n")
-        sb.append("- **Files (").append(scopeFiles.size).append(")**: ")
-        if (scopeFiles.isNotEmpty()) {
-            sb.append(scopeFiles.take(12).joinToString(", "))
-            if (scopeFiles.size > 12) sb.append(" (and ").append(scopeFiles.size - 12).append(" more)")
-        } else {
-            sb.append("None")
-        }
-        sb.append("\n")
-
+        appendBoundaryFiles(sb, scopeFiles)
         sb.append("- **Modules (").append(scopeModules.size).append(")**: ")
         sb.append(if (scopeModules.isNotEmpty()) scopeModules.joinToString(", ") else "root").append("\n")
-
         sb.append("- **Semiotic / Arch Layers**: ")
         sb.append(if (architecture.isNotEmpty()) architecture.joinToString(", ") else "unclassified").append("\n")
-
         sb.append("- **ACI Complexity Score**: ").append(aciScore)
         sb.append(" (Fast Path: ").append(if (isFastPath) "YES <= 5.0" else "NO -> Multi-Agent Swarm").append(")\n")
 
@@ -311,21 +347,32 @@ class ArchitectContextEngine(
             sb.append("- **God Nodes Touched**: ").append(godNodesTouched.joinToString(", ")).append("\n")
         }
         sb.append("\n")
+    }
 
-        if (skeletons.isNotEmpty()) {
-            sb.append("## 2. Core Symbol Structural Skeletons\n")
-            for (sk in skeletons) {
-                sb.append("```\n").append(sk).append("\n```\n\n")
-            }
+    private fun appendBoundaryFiles(sb: StringBuilder, scopeFiles: List<String>) {
+        sb.append("- **Files (").append(scopeFiles.size).append(")**: ")
+        if (scopeFiles.isNotEmpty()) {
+            sb.append(scopeFiles.take(12).joinToString(", "))
+            if (scopeFiles.size > 12) sb.append(" (and ").append(scopeFiles.size - 12).append(" more)")
+        } else {
+            sb.append("None")
         }
+        sb.append("\n")
+    }
 
-        if (callHierarchy.isNotEmpty()) {
-            sb.append("## 3. Call Hierarchy\n")
-            callHierarchy.forEach { sb.append(it).append("\n") }
-            sb.append("\n")
+    private fun appendSkeletonsSection(sb: StringBuilder, skeletons: List<String>) {
+        if (skeletons.isEmpty()) return
+        sb.append("## 2. Core Symbol Structural Skeletons\n")
+        for (sk in skeletons) {
+            sb.append("```\n").append(sk).append("\n```\n\n")
         }
+    }
 
-        return sb.toString().trimEnd()
+    private fun appendCallHierarchySection(sb: StringBuilder, callHierarchy: List<String>) {
+        if (callHierarchy.isEmpty()) return
+        sb.append("## 3. Call Hierarchy\n")
+        callHierarchy.forEach { sb.append(it).append("\n") }
+        sb.append("\n")
     }
 
     private fun buildSpilloverSummary(

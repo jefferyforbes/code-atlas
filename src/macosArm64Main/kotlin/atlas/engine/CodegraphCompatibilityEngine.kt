@@ -146,35 +146,44 @@ class CodegraphCompatibilityEngine(
         val sb = StringBuilder()
         sb.append("// line ").append(node.startLine).append(" [").append(node.kind).append("]\n")
         if (node.kind == "class" || node.kind == "interface" || node.kind == "object" || node.kind == "struct") {
-            val header = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}"
-            sb.append(header)
-            if (!header.endsWith("{") && !header.endsWith(":")) {
-                sb.append(" {")
-            }
-            sb.append("\n")
-
-            val fileNodes = store.getNodesForFile(projectId, fileRelPath)
-            val members = fileNodes.filter { m ->
-                m.startLine > node.startLine && m.endLine <= node.endLine &&
-                    m.nodeId != node.nodeId &&
-                    (m.kind == "method" || m.kind == "function" || m.kind == "property" || m.kind == "field")
-            }
-
-            for (m in members.take(6)) {
-                val sig = if (m.signature.isNotEmpty()) m.signature else "${m.kind} ${m.name}"
-                sb.append("  ").append(sig).append("\n")
-            }
-            if (members.size > 6) {
-                sb.append("  // ... and ").append(members.size - 6).append(" more members\n")
-            }
-            if (header.endsWith("{") || !header.endsWith(":")) {
-                sb.append("}")
-            }
+            formatClassSkeleton(projectId, node, fileRelPath, sb)
         } else {
             val sig = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}()"
             sb.append(sig)
         }
         return sb.toString().trimEnd()
+    }
+
+    private fun formatClassSkeleton(projectId: String, node: GraphNode, fileRelPath: String, sb: StringBuilder) {
+        val header = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}"
+        sb.append(header)
+        if (!header.endsWith("{") && !header.endsWith(":")) {
+            sb.append(" {")
+        }
+        sb.append("\n")
+
+        appendMemberSignatures(projectId, node, fileRelPath, sb)
+
+        if (header.endsWith("{") || !header.endsWith(":")) {
+            sb.append("}")
+        }
+    }
+
+    private fun appendMemberSignatures(projectId: String, node: GraphNode, fileRelPath: String, sb: StringBuilder) {
+        val fileNodes = store.getNodesForFile(projectId, fileRelPath)
+        val members = fileNodes.filter { m ->
+            m.startLine > node.startLine && m.endLine <= node.endLine &&
+                m.nodeId != node.nodeId &&
+                (m.kind == "method" || m.kind == "function" || m.kind == "property" || m.kind == "field")
+        }
+
+        for (m in members.take(6)) {
+            val sig = if (m.signature.isNotEmpty()) m.signature else "${m.kind} ${m.name}"
+            sb.append("  ").append(sig).append("\n")
+        }
+        if (members.size > 6) {
+            sb.append("  // ... and ").append(members.size - 6).append(" more members\n")
+        }
     }
 
     private fun appendCallRelationships(projectId: String, sb: StringBuilder, matchedNodes: List<GraphNode>) {
