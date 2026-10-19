@@ -1326,4 +1326,94 @@ $tq
         assertNotNull(enterNode)
         assertEquals("context.py:ResourceContext.__enter__", enterNode.qualifiedName)
     }
+
+    @Test
+    fun testDelegationCallsPreservedAcrossLanguages() {
+        // 1. Kotlin
+        val ktCode = """
+            package atlas.sample
+            class Proxy(val delegate: Service) {
+                fun execute() {
+                    delegate.execute()
+                    this.execute()
+                }
+            }
+        """.trimIndent()
+        val (ktNodes, ktEdges) = PolyglotAstExtractor.extractFile("proj", "Proxy.kt", ktCode)
+        val ktExecNode = ktNodes.first { it.name == "execute" }
+        val ktCalls = ktEdges.filter { it.sourceNodeId == ktExecNode.nodeId && it.edgeType == "CALLS" }
+        assertTrue(ktCalls.any { it.targetNodeId == "sym:Service.execute" || it.targetNodeId == "sym:delegate.execute" }, "Kotlin delegation call must be preserved")
+        assertFalse(ktCalls.any { it.targetNodeId == "sym:this.execute" || it.targetNodeId == "sym:execute" }, "Kotlin self recursion must not be added")
+
+        // 2. Swift
+        val swiftCode = """
+            class SwiftProxy {
+                func process() {
+                    delegate.process()
+                    self.process()
+                }
+            }
+        """.trimIndent()
+        val (swiftNodes, swiftEdges) = PolyglotAstExtractor.extractFile("proj", "Proxy.swift", swiftCode)
+        val swiftExecNode = swiftNodes.first { it.name == "process" }
+        val swiftCalls = swiftEdges.filter { it.sourceNodeId == swiftExecNode.nodeId && it.edgeType == "CALLS" }
+        assertTrue(swiftCalls.any { it.targetNodeId == "sym:delegate.process" }, "Swift delegation call must be preserved")
+        assertFalse(swiftCalls.any { it.targetNodeId == "sym:self.process" || it.targetNodeId == "sym:process" }, "Swift self recursion must not be added")
+
+        // 3. TypeScript
+        val tsCode = """
+            class TsProxy {
+                run() {
+                    backend.run();
+                    this.run();
+                }
+            }
+        """.trimIndent()
+        val (tsNodes, tsEdges) = PolyglotAstExtractor.extractFile("proj", "Proxy.ts", tsCode)
+        val tsExecNode = tsNodes.first { it.name == "run" }
+        val tsCalls = tsEdges.filter { it.sourceNodeId == tsExecNode.nodeId && it.edgeType == "CALLS" }
+        assertTrue(tsCalls.any { it.targetNodeId == "sym:backend.run" }, "TypeScript delegation call must be preserved")
+        assertFalse(tsCalls.any { it.targetNodeId == "sym:this.run" || it.targetNodeId == "sym:run" }, "TypeScript self recursion must not be added")
+
+        // 4. Rust
+        val rustCode = """
+            impl RustProxy {
+                fn compute(&self) {
+                    inner.compute();
+                    self.compute();
+                }
+            }
+        """.trimIndent()
+        val (rustNodes, rustEdges) = PolyglotAstExtractor.extractFile("proj", "proxy.rs", rustCode)
+        val rustExecNode = rustNodes.first { it.name == "compute" }
+        val rustCalls = rustEdges.filter { it.sourceNodeId == rustExecNode.nodeId && it.edgeType == "CALLS" }
+        assertTrue(rustCalls.any { it.targetNodeId == "sym:inner::compute" }, "Rust delegation call must be preserved")
+        assertFalse(rustCalls.any { it.targetNodeId == "sym:self::compute" || it.targetNodeId == "sym:compute" }, "Rust self recursion must not be added")
+
+        // 5. C++
+        val cppCode = """
+            void handle() {
+                service.handle();
+                this.handle();
+            }
+        """.trimIndent()
+        val (cppNodes, cppEdges) = PolyglotAstExtractor.extractFile("proj", "proxy.cpp", cppCode)
+        val cppExecNode = cppNodes.first { it.name == "handle" }
+        val cppCalls = cppEdges.filter { it.sourceNodeId == cppExecNode.nodeId && it.edgeType == "CALLS" }
+        assertTrue(cppCalls.any { it.targetNodeId == "sym:service::handle" }, "C++ delegation call must be preserved")
+        assertFalse(cppCalls.any { it.targetNodeId == "sym:this::handle" || it.targetNodeId == "sym:handle" }, "C++ self recursion must not be added")
+
+        // 6. Python
+        val pyCode = """
+            class PyProxy:
+                def fetch(self):
+                    backend.fetch()
+                    self.fetch()
+        """.trimIndent()
+        val (pyNodes, pyEdges) = PolyglotAstExtractor.extractFile("proj", "proxy.py", pyCode)
+        val pyExecNode = pyNodes.first { it.name == "fetch" }
+        val pyCalls = pyEdges.filter { it.sourceNodeId == pyExecNode.nodeId && it.edgeType == "CALLS" }
+        assertTrue(pyCalls.any { it.targetNodeId == "sym:backend.fetch" }, "Python delegation call must be preserved")
+        assertFalse(pyCalls.any { it.targetNodeId == "sym:self.fetch" || it.targetNodeId == "sym:fetch" }, "Python self recursion must not be added")
+    }
 }

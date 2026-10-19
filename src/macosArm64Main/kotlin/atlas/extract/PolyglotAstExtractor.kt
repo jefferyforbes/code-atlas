@@ -1676,7 +1676,8 @@ class PolyglotAstExtractor {
                         !receiver.isNullOrEmpty() -> "CALL_RECEIVER:$receiver"
                         else -> "INFERRED_CALL"
                     }
-                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
+                    val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
+                    if (!isSelfCall && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
                             edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
@@ -1793,7 +1794,8 @@ class PolyglotAstExtractor {
                     val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
                     val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
-                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
+                    val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "self")
+                    if (!isSelfCall && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
                             edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
@@ -1957,7 +1959,8 @@ class PolyglotAstExtractor {
                     val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
                     val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
-                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
+                    val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
+                    if (!isSelfCall && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
                             edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
@@ -2073,7 +2076,8 @@ class PolyglotAstExtractor {
                     val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
                     val targetSym = if (callee == "new" && !receiver.isNullOrEmpty()) receiver else if (!receiver.isNullOrEmpty()) "$receiver::$callee" else callee
-                    if (targetSym != node.name && targetSym !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
+                    val isSelfCall = targetSym == node.name || (callee == node.name && (receiver.isNullOrEmpty() || receiver == "self"))
+                    if (!isSelfCall && targetSym !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
                             edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
@@ -2242,7 +2246,8 @@ class PolyglotAstExtractor {
                     val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
                     val targetSym = if (!receiver.isNullOrEmpty()) "$receiver::$callee" else callee
-                    if (callee != node.name && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
+                    val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
+                    if (!isSelfCall && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
                         val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
                             edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
@@ -2382,7 +2387,8 @@ class PolyglotAstExtractor {
                     val receiver = callMatch.groups["receiver"]?.value?.trim()
                     val callee = callMatch.groups["callee"]?.value ?: continue
                     val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
-                    if (callee != node.name && callee !in CALL_STOPWORDS && !callee.startsWith("_") && seenCallees.add(targetSym)) {
+                    val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "self")
+                    if (!isSelfCall && callee !in CALL_STOPWORDS && !callee.startsWith("_") && seenCallees.add(targetSym)) {
                         val callLine = scanStartLine + body.substring(0, callMatch.range.first).count { it == '\n' }
                         edges.add(GraphEdge(
                             edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,

@@ -105,4 +105,21 @@ class WorkspaceInitEngineTest {
             PlatformFiles.deleteRecursively(tempDir)
         }
     }
+
+    @Test
+    fun testHookScriptIncludesArchitectureAndComplexityChecks() {
+        val tempDir = "/tmp/atlas_init_arch_comp_${Random.nextInt(100000, 999999)}"
+        PlatformFiles.mkdirs("$tempDir/.git")
+        try {
+            val engine = WorkspaceInitEngine(tempDir)
+            val res = engine.initHook(project = "test-proj", dryRun = true, threshold = 15)
+            assertTrue(res.success)
+            assertNotNull(res.scriptContent)
+            val script = res.scriptContent
+            assertTrue(script.contains("audit --workspace . --project test-proj 2>&1"), "Hook must run architectural audit")
+            assertTrue(script.contains("audit --workspace . --project test-proj --complexity --threshold 15 2>&1"), "Hook must run complexity audit")
+        } finally {
+            PlatformFiles.deleteRecursively(tempDir)
+        }
+    }
 }

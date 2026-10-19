@@ -152,8 +152,15 @@ class WorkspaceInitEngine(val workspaceRoot: String) {
             |
             |# 4. Run architectural & complexity audit
             |set +e
-            |AUDIT_OUTPUT=${'$'}("${'$'}ATLAS_BIN" audit --workspace . --project $project --complexity --threshold $threshold 2>&1)
+            |AUDIT_OUTPUT=${'$'}("${'$'}ATLAS_BIN" audit --workspace . --project $project 2>&1)
             |AUDIT_EXIT=${'$'}?
+            |if [ ${'$'}AUDIT_EXIT -eq 0 ]; then
+            |    COMPLEXITY_OUTPUT=${'$'}("${'$'}ATLAS_BIN" audit --workspace . --project $project --complexity --threshold $threshold 2>&1)
+            |    AUDIT_EXIT=${'$'}?
+            |    if [ ${'$'}AUDIT_EXIT -ne 0 ]; then
+            |        AUDIT_OUTPUT="${'$'}COMPLEXITY_OUTPUT"
+            |    fi
+            |fi
             |set -e
             |
             |if [ ${'$'}AUDIT_EXIT -ne 0 ]; then
