@@ -14,147 +14,220 @@ object VaultPlanBridge {
     private val MARKDOWN_URL_RE = Regex("""\[[^\]]*\]\(([^)\s]+)\)""")
     private val BARE_ROUTE_BACKTICK_RE = Regex("""`(/[A-Za-z0-9_./:{}$<>-]+)`""")
 
+    private val SLASH_IN_DESC_RE = Regex("""(?:^|[^a-zA-Z0-9_./])\/([a-z][a-z0-9_-]{1,30})""")
+    private val TRIGGERED_PATTERN_RE = Regex("""(?i)triggered(?:\s+natively)?\s+by\s+([^.\n]+)""")
+    private val SLASH_COMMAND_RE = Regex("""\/([a-z][a-z0-9_-]{1,30})""")
+
     fun extractMarkdownAndPlans(
         projectId: String,
         relPath: String,
         markdownText: String,
         indexedNodes: List<GraphNode>
     ): Pair<List<GraphNode>, List<GraphEdge>> {
+        return MarkdownPlanExtractor(projectId, relPath, markdownText, indexedNodes).extract()
+    }
+
+    private class MarkdownPlanExtractor(
+        val projectId: String,
+        val relPath: String,
+        val markdownText: String,
+        val indexedNodes: List<GraphNode>
+    ) {
         val fileId = "$projectId:$relPath"
         val normRel = relPath.replace('\\', '/')
         val isPlan = normRel.startsWith("plans/") || normRel.contains("/plans/")
-        val isSkill = normRel.endsWith("/SKILL.md", ignoreCase = true) ||
-            normRel.equals("SKILL.md", ignoreCase = true) ||
-            (normRel.contains("skills/") && !normRel.contains("/references/") && !normRel.contains("/scripts/") && !normRel.contains("/examples/") && !normRel.contains("/resources/") && (normRel.endsWith("/SKILL.md", ignoreCase = true) || (normRel.endsWith(".md") && !normRel.substringAfter("skills/").contains("/"))))
-
+        val isSkill = isSkillPath(normRel)
         val stem = normRel.substringAfterLast('/').substringBeforeLast('.')
-        val nodeKind = if (isSkill) "skill" else if (isPlan) "plan_contract" else "obsidian_note"
-
-        val nameVal = extractFrontmatterScalar(markdownText, "name")
-        val skillName = if (isSkill) {
-            nameVal.ifEmpty { normRel.substringBeforeLast("/SKILL.md", "").substringAfterLast('/').ifEmpty { stem } }
-        } else ""
-
-        val docNodeId = if (isSkill) "$projectId:skill#$skillName" else "$fileId#$stem"
-
-        val statusVal = extractFrontmatterScalar(markdownText, "status").ifEmpty { "active" }
-        val descVal = extractFrontmatterScalar(markdownText, "description")
-        val docNode = GraphNode(
-            nodeId = docNodeId,
-            projectId = projectId,
-            fileId = fileId,
-            name = if (isSkill) skillName else stem,
-            qualifiedName = if (isSkill) "skill#$skillName" else normRel,
-            kind = nodeKind,
-            signature = when {
-                isSkill -> if (descVal.isNotEmpty()) "skill ($skillName): $descVal" else "skill: $normRel"
-                else -> "$nodeKind ($statusVal): $normRel"
-            },
-            startLine = 1,
-            endLine = markdownText.lines().size.coerceAtLeast(1),
-            moduleId = when {
-                isSkill -> "skills"
-                isPlan -> "plans"
-                else -> "vault"
-            },
-            sourceSet = "docs",
-            semioticLayer = when {
-                isSkill -> "pragmatic"
-                isPlan -> "syntactic"
-                else -> "semantic"
-            },
-            archLayer = "infrastructure",
-            description = if (isSkill && descVal.isNotEmpty()) descVal else null
-        )
-
-        val docNodes = mutableListOf<GraphNode>()
-        docNodes.add(docNode)
-
-        val byName = mutableMapOf<String, GraphNode>()
-        val byRelFile = mutableMapOf<String, MutableList<GraphNode>>()
-        for (node in indexedNodes) {
-            if (node.projectId != projectId) continue
-            if (!byName.containsKey(node.name)) {
-                byName[node.name] = node
-            }
-            val nodeRel = node.fileId.substringAfter(':')
-            byRelFile.getOrPut(nodeRel) { mutableListOf() }.add(node)
+        val nodeKind = when {
+            isSkill -> "skill"
+            isPlan -> "plan_contract"
+            else -> "obsidian_note"
         }
 
+        val nameVal = extractFrontmatterScalar(markdownText, "name")
+        val skillName = resolveSkillName()
+        val docNodeId = if (isSkill) "$projectId:skill#$skillName" else "$fileId#$stem"
+        val descVal = extractFrontmatterScalar(markdownText, "description")
+
+        val docNodes = mutableListOf<GraphNode>()
         val edges = mutableListOf<GraphEdge>()
         val seenEdges = mutableSetOf<String>()
 
-        val fmTags = extractFrontmatterTags(markdownText)
-        val inlineTags = extractSanitizedInlineTags(markdownText)
-        val allTags = mutableMapOf<String, Int>()
-        for (t in fmTags) {
-            if (t.isNotEmpty() && !allTags.containsKey(t)) {
-                allTags[t] = 1
-            }
+        val byName = mutableMapOf<String, GraphNode>()
+        val byRelFile = mutableMapOf<String, MutableList<GraphNode>>()
+
+        fun extract(): Pair<List<GraphNode>, List<GraphEdge>> {
+            docNodes.add(buildDocNode())
+            indexLookupMaps()
+            extractTags()
+            extractSkillCommands()
+            extractPlanScopes()
+            extractWikilinks()
+            extractBacktickCodeSpans()
+            extractMarkdownUrls()
+            extractBareRoutes()
+            return Pair(docNodes, edges)
         }
-        for ((t, lineNo) in inlineTags) {
-            if (t.isNotEmpty() && !allTags.containsKey(t)) {
-                allTags[t] = lineNo
+
+        private fun isSkillPath(path: String): Boolean {
+            if (path.endsWith("/SKILL.md", ignoreCase = true) || path.equals("SKILL.md", ignoreCase = true)) {
+                return true
+            }
+            if (!path.contains("skills/")) return false
+            val excluded = setOf("/references/", "/scripts/", "/examples/", "/resources/")
+            if (excluded.any { path.contains(it) }) return false
+            val after = path.substringAfter("skills/")
+            return path.endsWith("/SKILL.md", ignoreCase = true) || (path.endsWith(".md") && !after.contains("/"))
+        }
+
+        private fun resolveSkillName(): String {
+            if (!isSkill) return ""
+            if (nameVal.isNotEmpty()) return nameVal
+            val before = normRel.substringBeforeLast("/SKILL.md", "").substringAfterLast('/')
+            return before.ifEmpty { stem }
+        }
+
+        private fun computeDocSignature(statusVal: String): String {
+            return when {
+                isSkill -> if (descVal.isNotEmpty()) "skill ($skillName): $descVal" else "skill: $normRel"
+                else -> "$nodeKind ($statusVal): $normRel"
             }
         }
 
-        for ((cleanTag, lineNo) in allTags) {
-            val tagNodeId = "$projectId:tag#$cleanTag"
-            docNodes.add(
-                GraphNode(
-                    nodeId = tagNodeId,
+        private fun computeDocModule(): String {
+            return when {
+                isSkill -> "skills"
+                isPlan -> "plans"
+                else -> "vault"
+            }
+        }
+
+        private fun computeDocSemioticLayer(): String {
+            return when {
+                isSkill -> "pragmatic"
+                isPlan -> "syntactic"
+                else -> "semantic"
+            }
+        }
+
+        private fun buildDocNode(): GraphNode {
+            val statusVal = extractFrontmatterScalar(markdownText, "status").ifEmpty { "active" }
+            return GraphNode(
+                nodeId = docNodeId,
+                projectId = projectId,
+                fileId = fileId,
+                name = if (isSkill) skillName else stem,
+                qualifiedName = if (isSkill) "skill#$skillName" else normRel,
+                kind = nodeKind,
+                signature = computeDocSignature(statusVal),
+                startLine = 1,
+                endLine = markdownText.lines().size.coerceAtLeast(1),
+                moduleId = computeDocModule(),
+                sourceSet = "docs",
+                semioticLayer = computeDocSemioticLayer(),
+                archLayer = "infrastructure",
+                description = if (isSkill && descVal.isNotEmpty()) descVal else null
+            )
+        }
+
+        private fun indexLookupMaps() {
+            for (node in indexedNodes) {
+                if (node.projectId != projectId) continue
+                if (!byName.containsKey(node.name)) {
+                    byName[node.name] = node
+                }
+                val nodeRel = node.fileId.substringAfter(':')
+                byRelFile.getOrPut(nodeRel) { mutableListOf() }.add(node)
+            }
+        }
+
+        private fun emitEdge(
+            edgeId: String,
+            targetId: String,
+            edgeType: String,
+            provenance: String,
+            confidence: Double,
+            lineNumber: Int,
+            sourceId: String = docNodeId
+        ): Boolean {
+            if (!seenEdges.add(edgeId)) return false
+            edges.add(
+                GraphEdge(
+                    edgeId = edgeId,
                     projectId = projectId,
-                    fileId = fileId,
-                    name = cleanTag,
-                    qualifiedName = "tag#$cleanTag",
-                    kind = "tag",
-                    signature = "tag: #$cleanTag",
-                    startLine = lineNo,
-                    endLine = lineNo,
-                    moduleId = "tags",
-                    sourceSet = "docs",
-                    semioticLayer = "semantic",
-                    archLayer = "infrastructure"
+                    sourceNodeId = sourceId,
+                    targetNodeId = targetId,
+                    edgeType = edgeType,
+                    provenance = provenance,
+                    confidence = confidence,
+                    lineNumber = lineNumber
                 )
             )
-            val eid = "$docNodeId:tagged:$tagNodeId"
-            if (seenEdges.add(eid)) {
-                edges.add(
-                    GraphEdge(
-                        edgeId = eid,
+            return true
+        }
+
+        private fun emitUrlRefEdge(targetId: String, lineNo: Int) {
+            emitEdge("$docNodeId:urlref:$targetId:$lineNo", targetId, "URL_REFS", "EXTRACTED_URL", 1.0, lineNo)
+        }
+
+        private fun lineNumberAt(charIndex: Int): Int {
+            return markdownText.take(charIndex).count { it == '\n' } + 1
+        }
+
+        private fun extractTags() {
+            val allTags = mutableMapOf<String, Int>()
+            for (t in extractFrontmatterTags(markdownText)) {
+                if (t.isNotEmpty() && !allTags.containsKey(t)) allTags[t] = 1
+            }
+            for ((t, lineNo) in extractSanitizedInlineTags(markdownText)) {
+                if (t.isNotEmpty() && !allTags.containsKey(t)) allTags[t] = lineNo
+            }
+            for ((cleanTag, lineNo) in allTags) {
+                val tagNodeId = "$projectId:tag#$cleanTag"
+                docNodes.add(
+                    GraphNode(
+                        nodeId = tagNodeId,
                         projectId = projectId,
-                        sourceNodeId = docNodeId,
-                        targetNodeId = tagNodeId,
-                        edgeType = "TAGGED_WITH",
-                        provenance = "EXTRACTED_TAG",
-                        confidence = 1.0,
-                        lineNumber = lineNo
+                        fileId = fileId,
+                        name = cleanTag,
+                        qualifiedName = "tag#$cleanTag",
+                        kind = "tag",
+                        signature = "tag: #$cleanTag",
+                        startLine = lineNo,
+                        endLine = lineNo,
+                        moduleId = "tags",
+                        sourceSet = "docs",
+                        semioticLayer = "semantic",
+                        archLayer = "infrastructure"
                     )
                 )
+                emitEdge("$docNodeId:tagged:$tagNodeId", tagNodeId, "TAGGED_WITH", "EXTRACTED_TAG", 1.0, lineNo)
             }
         }
 
-        if (isSkill) {
-            val cmdSet = mutableSetOf<String>()
-            if (skillName.isNotEmpty()) {
-                cmdSet.add(skillName)
-            }
-            if (descVal.isNotEmpty()) {
-                val slashInDesc = Regex("""(?:^|[^a-zA-Z0-9_./])\/([a-z][a-z0-9_-]{1,30})""")
-                for (m in slashInDesc.findAll(descVal)) {
+        private fun collectTriggeredCommands(cmdSet: MutableSet<String>) {
+            for (match in TRIGGERED_PATTERN_RE.findAll(markdownText)) {
+                for (m in SLASH_COMMAND_RE.findAll(match.groupValues[1])) {
                     cmdSet.add(m.groupValues[1])
                 }
             }
-            val triggeredPattern = Regex("""(?i)triggered(?:\s+natively)?\s+by\s+([^.\n]+)""")
-            for (match in triggeredPattern.findAll(markdownText)) {
-                val textClause = match.groupValues[1]
-                val slashInClause = Regex("""\/([a-z][a-z0-9_-]{1,30})""")
-                for (m in slashInClause.findAll(textClause)) {
-                    cmdSet.add(m.groupValues[1])
-                }
-            }
+        }
 
-            for (cmd in cmdSet) {
+        private fun collectSkillCommandNames(): Set<String> {
+            val cmdSet = mutableSetOf<String>()
+            if (skillName.isNotEmpty()) cmdSet.add(skillName)
+            if (descVal.isNotEmpty()) {
+                for (m in SLASH_IN_DESC_RE.findAll(descVal)) {
+                    cmdSet.add(m.groupValues[1])
+                }
+            }
+            collectTriggeredCommands(cmdSet)
+            return cmdSet
+        }
+
+        private fun extractSkillCommands() {
+            if (!isSkill) return
+            for (cmd in collectSkillCommandNames()) {
                 val cleanCmd = cmd.removePrefix("/").trim()
                 if (cleanCmd.isEmpty()) continue
                 val cmdNodeId = "$projectId:cmd#/$cleanCmd"
@@ -175,187 +248,143 @@ object VaultPlanBridge {
                         archLayer = "infrastructure"
                     )
                 )
-                val eid = "$cmdNodeId:triggers:$docNodeId"
-                if (seenEdges.add(eid)) {
-                    edges.add(
-                        GraphEdge(
-                            edgeId = eid,
-                            projectId = projectId,
-                            sourceNodeId = cmdNodeId,
-                            targetNodeId = docNodeId,
-                            edgeType = "TRIGGERS_SKILL",
-                            provenance = "EXTRACTED_COMMAND",
-                            confidence = 1.0,
-                            lineNumber = 1
-                        )
-                    )
-                }
-            }
-        }
-
-        if (isPlan) {
-            val scopedFiles = extractScopedFiles(markdownText)
-            scopedFiles.forEachIndexed { idx, scopedFile ->
-                val cleanF = scopedFile.trim().trim('\'', '"').removePrefix("./")
-                val matchedNodes = when {
-                    cleanF.contains('*') || cleanF.contains('?') -> {
-                        val globRe = globToRegex(cleanF)
-                        byRelFile.filterKeys { rel -> globRe.matches(rel) }.values.flatten()
-                    }
-                    cleanF.endsWith('/') -> {
-                        byRelFile.filterKeys { rel -> rel.startsWith(cleanF) }.values.flatten()
-                    }
-                    else -> {
-                        byRelFile[cleanF] ?: byRelFile[cleanF.substringAfterLast('/')] ?: emptyList()
-                    }
-                }
-                for (targetNode in matchedNodes) {
-                    val eid = "$docNodeId:scopes:${targetNode.nodeId}"
-                    if (seenEdges.add(eid)) {
-                        edges.add(
-                            GraphEdge(
-                                edgeId = eid,
-                                projectId = projectId,
-                                sourceNodeId = docNodeId,
-                                targetNodeId = targetNode.nodeId,
-                                edgeType = "PLAN_SCOPES_FILE",
-                                provenance = "EXTRACTED_PLAN",
-                                confidence = 1.0,
-                                lineNumber = idx + 1
-                            )
-                        )
-                    }
-                }
-            }
-        }
-
-        for (match in WIKILINK_RE.findAll(markdownText)) {
-            val targetTitle = match.groupValues[1].trim()
-            val targetStem = targetTitle.substringAfterLast('/').substringBeforeLast('.')
-            val lineNo = markdownText.take(match.range.first).count { it == '\n' } + 1
-            val targetNode = byName[targetStem] ?: byName[targetTitle]
-            val targetId = targetNode?.nodeId ?: "$projectId:vault_ref#$targetStem"
-            val eid = "$docNodeId:wiki:$targetId:$lineNo"
-            if (seenEdges.add(eid)) {
-                edges.add(
-                    GraphEdge(
-                        edgeId = eid,
-                        projectId = projectId,
-                        sourceNodeId = docNodeId,
-                        targetNodeId = targetId,
-                        edgeType = "WIKILINK_REFS",
-                        provenance = "EXTRACTED_WIKILINK",
-                        confidence = 1.0,
-                        lineNumber = lineNo
-                    )
+                emitEdge(
+                    edgeId = "$cmdNodeId:triggers:$docNodeId",
+                    targetId = docNodeId,
+                    edgeType = "TRIGGERS_SKILL",
+                    provenance = "EXTRACTED_COMMAND",
+                    confidence = 1.0,
+                    lineNumber = 1,
+                    sourceId = cmdNodeId
                 )
             }
         }
 
-        for (match in BACKTICK_SPAN_RE.findAll(markdownText)) {
-            val rawToken = match.groupValues[1].trim()
-            val lineNo = markdownText.take(match.range.first).count { it == '\n' } + 1
-            val symCandidate = rawToken.substringAfterLast("::").substringAfterLast('#').trimEnd('(', ')')
-            val targetNode = byName[symCandidate] ?: byName[symCandidate.substringAfterLast('.')]
-            if (targetNode != null) {
-                val eid = "$docNodeId:codespan:${targetNode.nodeId}:$lineNo"
-                if (seenEdges.add(eid)) {
-                    edges.add(
-                        GraphEdge(
-                            edgeId = eid,
-                            projectId = projectId,
-                            sourceNodeId = docNodeId,
-                            targetNodeId = targetNode.nodeId,
-                            edgeType = "CODE_SPAN_REFS",
-                            provenance = "INFERRED_CODE_SPAN",
-                            confidence = 0.9,
-                            lineNumber = lineNo
-                        )
+        private fun resolveScopedNodes(cleanF: String): List<GraphNode> {
+            return when {
+                cleanF.contains('*') || cleanF.contains('?') -> {
+                    val globRe = globToRegex(cleanF)
+                    byRelFile.filterKeys { rel -> globRe.matches(rel) }.values.flatten()
+                }
+                cleanF.endsWith('/') -> {
+                    byRelFile.filterKeys { rel -> rel.startsWith(cleanF) }.values.flatten()
+                }
+                else -> {
+                    byRelFile[cleanF] ?: byRelFile[cleanF.substringAfterLast('/')] ?: emptyList()
+                }
+            }
+        }
+
+        private fun extractPlanScopes() {
+            if (!isPlan) return
+            val scopedFiles = extractScopedFiles(markdownText)
+            scopedFiles.forEachIndexed { idx, scopedFile ->
+                val cleanF = scopedFile.trim().trim('\'', '"').removePrefix("./")
+                for (targetNode in resolveScopedNodes(cleanF)) {
+                    emitEdge(
+                        edgeId = "$docNodeId:scopes:${targetNode.nodeId}",
+                        targetId = targetNode.nodeId,
+                        edgeType = "PLAN_SCOPES_FILE",
+                        provenance = "EXTRACTED_PLAN",
+                        confidence = 1.0,
+                        lineNumber = idx + 1
                     )
                 }
             }
         }
 
-        fun emitUrlRefEdge(targetId: String, lineNo: Int) {
-            val eid = "$docNodeId:urlref:$targetId:$lineNo"
-            if (seenEdges.add(eid)) {
-                edges.add(GraphEdge(eid, projectId, docNodeId, targetId, "URL_REFS", "EXTRACTED_URL", 1.0, lineNo))
+        private fun extractWikilinks() {
+            for (match in WIKILINK_RE.findAll(markdownText)) {
+                val targetTitle = match.groupValues[1].trim()
+                val targetStem = targetTitle.substringAfterLast('/').substringBeforeLast('.')
+                val lineNo = lineNumberAt(match.range.first)
+                val targetNode = byName[targetStem] ?: byName[targetTitle]
+                val targetId = targetNode?.nodeId ?: "$projectId:vault_ref#$targetStem"
+                emitEdge("$docNodeId:wiki:$targetId:$lineNo", targetId, "WIKILINK_REFS", "EXTRACTED_WIKILINK", 1.0, lineNo)
             }
         }
 
-        for (match in MARKDOWN_URL_RE.findAll(markdownText)) {
-            val rawLink = match.groupValues[1].trim()
-            if (rawLink.isEmpty() || rawLink.startsWith("#")) continue
-            val lineNo = markdownText.take(match.range.first).count { it == '\n' } + 1
+        private fun extractBacktickCodeSpans() {
+            for (match in BACKTICK_SPAN_RE.findAll(markdownText)) {
+                val rawToken = match.groupValues[1].trim()
+                val lineNo = lineNumberAt(match.range.first)
+                val symCandidate = rawToken.substringAfterLast("::").substringAfterLast('#').trimEnd('(', ')')
+                val targetNode = byName[symCandidate] ?: byName[symCandidate.substringAfterLast('.')]
+                if (targetNode != null) {
+                    emitEdge("$docNodeId:codespan:${targetNode.nodeId}:$lineNo", targetNode.nodeId, "CODE_SPAN_REFS", "INFERRED_CODE_SPAN", 0.9, lineNo)
+                }
+            }
+        }
 
+        private fun resolveSkillRefName(rawLink: String): String {
+            return when {
+                rawLink.endsWith("/SKILL.md", ignoreCase = true) -> {
+                    rawLink.substringBeforeLast("/SKILL.md").substringAfterLast('/')
+                }
+                rawLink.equals("SKILL.md", ignoreCase = true) -> ""
+                else -> {
+                    rawLink.substringAfterLast('/').substringBeforeLast('.')
+                }
+            }
+        }
+
+        private fun handleSkillReference(rawLink: String, lineNo: Int): Boolean {
             val isSkillRef = rawLink.endsWith("/SKILL.md", ignoreCase = true) ||
                 rawLink.equals("SKILL.md", ignoreCase = true) ||
                 (rawLink.contains("/skills/") && rawLink.endsWith(".md"))
+            if (!isSkillRef) return false
 
-            if (isSkillRef) {
-                val targetSkillName = when {
-                    rawLink.endsWith("/SKILL.md", ignoreCase = true) -> {
-                        rawLink.substringBeforeLast("/SKILL.md").substringAfterLast('/')
-                    }
-                    rawLink.equals("SKILL.md", ignoreCase = true) -> ""
-                    else -> {
-                        rawLink.substringAfterLast('/').substringBeforeLast('.')
-                    }
-                }
-                if (targetSkillName.isNotEmpty() && targetSkillName != skillName) {
-                    val targetSkillId = "$projectId:skill#$targetSkillName"
-                    val eid = "$docNodeId:depends:$targetSkillId:$lineNo"
-                    if (seenEdges.add(eid)) {
-                        edges.add(
-                            GraphEdge(
-                                edgeId = eid,
-                                projectId = projectId,
-                                sourceNodeId = docNodeId,
-                                targetNodeId = targetSkillId,
-                                edgeType = "DEPENDS_ON_SKILL",
-                                provenance = "EXTRACTED_SKILL_DEP",
-                                confidence = 1.0,
-                                lineNumber = lineNo
-                            )
-                        )
-                    }
-                    continue
-                }
+            val targetSkillName = resolveSkillRefName(rawLink)
+            if (targetSkillName.isNotEmpty() && targetSkillName != skillName) {
+                val targetSkillId = "$projectId:skill#$targetSkillName"
+                emitEdge("$docNodeId:depends:$targetSkillId:$lineNo", targetSkillId, "DEPENDS_ON_SKILL", "EXTRACTED_SKILL_DEP", 1.0, lineNo)
+                return true
             }
+            return false
+        }
 
-            val codeLoc = UrlTargetResolver.parseCodeLocationUrl(rawLink)
-            if (codeLoc != null) {
-                val fileCandidates = byRelFile[codeLoc.filePathSuffix]
-                    ?: byRelFile.entries.firstOrNull { (k, _) ->
-                        k.endsWith("/${codeLoc.filePathSuffix}") || k == codeLoc.filePathSuffix.substringAfterLast('/')
-                    }?.value
-                    ?: emptyList()
-                val resolvedNode = when {
-                    codeLoc.startLine != null -> {
-                        val lineTarget = codeLoc.startLine
-                        fileCandidates
-                            .filter { it.kind !in setOf("file", "file_scope", "module") && lineTarget in it.startLine..it.endLine }
-                            .minWithOrNull(compareBy<GraphNode> { it.endLine - it.startLine }.thenByDescending { it.startLine })
-                            ?: fileCandidates.firstOrNull()
-                    }
-                    codeLoc.symbolFragment != null -> {
-                        fileCandidates.firstOrNull { it.name == codeLoc.symbolFragment } ?: byName[codeLoc.symbolFragment] ?: fileCandidates.firstOrNull()
-                    }
-                    else -> fileCandidates.firstOrNull()
+        private fun resolveCodeLocNode(codeLoc: UrlTargetResolver.CodeLocationLink, fileCandidates: List<GraphNode>): GraphNode? {
+            return when {
+                codeLoc.startLine != null -> {
+                    val lineTarget = codeLoc.startLine
+                    fileCandidates
+                        .filter { it.kind !in setOf("file", "file_scope", "module") && lineTarget in it.startLine..it.endLine }
+                        .minWithOrNull(compareBy<GraphNode> { it.endLine - it.startLine }.thenByDescending { it.startLine })
+                        ?: fileCandidates.firstOrNull()
                 }
-                if (resolvedNode != null) {
-                    emitUrlRefEdge(resolvedNode.nodeId, lineNo)
-                    continue
+                codeLoc.symbolFragment != null -> {
+                    fileCandidates.firstOrNull { it.name == codeLoc.symbolFragment } ?: byName[codeLoc.symbolFragment] ?: fileCandidates.firstOrNull()
                 }
+                else -> fileCandidates.firstOrNull()
             }
+        }
 
-            if (UrlTargetResolver.isHttpRouteCandidate(rawLink, hasExplicitRouteCall = false)) {
-                emitUrlRefEdge("$projectId:endpoint#${UrlTargetResolver.normalizeRouteTemplate(rawLink)}", lineNo)
-            } else if (rawLink.startsWith("http://", ignoreCase = true) ||
+        private fun handleCodeLocationReference(rawLink: String, lineNo: Int): Boolean {
+            val codeLoc = UrlTargetResolver.parseCodeLocationUrl(rawLink) ?: return false
+            val fileCandidates = byRelFile[codeLoc.filePathSuffix]
+                ?: byRelFile.entries.firstOrNull { (k, _) ->
+                    k.endsWith("/${codeLoc.filePathSuffix}") || k == codeLoc.filePathSuffix.substringAfterLast('/')
+                }?.value
+                ?: emptyList()
+            val resolvedNode = resolveCodeLocNode(codeLoc, fileCandidates)
+            if (resolvedNode != null) {
+                emitUrlRefEdge(resolvedNode.nodeId, lineNo)
+                return true
+            }
+            return false
+        }
+
+        private fun isExternalOrSchemeUrl(rawLink: String): Boolean {
+            return rawLink.startsWith("http://", ignoreCase = true) ||
                 rawLink.startsWith("https://", ignoreCase = true) ||
                 rawLink.startsWith("figma://", ignoreCase = true) ||
                 rawLink.startsWith("sidecar://", ignoreCase = true)
-            ) {
+        }
+
+        private fun handleGenericUrlReference(rawLink: String, lineNo: Int) {
+            if (UrlTargetResolver.isHttpRouteCandidate(rawLink, hasExplicitRouteCall = false)) {
+                emitUrlRefEdge("$projectId:endpoint#${UrlTargetResolver.normalizeRouteTemplate(rawLink)}", lineNo)
+            } else if (isExternalOrSchemeUrl(rawLink)) {
                 emitUrlRefEdge("$projectId:url_ref#${UrlTargetResolver.normalizeExternalUrl(rawLink)}", lineNo)
                 val pathPart = UrlTargetResolver.extractPathFromHttpUrl(rawLink)
                 if (pathPart != null && UrlTargetResolver.isHttpRouteCandidate(pathPart, hasExplicitRouteCall = false)) {
@@ -364,15 +393,34 @@ object VaultPlanBridge {
             }
         }
 
-        for (match in BARE_ROUTE_BACKTICK_RE.findAll(markdownText)) {
-            val rawRoute = match.groupValues[1].trim()
-            if (UrlTargetResolver.isHttpRouteCandidate(rawRoute, hasExplicitRouteCall = false)) {
-                val lineNo = markdownText.take(match.range.first).count { it == '\n' } + 1
-                emitUrlRefEdge("$projectId:endpoint#${UrlTargetResolver.normalizeRouteTemplate(rawRoute)}", lineNo)
+        private fun isIgnoredLink(link: String): Boolean =
+            link.isEmpty() || link.startsWith("#")
+
+        private fun processMarkdownUrlMatch(match: MatchResult) {
+            val rawLink = match.groupValues[1].trim()
+            if (isIgnoredLink(rawLink)) return
+            val lineNo = lineNumberAt(match.range.first)
+            val handled = handleSkillReference(rawLink, lineNo) || handleCodeLocationReference(rawLink, lineNo)
+            if (!handled) {
+                handleGenericUrlReference(rawLink, lineNo)
             }
         }
 
-        return Pair(docNodes, edges)
+        private fun extractMarkdownUrls() {
+            for (match in MARKDOWN_URL_RE.findAll(markdownText)) {
+                processMarkdownUrlMatch(match)
+            }
+        }
+
+        private fun extractBareRoutes() {
+            for (match in BARE_ROUTE_BACKTICK_RE.findAll(markdownText)) {
+                val rawRoute = match.groupValues[1].trim()
+                if (UrlTargetResolver.isHttpRouteCandidate(rawRoute, hasExplicitRouteCall = false)) {
+                    val lineNo = lineNumberAt(match.range.first)
+                    emitUrlRefEdge("$projectId:endpoint#${UrlTargetResolver.normalizeRouteTemplate(rawRoute)}", lineNo)
+                }
+            }
+        }
     }
 
     private fun extractFrontmatterText(markdownText: String): String? {
@@ -577,6 +625,25 @@ object VaultPlanBridge {
         return nextCharIdx < text.length && text[nextCharIdx].isLetterOrDigit()
     }
 
+    private fun countNewlines(text: String, start: Int, end: Int): Int {
+        var count = 0
+        for (i in start until end) {
+            if (text[i] == '\n') count++
+        }
+        return count
+    }
+
+    private fun tryExtractTagMatch(
+        text: String,
+        match: MatchResult,
+        lineNo: Int
+    ): Pair<String, Int>? {
+        if (hasTrailingWordChar(text, match.range.last)) return null
+        val rawTag = match.groupValues[1].trimEnd('/', '-', '_')
+        if (!isValidInlineTag(rawTag)) return null
+        return Pair(rawTag, lineNo)
+    }
+
     fun extractSanitizedInlineTags(markdownText: String): List<Pair<String, Int>> {
         val text = sanitizeMarkdownForInlineTags(markdownText)
         val results = mutableListOf<Pair<String, Int>>()
@@ -586,15 +653,10 @@ object VaultPlanBridge {
         for (match in TAG_SCAN_RE.findAll(text)) {
             val hashRelIdx = match.value.indexOf('#')
             val hashIdx = match.range.first + hashRelIdx
-            currentLine += text.substring(lastIdx, hashIdx).count { it == '\n' }
+            currentLine += countNewlines(text, lastIdx, hashIdx)
             lastIdx = hashIdx
 
-            if (hasTrailingWordChar(text, match.range.last)) continue
-
-            val rawTag = match.groupValues[1].trimEnd('/', '-', '_')
-            if (isValidInlineTag(rawTag)) {
-                results.add(Pair(rawTag, currentLine))
-            }
+            tryExtractTagMatch(text, match, currentLine)?.let { results.add(it) }
         }
         return results
     }
