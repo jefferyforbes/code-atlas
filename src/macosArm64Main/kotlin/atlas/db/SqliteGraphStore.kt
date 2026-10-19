@@ -3614,39 +3614,36 @@ class SqliteGraphStore(val dbPath: String) {
     ) {
         if (nodes.isEmpty() && params.isEmpty()) return
         db.withSavepoint("sp_compose_upsert") {
-            val existingProv = mutableMapOf<String, Int>()
-            if (preserveHigherProvenance && nodes.isNotEmpty()) {
-                val pSlug = nodes.first().projectSlug
-                val qStmt = db.prepare("SELECT node_id, provenance FROM compose_nodes WHERE project_slug = ?;")
-                try {
+            val scope = StatementScope(db)
+            try {
+                val existingProv = mutableMapOf<String, Int>()
+                if (preserveHigherProvenance && nodes.isNotEmpty()) {
+                    val pSlug = nodes.first().projectSlug
+                    val qStmt = scope.prepare("SELECT node_id, provenance FROM compose_nodes WHERE project_slug = ?;")
                     qStmt.bindString(1, pSlug)
                     while (qStmt.step()) {
                         existingProv[qStmt.columnString(0)] = provenanceRank(qStmt.columnString(1))
                     }
-                } finally {
-                    qStmt.close()
                 }
-            }
 
-            val nodeStmt = db.prepare(
-                """
-                INSERT OR REPLACE INTO compose_nodes (
-                    node_id, project_slug, fqname, file_path, start_line, end_line,
-                    source_set, is_restartable, is_skippable, is_readonly, is_inline,
-                    returns_unit, has_modifier_param, modifier_is_first_optional,
-                    modifier_has_default, unstable_param_count, runtime_param_count,
-                    receiver_stability, provenance, violation_mask
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """.trimIndent()
-            )
-            val updStmt = db.prepare(
-                """
-                UPDATE compose_nodes
-                SET start_line = ?, end_line = ?, violation_mask = ?
-                WHERE node_id = ?;
-                """.trimIndent()
-            )
-            try {
+                val nodeStmt = scope.prepare(
+                    """
+                    INSERT OR REPLACE INTO compose_nodes (
+                        node_id, project_slug, fqname, file_path, start_line, end_line,
+                        source_set, is_restartable, is_skippable, is_readonly, is_inline,
+                        returns_unit, has_modifier_param, modifier_is_first_optional,
+                        modifier_has_default, unstable_param_count, runtime_param_count,
+                        receiver_stability, provenance, violation_mask
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """.trimIndent()
+                )
+                val updStmt = scope.prepare(
+                    """
+                    UPDATE compose_nodes
+                    SET start_line = ?, end_line = ?, violation_mask = ?
+                    WHERE node_id = ?;
+                    """.trimIndent()
+                )
                 for (n in nodes) {
                     val prevRank = existingProv[n.nodeId] ?: 0
                     val newRank = provenanceRank(n.provenance)
@@ -3683,20 +3680,15 @@ class SqliteGraphStore(val dbPath: String) {
                     nodeStmt.bindInt(20, n.violationMask)
                     nodeStmt.step()
                 }
-            } finally {
-                updStmt.close()
-                nodeStmt.close()
-            }
 
-            val paramStmt = db.prepare(
-                """
-                INSERT OR REPLACE INTO compose_params (
-                    node_id, param_index, param_name, type_signature,
-                    stability, stability_reason, has_default, is_used_in_body, provenance
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """.trimIndent()
-            )
-            try {
+                val paramStmt = scope.prepare(
+                    """
+                    INSERT OR REPLACE INTO compose_params (
+                        node_id, param_index, param_name, type_signature,
+                        stability, stability_reason, has_default, is_used_in_body, provenance
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """.trimIndent()
+                )
                 for (p in params) {
                     val prevRank = existingProv[p.nodeId] ?: 0
                     val newRank = provenanceRank(p.provenance)
@@ -3714,7 +3706,7 @@ class SqliteGraphStore(val dbPath: String) {
                     paramStmt.step()
                 }
             } finally {
-                paramStmt.close()
+                scope.closeAll()
             }
         }
     }
@@ -4104,8 +4096,8 @@ class SqliteGraphStore(val dbPath: String) {
             )
         }
         try {
-            if (hasOwner) {
-                val cleanClass = ownerClassName!!.substringAfterLast('.').removePrefix("sym:")
+            if (ownerClassName != null && ownerClassName.isNotEmpty()) {
+                val cleanClass = ownerClassName.substringAfterLast('.').removePrefix("sym:")
                 val escClass = cleanClass.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 stmt.bindString(1, projectSlug)
                 stmt.bindString(2, "sym:$cleanClass.$cleanSym")

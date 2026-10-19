@@ -11,6 +11,7 @@ import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class WorkspaceIndexerIsolationTest {
@@ -257,6 +258,41 @@ class WorkspaceIndexerIsolationTest {
             val res3 = indexer.indexWorkspace("test_proj")
             assertEquals(1, res3["files_indexed"]?.jsonPrimitive?.intOrNull)
             assertTrue(res3["files_skipped"]?.jsonPrimitive?.intOrNull!! >= 1)
+        } finally {
+            store.close()
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testIncrementalMarkdownReevaluationWithDeletedFileDoesNotCrash() {
+        val tmpDir = makeTempDir()
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+
+        try {
+            val srcDir = "$tmpDir/src/main/kotlin/atlas/demo"
+            PlatformFiles.mkdirs(srcDir)
+            val codeFile = "$srcDir/Alpha.kt"
+            PlatformFiles.writeText(codeFile, "package atlas.demo\nclass Alpha")
+
+            val docsDir = "$tmpDir/docs"
+            PlatformFiles.mkdirs(docsDir)
+            val docFile = "$docsDir/readme.md"
+            PlatformFiles.writeText(docFile, "# Readme\nLinks to `Alpha`.")
+
+            val indexer = WorkspaceIndexer(tmpDir, store)
+            indexer.indexWorkspace("test_proj")
+
+            // Update code file to trigger markdown re-evaluation
+            PlatformFiles.writeText(codeFile, "package atlas.demo\nclass Alpha\nclass Gamma")
+
+            // Delete markdown file right before reindexing to simulate missing/unreadable file race condition
+            PlatformFiles.delete(docFile)
+
+            // Indexing must succeed gracefully without throwing exception
+            val res = indexer.indexWorkspace("test_proj")
+            assertNotNull(res["files_indexed"])
         } finally {
             store.close()
             cleanDir(tmpDir)

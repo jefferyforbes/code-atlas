@@ -45,8 +45,8 @@ class WorkspaceInitEngine(val workspaceRoot: String) {
         if (!explicitProject.isNullOrBlank() && explicitProject != "organisation") {
             return explicitProject
         }
-        val root = workspaceRoot.trimEnd('/')
-        return readBaselineProject(root) ?: deriveDirectorySlug(root)
+        val canonical = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
+        return readBaselineProject(canonical) ?: deriveDirectorySlug(canonical)
     }
 
     fun initHook(

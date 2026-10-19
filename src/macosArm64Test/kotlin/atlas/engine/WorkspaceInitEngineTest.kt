@@ -153,6 +153,13 @@ class WorkspaceInitEngineTest {
             // 4. Explicit non-organisation project slug is preserved
             val explicitSlug = engine.resolveProjectSlug("override-slug")
             assertEquals("override-slug", explicitSlug)
+
+            // 5. Relative dot workspaceRoot derives directory slug from canonical path, never "organisation"
+            val dotEngine = WorkspaceInitEngine(".")
+            val expectedDotSlug = PlatformFiles.canonicalPath(".").substringAfterLast('/')
+            val resolvedDotSlug = dotEngine.resolveProjectSlug("organisation")
+            assertEquals(expectedDotSlug, resolvedDotSlug)
+            assertTrue(resolvedDotSlug.isNotEmpty() && resolvedDotSlug != "organisation" && resolvedDotSlug != ".")
         } finally {
             PlatformFiles.deleteRecursively(tempDir)
         }

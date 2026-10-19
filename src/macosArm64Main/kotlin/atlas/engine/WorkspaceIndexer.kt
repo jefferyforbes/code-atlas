@@ -382,20 +382,12 @@ class WorkspaceIndexer(
         if (codeFilesIndexed > 0 || filesDeleted > 0) {
             val queuedRels = markdownQueue.mapTo(mutableSetOf()) { it.first }
             for ((relMd, filePath) in unchangedMarkdownQueue) {
-                if (queuedRels.add(relMd)) {
-                    store.deleteOutgoingEdgesForFile(projectId, "$projectId:$relMd")
-                    markdownQueue.add(Pair(relMd, PlatformFiles.readText(filePath)))
-                }
+                queueMarkdownIfReadable(projectId, relMd, filePath, queuedRels, markdownQueue)
             }
             if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
                 for (indexedRel in cachedFiles.keys) {
-                    if (indexedRel.endsWith(".md") && indexedRel !in queuedRels) {
-                        val fullMdPath = "$root/$indexedRel"
-                        if (PlatformFiles.exists(fullMdPath)) {
-                            queuedRels.add(indexedRel)
-                            store.deleteOutgoingEdgesForFile(projectId, "$projectId:$indexedRel")
-                            markdownQueue.add(Pair(indexedRel, PlatformFiles.readText(fullMdPath)))
-                        }
+                    if (indexedRel.endsWith(".md")) {
+                        queueMarkdownIfReadable(projectId, indexedRel, "$root/$indexedRel", queuedRels, markdownQueue)
                     }
                 }
             }
@@ -559,6 +551,23 @@ class WorkspaceIndexer(
             put("compiler_upgraded", compilerUpgraded)
             put("trace_records_ingested", traceRecordsIngested)
         }
+    }
+
+    private fun queueMarkdownIfReadable(
+        projectId: String,
+        relMd: String,
+        filePath: String,
+        queuedRels: MutableSet<String>,
+        queue: MutableList<Pair<String, String>>
+    ) {
+        if (!queuedRels.add(relMd)) return
+        val text = try {
+            if (PlatformFiles.exists(filePath)) PlatformFiles.readText(filePath) else null
+        } catch (_: Exception) {
+            null
+        } ?: return
+        store.deleteOutgoingEdgesForFile(projectId, "$projectId:$relMd")
+        queue.add(Pair(relMd, text))
     }
 }
 
