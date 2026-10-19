@@ -8,7 +8,7 @@
 
 [![Version](https://img.shields.io/badge/version-0.5.2-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
 [![Changelog](https://img.shields.io/badge/changelog-Keep%20a%20Changelog-orange.svg)](CHANGELOG.md)
-[![Kotlin](https://img.shields.io/badge/Kotlin_Native-2.2.0-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/native-overview.html)
+[![Kotlin](https://img.shields.io/badge/Kotlin_Native-2.4.21-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/native-overview.html)
 [![macOS](https://img.shields.io/badge/macOS-Apple_Silicon_(arm64)-000000?logo=apple&logoColor=white)](https://apple.com)
 [![Startup](https://img.shields.io/badge/Cold_Start-~3ms-00C853)](https://github.com/jefferyforbes/code-atlas)
 [![MCP](https://img.shields.io/badge/Protocol-MCP_2024--11--05-4B32C3)](https://modelcontextprotocol.io)
@@ -228,13 +228,43 @@ Atlas exposes a standard **JSON-RPC 2.0 stdio MCP server** with **4 compound too
 
 ### Client Configuration
 
-Add Atlas to your MCP client configuration (`claude_desktop_config.json`, `.air/mcp.json`, or Antigravity):
+Add Atlas to your MCP client configuration:
 
+#### Cursor (`.cursor/mcp.json`)
 ```json
 {
   "mcpServers": {
     "atlas": {
-      "command": "/Users/jefferyforbes/.local/bin/atlas",
+      "command": "atlas",
+      "args": ["serve-mcp", "--workspace", "."]
+    }
+  }
+}
+```
+
+#### Claude Desktop (`claude_desktop_config.json`)
+```json
+{
+  "mcpServers": {
+    "atlas": {
+      "command": "atlas",
+      "args": ["serve-mcp", "--workspace", "."]
+    }
+  }
+}
+```
+
+#### Gemini CLI
+Add via CLI:
+```bash
+gemini mcp add atlas -- atlas serve-mcp --workspace .
+```
+Or in `~/.gemini/settings.json`:
+```json
+{
+  "mcpServers": {
+    "atlas": {
+      "command": "atlas",
       "args": ["serve-mcp", "--workspace", "."]
     }
   }
