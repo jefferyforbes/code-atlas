@@ -18,6 +18,7 @@ import atlas.extract.UrlTargetResolver
 import atlas.model.ArchitectContextResult
 import atlas.model.ComplexityScoreRecord
 import atlas.model.ComplexityViolation
+import atlas.model.GraphNode
 import atlas.util.PlatformFiles
 import kotlin.math.ln
 import kotlin.math.roundToInt
@@ -62,6 +63,7 @@ class AtlasMcpServer(
     companion object {
         const val SPILLOVER_THRESHOLD_BYTES = 32768
         private var spilloverSeq = 0L
+        private val COMPOSE_QUERY_ACTIONS = setOf("summary", "compose_summary", "cascade", "compose_cascade", "blame", "compose_blame")
     }
 
     val dbPath: String
@@ -790,114 +792,142 @@ class AtlasMcpServer(
         return enforceSpillover(project, payload)
     }
 
+    private fun extractQueryTarget(args: JsonObject): String {
+        val t = args["target"]?.jsonPrimitive?.content
+        if (!t.isNullOrEmpty()) return t
+        return args["query"]?.jsonPrimitive?.content.orEmpty()
+    }
+
     private fun handleQuery(args: JsonObject): JsonObject {
         val action = args["action"]?.jsonPrimitive?.content ?: "status"
         val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
-        val target = args["target"]?.jsonPrimitive?.content
-            ?: args["query"]?.jsonPrimitive?.content
-            ?: ""
+        val target = extractQueryTarget(args)
         val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 2
         val includeSource = args["include_source"]?.jsonPrimitive?.booleanOrNull ?: false
         val strongSkipping = args["strong_skipping"]?.jsonPrimitive?.booleanOrNull ?: true
 
-        when (action) {
-            "status" -> {
-                val stats = store.getStats(project)
-                return json.encodeToJsonElement(stats).jsonObject
+        if (action in COMPOSE_QUERY_ACTIONS) {
+            return handleQueryCompose(action, project, target, args, depth, strongSkipping)
+        }
+        return when (action) {
+            "status" -> json.encodeToJsonElement(store.getStats(project)).jsonObject
+            "god_nodes" -> buildJsonObject {
+                put("project", project)
+                put("god_nodes", json.encodeToJsonElement(store.getGodNodes(project, topN = 10)))
             }
-            "god_nodes" -> {
-                val gods = store.getGodNodes(project, topN = 10)
-                return buildJsonObject {
-                    put("project", project)
-                    put("god_nodes", json.encodeToJsonElement(gods))
-                }
+            "search" -> buildJsonObject {
+                put("project", project)
+                put("query", target)
+                put("results", json.encodeToJsonElement(store.searchNodes(project, target, limit = 15)))
             }
-            "search" -> {
-                val matches = store.searchNodes(project, target, limit = 15)
-                return buildJsonObject {
-                    put("project", project)
-                    put("query", target)
-                    put("results", json.encodeToJsonElement(matches))
-                }
-            }
-            "url" -> return store.searchByUrl(project, target)
-            "summary", "compose_summary", "cascade", "compose_cascade", "blame", "compose_blame" -> {
-                val mappedAction = action.removePrefix("compose_")
-                val res = composeEngine.queryCompose(
-                    projectSlug = project,
-                    action = mappedAction,
-                    target = target.ifEmpty { null },
-                    maxDepth = if (args.containsKey("depth")) depth else 5,
-                    strongSkipping = strongSkipping
-                )
-                return json.encodeToJsonElement(res).jsonObject
-            }
-            "complexity" -> {
-                val minCognitive = args["threshold"]?.jsonPrimitive?.intOrNull ?: 10
-                val queryLimit = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
-                val results = if (target.isNotEmpty()) {
-                    val matchingComplexNodes = store.queryComplexNodes(project, minCognitive = 0, limit = queryLimit * 4)
-                        .filter {
-                            it.nodeId == target ||
-                            it.name == target ||
-                            it.qualifiedName == target ||
-                            it.qualifiedName.endsWith(".$target") ||
-                            it.nodeId.contains("#$target.") ||
-                            it.nodeId.endsWith("#$target") ||
-                            it.filePath.contains(target)
-                        }
-                    if (matchingComplexNodes.isNotEmpty()) {
-                        matchingComplexNodes.take(queryLimit)
-                    } else {
-                        val directNode = store.getNode(project, target)
-                        if (directNode != null && directNode.kind in setOf("function", "method", "composable")) {
-                            val score = directNode.complexityScore
-                            val grade = when {
-                                score >= 90.0 -> "A"
-                                score >= 80.0 -> "B"
-                                score >= 70.0 -> "C"
-                                score >= 60.0 -> "D"
-                                else -> "F"
-                            }
-                            val risk = directNode.cognitiveComplexity.toDouble() * (1.0 + ln(1.0 + directNode.inDegree.toDouble()))
-                            val roundedRisk = (risk * 10.0).roundToInt() / 10.0
-                            listOf(
-                                ComplexityScoreRecord(
-                                    nodeId = directNode.nodeId,
-                                    projectId = project,
-                                    name = directNode.name,
-                                    qualifiedName = directNode.qualifiedName,
-                                    filePath = if (directNode.fileId.contains(':')) directNode.fileId.substringAfter(':') else directNode.fileId,
-                                    line = directNode.startLine,
-                                    cyclomatic = directNode.cyclomaticComplexity,
-                                    cognitive = directNode.cognitiveComplexity,
-                                    maxNesting = directNode.maxNestingDepth,
-                                    inDegree = directNode.inDegree,
-                                    overallScore = score,
-                                    grade = grade,
-                                    riskIndex = roundedRisk
-                                )
-                            )
-                        } else {
-                            emptyList()
-                        }
-                    }
-                } else {
-                    store.queryComplexNodes(project, minCognitive = minCognitive, limit = queryLimit)
-                }
-                return buildJsonObject {
-                    put("project", project)
-                    put("total_results", results.size)
-                    put("threshold", minCognitive)
-                    put("results", json.encodeToJsonElement(results))
-                }
-            }
+            "url" -> store.searchByUrl(project, target)
+            "complexity" -> handleQueryComplexity(project, target, args)
             "explore" -> {
                 val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 12
-                return codegraphEngine.explore(project, target, maxFiles = limit)
+                codegraphEngine.explore(project, target, maxFiles = limit)
             }
+            else -> handleQueryNodeAction(action, project, target, args, depth, includeSource)
         }
+    }
 
+    private fun handleQueryCompose(
+        action: String,
+        project: String,
+        target: String,
+        args: JsonObject,
+        depth: Int,
+        strongSkipping: Boolean
+    ): JsonObject {
+        val mappedAction = action.removePrefix("compose_")
+        val maxDepth = if (args.containsKey("depth")) depth else 5
+        val res = composeEngine.queryCompose(
+            projectSlug = project,
+            action = mappedAction,
+            target = target.ifEmpty { null },
+            maxDepth = maxDepth,
+            strongSkipping = strongSkipping
+        )
+        return json.encodeToJsonElement(res).jsonObject
+    }
+
+    private fun handleQueryComplexity(project: String, target: String, args: JsonObject): JsonObject {
+        val minCognitive = args["threshold"]?.jsonPrimitive?.intOrNull ?: 10
+        val queryLimit = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
+        val results = if (target.isNotEmpty()) {
+            resolveTargetComplexityRecords(project, target, queryLimit)
+        } else {
+            store.queryComplexNodes(project, minCognitive = minCognitive, limit = queryLimit)
+        }
+        return buildJsonObject {
+            put("project", project)
+            put("total_results", results.size)
+            put("threshold", minCognitive)
+            put("results", json.encodeToJsonElement(results))
+        }
+    }
+
+    private fun resolveTargetComplexityRecords(project: String, target: String, queryLimit: Int): List<ComplexityScoreRecord> {
+        val matching = store.queryComplexNodes(project, minCognitive = 0, limit = queryLimit * 4)
+            .filter { isComplexityTargetMatch(it, target) }
+        if (matching.isNotEmpty()) {
+            return matching.take(queryLimit)
+        }
+        return createDirectNodeComplexityRecord(project, target)
+    }
+
+    private fun isComplexityTargetMatch(node: ComplexityScoreRecord, target: String): Boolean {
+        return node.nodeId == target ||
+            node.name == target ||
+            node.qualifiedName == target ||
+            node.qualifiedName.endsWith(".$target") ||
+            node.nodeId.contains("#$target.") ||
+            node.nodeId.endsWith("#$target") ||
+            node.filePath.contains(target)
+    }
+
+    private fun createDirectNodeComplexityRecord(project: String, target: String): List<ComplexityScoreRecord> {
+        val directNode = store.getNode(project, target) ?: return emptyList()
+        if (directNode.kind !in setOf("function", "method", "composable")) {
+            return emptyList()
+        }
+        val score = directNode.complexityScore
+        val grade = when {
+            score >= 90.0 -> "A"
+            score >= 80.0 -> "B"
+            score >= 70.0 -> "C"
+            score >= 60.0 -> "D"
+            else -> "F"
+        }
+        val risk = directNode.cognitiveComplexity.toDouble() * (1.0 + ln(1.0 + directNode.inDegree.toDouble()))
+        val roundedRisk = (risk * 10.0).roundToInt() / 10.0
+        val filePath = if (directNode.fileId.contains(':')) directNode.fileId.substringAfter(':') else directNode.fileId
+        return listOf(
+            ComplexityScoreRecord(
+                nodeId = directNode.nodeId,
+                projectId = project,
+                name = directNode.name,
+                qualifiedName = directNode.qualifiedName,
+                filePath = filePath,
+                line = directNode.startLine,
+                cyclomatic = directNode.cyclomaticComplexity,
+                cognitive = directNode.cognitiveComplexity,
+                maxNesting = directNode.maxNestingDepth,
+                inDegree = directNode.inDegree,
+                overallScore = score,
+                grade = grade,
+                riskIndex = roundedRisk
+            )
+        )
+    }
+
+    private fun handleQueryNodeAction(
+        action: String,
+        project: String,
+        target: String,
+        args: JsonObject,
+        depth: Int,
+        includeSource: Boolean
+    ): JsonObject {
         val node = store.getNode(project, target)
         if (node == null) {
             val matches = store.searchNodes(project, target, limit = 5)
@@ -907,59 +937,65 @@ class AtlasMcpServer(
                 put("candidates", json.encodeToJsonElement(matches))
             }
         }
-
         return when (action) {
-            "symbol" -> {
-                val annotations = memory.getActiveAnnotations(project, node.nodeId)
-                buildJsonObject {
-                    put("node", json.encodeToJsonElement(node))
-                    put("annotations", json.encodeToJsonElement(annotations))
-                    put("callers_count", node.inDegree)
-                    put("callees_count", node.outDegree)
-                    if (includeSource) {
-                        val slice = store.sliceLiveSource(workspaceRoot, project, node)
-                        put("live_source", json.encodeToJsonElement(slice))
-                    }
-                }
-            }
-            "callers" -> {
-                val callers = store.getCallers(project, node.nodeId, depth = depth)
-                buildJsonObject {
-                    put("node_id", node.nodeId)
-                    put("callers", json.encodeToJsonElement(callers))
-                }
-            }
-            "callees" -> {
-                val callees = store.getCallees(project, node.nodeId, depth = depth)
-                buildJsonObject {
-                    put("node_id", node.nodeId)
-                    put("callees", json.encodeToJsonElement(callees))
-                }
-            }
-            "impact" -> {
-                val impact = store.getImpactRadius(project, node.nodeId, depth = depth)
-                val baseObj = json.encodeToJsonElement(impact).jsonObject
-                val annotations = memory.getActiveAnnotations(project, node.nodeId)
-                buildJsonObject {
-                    baseObj.forEach { (k, v) -> put(k, v) }
-                    put("annotations", json.encodeToJsonElement(annotations))
-                }
-            }
-            "shortest_path" -> {
-                val sec = args["secondary_target"]?.jsonPrimitive?.content ?: ""
-                val tgtNode = store.getNode(project, sec)
-                if (tgtNode == null) {
-                    buildJsonObject { put("error", "Destination '$sec' not found.") }
-                } else {
-                    val path = store.getShortestPath(project, node.nodeId, tgtNode.nodeId)
-                    buildJsonObject {
-                        put("source", node.nodeId)
-                        put("target", tgtNode.nodeId)
-                        put("path", json.encodeToJsonElement(path))
-                    }
-                }
-            }
+            "symbol" -> handleQuerySymbol(project, node, includeSource)
+            "callers" -> handleQueryCallers(project, node, depth)
+            "callees" -> handleQueryCallees(project, node, depth)
+            "impact" -> handleQueryImpact(project, node, depth)
+            "shortest_path" -> handleQueryShortestPath(project, node, args)
             else -> throw IllegalArgumentException("Unsupported atlas_query action: $action")
+        }
+    }
+
+    private fun handleQuerySymbol(project: String, node: GraphNode, includeSource: Boolean): JsonObject {
+        val annotations = memory.getActiveAnnotations(project, node.nodeId)
+        return buildJsonObject {
+            put("node", json.encodeToJsonElement(node))
+            put("annotations", json.encodeToJsonElement(annotations))
+            put("callers_count", node.inDegree)
+            put("callees_count", node.outDegree)
+            if (includeSource) {
+                val slice = store.sliceLiveSource(workspaceRoot, project, node)
+                put("live_source", json.encodeToJsonElement(slice))
+            }
+        }
+    }
+
+    private fun handleQueryCallers(project: String, node: GraphNode, depth: Int): JsonObject {
+        val callers = store.getCallers(project, node.nodeId, depth = depth)
+        return buildJsonObject {
+            put("node_id", node.nodeId)
+            put("callers", json.encodeToJsonElement(callers))
+        }
+    }
+
+    private fun handleQueryCallees(project: String, node: GraphNode, depth: Int): JsonObject {
+        val callees = store.getCallees(project, node.nodeId, depth = depth)
+        return buildJsonObject {
+            put("node_id", node.nodeId)
+            put("callees", json.encodeToJsonElement(callees))
+        }
+    }
+
+    private fun handleQueryImpact(project: String, node: GraphNode, depth: Int): JsonObject {
+        val impact = store.getImpactRadius(project, node.nodeId, depth = depth)
+        val baseObj = json.encodeToJsonElement(impact).jsonObject
+        val annotations = memory.getActiveAnnotations(project, node.nodeId)
+        return buildJsonObject {
+            baseObj.forEach { (k, v) -> put(k, v) }
+            put("annotations", json.encodeToJsonElement(annotations))
+        }
+    }
+
+    private fun handleQueryShortestPath(project: String, node: GraphNode, args: JsonObject): JsonObject {
+        val sec = args["secondary_target"]?.jsonPrimitive?.content ?: ""
+        val tgtNode = store.getNode(project, sec)
+            ?: return buildJsonObject { put("error", "Destination '$sec' not found.") }
+        val path = store.getShortestPath(project, node.nodeId, tgtNode.nodeId)
+        return buildJsonObject {
+            put("source", node.nodeId)
+            put("target", tgtNode.nodeId)
+            put("path", json.encodeToJsonElement(path))
         }
     }
 
