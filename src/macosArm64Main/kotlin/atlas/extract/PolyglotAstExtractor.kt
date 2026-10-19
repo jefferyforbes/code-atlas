@@ -1317,13 +1317,90 @@ class PolyglotAstExtractor {
          * Extracts doc comment description (KDoc, Javadoc, JSDoc, Swift/Rust ///, C++ Doxygen)
          * preceding a declaration at [matchStartLine] (1-based line of the declaration or leading annotation).
          */
+        private class BracketDepths(var p: Int = 0, var b: Int = 0, var a: Int = 0) {
+            fun isClosed(): Boolean = p <= 0 && b <= 0 && a <= 0
+            fun update(line: String, language: String) {
+                for (c in line) {
+                    when (c) {
+                        '(' -> p--
+                        ')' -> p++
+                        '[' -> b--
+                        ']' -> b++
+                        '<' -> if (language == "cpp") a--
+                        '>' -> if (language == "cpp") a++
+                    }
+                }
+            }
+        }
+
+        private fun isMultilineAnnotationEnd(trimmed: String, language: String): Boolean {
+            return trimmed.endsWith(")") || trimmed.endsWith("]") || (language == "cpp" && trimmed.endsWith(">"))
+        }
+
+        private fun skipMultilineAnnotation(
+            lines: List<String>,
+            cur: Int,
+            trimmed: String,
+            language: String
+        ): Int? {
+            if (!isMultilineAnnotationEnd(trimmed, language)) return null
+            val depths = BracketDepths()
+            var scanIdx = cur
+            while (scanIdx >= 0) {
+                val sLine = lines[scanIdx].trim()
+                depths.update(sLine, language)
+                if (depths.isClosed() && isAnnotationOrAttributeLine(sLine, language)) {
+                    return scanIdx - 1
+                }
+                scanIdx--
+            }
+            return null
+        }
+
+        private fun parseLeadingDocComment(
+            lines: List<String>,
+            cur: Int,
+            trimmed: String,
+            language: String
+        ): String? {
+            if (trimmed.endsWith("*/")) {
+                return parseBlockDocComment(lines, cur)
+            }
+            if (language == "rust" && (trimmed.startsWith("//!") || trimmed.startsWith("/*!"))) {
+                return null
+            }
+            if (trimmed.startsWith("///")) {
+                return parseTripleSlashDocComment(lines, cur)
+            }
+            if (trimmed.startsWith("//")) {
+                val low = trimmed.lowercase()
+                if (NON_DOC_LINE_PREFIXES.any { low.startsWith(it) }) {
+                    return null
+                }
+                return parseDoubleSlashDocComment(lines, cur)
+            }
+            return null
+        }
+
+        private fun findNextPrecedingIndex(
+            lines: List<String>,
+            cur: Int,
+            trimmed: String,
+            language: String
+        ): Int? {
+            if (isAnnotationOrAttributeLine(trimmed, language)) {
+                return cur - 1
+            }
+            return skipMultilineAnnotation(lines, cur, trimmed, language)
+        }
+
         fun extractDocDescription(
             lines: List<String>,
             matchStartLine: Int,
             language: String
         ): String? {
             val startIdx = matchStartLine - 1
-            if (startIdx <= 0 || startIdx > lines.size) return null
+            if (startIdx !in 1..lines.size) return null
 
             var cur = startIdx - 1
             var blankCount = 0
@@ -1336,65 +1413,13 @@ class PolyglotAstExtractor {
                     cur--
                     continue
                 }
-                // Skip single-line annotations or attributes preceding the declaration
-                if (isAnnotationOrAttributeLine(trimmed, language)) {
+                val nextIdx = findNextPrecedingIndex(lines, cur, trimmed, language)
+                if (nextIdx != null) {
+                    cur = nextIdx
                     blankCount = 0
-                    cur--
                     continue
                 }
-                // Skip multi-line annotations / attributes / templates ending on this line:
-                if (trimmed.endsWith(")") || trimmed.endsWith("]") || (language == "cpp" && trimmed.endsWith(">"))) {
-                    var pDepth = 0
-                    var bDepth = 0
-                    var aDepth = 0
-                    var scanIdx = cur
-                    var matchedAnnoStart = false
-                    while (scanIdx >= 0) {
-                        val sLine = lines[scanIdx].trim()
-                        for (c in sLine) {
-                            when (c) {
-                                '(' -> pDepth--
-                                ')' -> pDepth++
-                                '[' -> bDepth--
-                                ']' -> bDepth++
-                                '<' -> if (language == "cpp") aDepth--
-                                '>' -> if (language == "cpp") aDepth++
-                            }
-                        }
-                        if (pDepth <= 0 && bDepth <= 0 && aDepth <= 0) {
-                            if (isAnnotationOrAttributeLine(sLine, language)) {
-                                matchedAnnoStart = true
-                                cur = scanIdx - 1
-                                blankCount = 0
-                                break
-                            }
-                        }
-                        scanIdx--
-                    }
-                    if (matchedAnnoStart) continue
-                }
-                // Block doc comment closing */
-                if (trimmed.endsWith("*/")) {
-                    return parseBlockDocComment(lines, cur)
-                }
-                // Rust inner doc comments document the module/crate, not the item
-                if (language == "rust" && (trimmed.startsWith("//!") || trimmed.startsWith("/*!"))) {
-                    break
-                }
-                // Triple-slash doc comment ///
-                if (trimmed.startsWith("///")) {
-                    return parseTripleSlashDocComment(lines, cur)
-                }
-                // Double-slash doc comment //
-                if (trimmed.startsWith("//")) {
-                    val low = trimmed.lowercase()
-                    if (NON_DOC_LINE_PREFIXES.any { low.startsWith(it) }) {
-                        break
-                    }
-                    return parseDoubleSlashDocComment(lines, cur)
-                }
-                // Any other code line means no doc comment immediately preceding
-                break
+                return parseLeadingDocComment(lines, cur, trimmed, language)
             }
             return null
         }
