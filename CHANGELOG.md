@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.0] - 2026-10-19
+
+### Added
+- **Complexity Ratchet Gate & CI Quality Enforcement (`atlas audit --complexity`)**: Implemented persistent complexity baselines (`--baseline <file>`, `--save-baseline <file>`) preventing cyclomatic/cognitive complexity regressions, paired with automated CI quality gate enforcement in GitHub Actions (#48, #46).
+- **Vault Knowledge Graph Expansion**: Linear token parsing and indexing for Obsidian vault tags, skills, and slash commands in `VaultPlanBridge`, materializing `VAULT_TAG`, `SKILL`, and `COMMAND` nodes with incoming/outgoing reference edges (#43, #44).
+- **High-Precision Benchmark Script (`scripts/benchmark.sh`)**: Microsecond-accurate native benchmark suite measuring cold start (~3ms), warm query, full index latency, and MCP roundtrip (#49).
+- **Client MCP Configuration Templates**: Ready-to-use client configurations for Claude Desktop (`claude_desktop_config.json`) and Cursor (`cursor_mcp.json`) (#49).
+
+### Changed
+- **Core Architecture & Naming Alignment**: Renamed `CodeGraphCli` and `CodeGraphMcpServer` to `AtlasCli` and `AtlasMcpServer` across the entire codebase and test suites (#42).
+- **CI/CD Security Hardening**: Secured GitHub Actions runner execution against malicious fork PRs with least-privilege token permissions (#46).
+- **Kotlin Badge**: Updated Kotlin/Native status badge to 2.4.21 (#49).
+
+### Removed
+- **Legacy MCP Tools**: Completely removed deprecated `codegraph_query` and `codegraph_audit` tools from the MCP server in favor of canonical `atlas_query` and `atlas_audit` (#41).
+
+### Fixed
+- **JSON-RPC Stdio Reliability & Panic Safety**: Hardened JSON-RPC parsing with standard error codes, prevented stdio write panics on broken pipes (EPIPE), and enforced strict single-line NDJSON protocol responses (#45).
+- **Vault Graph Edge Protection**: Protected vault skill and tag edges during incremental re-indexing in `deleteAllResolvedCodeEdges` and pruned dead functions (#44).
+- **Security Boundary Protection**: Prevented path traversal vulnerabilities in baseline file path resolution (#48).
+
+---
+
 ## [0.5.2] - 2026-10-18
 
 ### Added
@@ -100,6 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[0.6.0]: https://github.com/jefferyforbes/code-atlas/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/jefferyforbes/code-atlas/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/jefferyforbes/code-atlas/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jefferyforbes/code-atlas/compare/v0.4.0...v0.5.0
