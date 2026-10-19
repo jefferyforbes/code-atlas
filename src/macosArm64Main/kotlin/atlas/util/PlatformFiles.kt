@@ -114,6 +114,46 @@ object PlatformFiles {
 
     fun chmod(path: String, mode: UInt): Boolean = platform.posix.chmod(path, mode.toUShort()) == 0
 
+    fun fileMode(path: String): UInt = memScoped {
+        val sb = alloc<stat>()
+        if (stat(path, sb.ptr) == 0) {
+            sb.st_mode.toUInt() and 0b111111111u
+        } else 0u
+    }
+
+    fun writeSecureText(path: String, content: String, mode: UInt = 0b110000000u): Boolean {
+        val parent = parentOf(path)
+        if (parent.isNotEmpty()) {
+            mkdirs(parent)
+            chmod(parent, 0b111000000u)
+        }
+        val ok = writeText(path, content)
+        if (ok) {
+            chmod(path, mode)
+        }
+        return ok
+    }
+
+    fun sanitizeFileName(name: String): String {
+        var res = name
+            .replace('/', '_')
+            .replace('\\', '_')
+            .replace("..", "_")
+            .filter { it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' }
+            .trim('.', '_')
+        while (res.contains("__")) {
+            res = res.replace("__", "_")
+        }
+        return res.trim('.', '_').ifEmpty { "unnamed" }
+    }
+
+    fun sanitizePathSegment(segment: String): String = sanitizeFileName(segment)
+
+    fun logWarning(tag: String, message: String) {
+        platform.posix.fputs("[$tag] Warning: $message\n", platform.posix.stderr)
+        platform.posix.fflush(platform.posix.stderr)
+    }
+
     fun listDirectory(dirPath: String): List<String> {
         val result = mutableListOf<String>()
         val dir = opendir(dirPath) ?: return result

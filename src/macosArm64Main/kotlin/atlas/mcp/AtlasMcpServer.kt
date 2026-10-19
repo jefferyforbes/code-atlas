@@ -874,8 +874,9 @@ class AtlasMcpServer(
 
         val ts = time(null) * 1000L
         val seq = ++spilloverSeq
-        val spillFile = "$artifactsDir/spillover_${projectId}_${ts}_$seq.json"
-        PlatformFiles.writeText(spillFile, rawJson)
+        val safeProject = PlatformFiles.sanitizeFileName(projectId)
+        val spillFile = "$artifactsDir/spillover_${safeProject}_${ts}_$seq.json"
+        PlatformFiles.writeSecureText(spillFile, rawJson)
 
         val gods = store.getGodNodes(projectId, topN = 5).map { it.name }
         return buildJsonObject {

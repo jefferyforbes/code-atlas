@@ -67,7 +67,9 @@ class NativeSqliteDatabase(val path: String) {
             try {
                 exec("ROLLBACK TO SAVEPOINT $safeName;")
                 exec("RELEASE SAVEPOINT $safeName;")
-            } catch (_: Throwable) {}
+            } catch (e: Exception) {
+                PlatformFiles.logWarning("NativeSqliteDatabase", "savepoint rollback failed: ${e.message}")
+            }
             throw t
         }
     }

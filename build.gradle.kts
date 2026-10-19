@@ -46,6 +46,26 @@ tasks.register("test") {
     dependsOn("macosArm64Test")
 }
 
+tasks.register<Exec>("atlasIndex") {
+    group = "verification"
+    description = "Indexes the code-atlas project using the compiled release binary."
+    dependsOn("linkReleaseExecutableMacosArm64")
+    val binary = layout.buildDirectory.file("bin/macosArm64/releaseExecutable/atlas.kexe")
+    commandLine(binary.get().asFile.absolutePath, "index", "--project", "code-atlas")
+}
+
+tasks.register<Exec>("atlasAudit") {
+    group = "verification"
+    description = "Runs the Atlas architectural audit quality gate against the code-atlas project."
+    dependsOn("atlasIndex")
+    val binary = layout.buildDirectory.file("bin/macosArm64/releaseExecutable/atlas.kexe")
+    commandLine(binary.get().asFile.absolutePath, "audit", "--project", "code-atlas")
+}
+
+tasks.named("check") {
+    dependsOn("atlasAudit")
+}
+
 tasks.register<Copy>("installToDist") {
     dependsOn("linkReleaseExecutableMacosArm64")
     from(layout.buildDirectory.file("bin/macosArm64/releaseExecutable/atlas.kexe"))
