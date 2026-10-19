@@ -1384,117 +1384,204 @@ class PolyglotAstExtractor {
             hdrEndLine: Int,
             bodyEndLine: Int
         ): String? {
-            // Check if inline docstring on the header line itself
+            val inlineDoc = extractPythonInlineDoc(lines, declStartLine)
+            if (inlineDoc != null) return inlineDoc
+
+            val blockDoc = extractPythonBlockDoc(lines, hdrEndLine, bodyEndLine)
+            if (blockDoc != null) return blockDoc
+
+            return extractPythonPrecedingComments(lines, declStartLine)
+        }
+
+        private val PYTHON_TRIPLE_QUOTES = listOf(
+            "\"\"\"" to "\"\"\"",
+            "r\"\"\"" to "\"\"\"",
+            "f\"\"\"" to "\"\"\"",
+            "'''" to "'''",
+            "r'''" to "'''",
+            "f'''" to "'''"
+        )
+
+        private fun detectPythonTripleQuote(text: String): String? {
+            for (entry in PYTHON_TRIPLE_QUOTES) {
+                if (text.startsWith(entry.first)) return entry.second
+            }
+            return null
+        }
+
+        private class PythonColonScanState {
+            var parenDepth = 0
+            var bracketDepth = 0
+
+            fun onParenOpen() { parenDepth++ }
+            fun onParenClose() { if (parenDepth > 0) parenDepth-- }
+            fun onBracketOpen() { bracketDepth++ }
+            fun onBracketClose() { if (bracketDepth > 0) bracketDepth-- }
+            fun isAtHeaderColon(): Boolean = parenDepth == 0 && bracketDepth == 0
+        }
+
+        private fun stepColonScan(state: PythonColonScanState, ch: Char): Boolean {
+            when (ch) {
+                '(' -> state.onParenOpen()
+                ')' -> state.onParenClose()
+                '[' -> state.onBracketOpen()
+                ']' -> state.onBracketClose()
+                ':' -> return state.isAtHeaderColon()
+            }
+            return false
+        }
+
+        private fun findPythonHeaderColonIndex(line: String): Int {
+            val state = PythonColonScanState()
+            for (i in line.indices) {
+                if (stepColonScan(state, line[i])) return i
+            }
+            return -1
+        }
+
+        private fun extractPythonInlineDoc(lines: List<String>, declStartLine: Int): String? {
             val declLineIdx = declStartLine - 1
-            if (declLineIdx >= 0 && declLineIdx < lines.size) {
-                val declLine = lines[declLineIdx]
-                var pDepth = 0
-                var bDepth = 0
-                var headerColonIdx = -1
-                for (i in declLine.indices) {
-                    when (declLine[i]) {
-                        '(' -> pDepth++
-                        ')' -> if (pDepth > 0) pDepth--
-                        '[' -> bDepth++
-                        ']' -> if (bDepth > 0) bDepth--
-                        ':' -> if (pDepth == 0 && bDepth == 0) {
-                            headerColonIdx = i
-                            break
-                        }
-                    }
-                }
-                if (headerColonIdx >= 0 && headerColonIdx + 1 < declLine.length) {
-                    val afterColon = declLine.substring(headerColonIdx + 1).trim()
-                    val quote = when {
-                        afterColon.startsWith("\"\"\"") || afterColon.startsWith("r\"\"\"") || afterColon.startsWith("f\"\"\"") -> "\"\"\""
-                        afterColon.startsWith("'''") || afterColon.startsWith("r'''") || afterColon.startsWith("f'''") -> "'''"
-                        else -> null
-                    }
-                    if (quote != null) {
-                        val afterFirst = afterColon.substring(afterColon.indexOf(quote) + quote.length)
-                        if (afterFirst.contains(quote)) {
-                            val content = afterFirst.substringBefore(quote).trim()
-                            if (content.isNotEmpty()) return content
-                        }
-                    }
-                }
+            if (declLineIdx !in lines.indices) return null
+            val declLine = lines[declLineIdx]
+            val colonIdx = findPythonHeaderColonIndex(declLine)
+            if (colonIdx < 0) return null
+            if (colonIdx + 1 >= declLine.length) return null
+
+            val afterColon = declLine.substring(colonIdx + 1).trim()
+            val quote = detectPythonTripleQuote(afterColon) ?: return null
+            val quotePos = afterColon.indexOf(quote)
+            val afterFirst = afterColon.substring(quotePos + quote.length)
+            if (!afterFirst.contains(quote)) return null
+            val content = afterFirst.substringBefore(quote).trim()
+            return if (content.isNotEmpty()) content else null
+        }
+
+        private fun findFirstPythonDocLineIndex(lines: List<String>, start: Int, end: Int): Int {
+            for (idx in start until end) {
+                val trimmed = lines[idx].trim()
+                if (trimmed.isEmpty()) continue
+                if (trimmed.startsWith("#")) continue
+                return idx
+            }
+            return -1
+        }
+
+        private fun isEligibleDocLine(line: String): Boolean {
+            if (line.isEmpty()) return false
+            if (line.startsWith(":")) return false
+            if (line.startsWith("@")) return false
+            return true
+        }
+
+        private fun isDocTerminalLine(line: String): Boolean {
+            if (line.startsWith(":")) return true
+            if (line.startsWith("@")) return true
+            return false
+        }
+
+        private class MultilineDocCollector(private val quote: String) {
+            val docLines = mutableListOf<String>()
+
+            fun addInitial(initial: String) {
+                val trimmed = initial.trim()
+                if (trimmed.isNotEmpty()) docLines.add(trimmed)
             }
 
+            fun processLine(curLine: String): Boolean {
+                if (curLine.contains(quote)) {
+                    val beforeEnd = curLine.substringBefore(quote).trim()
+                    if (isEligibleDocLine(beforeEnd)) docLines.add(beforeEnd)
+                    return false
+                }
+                if (isDocTerminalLine(curLine)) return false
+                if (curLine.isNotEmpty()) docLines.add(curLine)
+                return true
+            }
+
+            fun buildResult(): String? {
+                val result = docLines.joinToString(" ").trim()
+                return if (result.isNotEmpty()) result else null
+            }
+        }
+
+        private fun collectMultilineDocContent(
+            lines: List<String>,
+            startIdx: Int,
+            searchEnd: Int,
+            quote: String,
+            afterFirst: String
+        ): String? {
+            val collector = MultilineDocCollector(quote)
+            collector.addInitial(afterFirst)
+            for (idx in startIdx until searchEnd) {
+                val shouldContinue = collector.processLine(lines[idx].trim())
+                if (!shouldContinue) break
+            }
+            return collector.buildResult()
+        }
+
+        private fun extractPythonBlockDoc(lines: List<String>, hdrEndLine: Int, bodyEndLine: Int): String? {
             val searchStart = hdrEndLine
             val searchEnd = minOf(lines.size, bodyEndLine)
-            var docLineIdx = -1
-            for (idx in searchStart until searchEnd) {
-                val trimmed = lines[idx].trim()
-                if (trimmed.isEmpty() || trimmed.startsWith("#")) continue
-                docLineIdx = idx
-                break
-            }
+            val docLineIdx = findFirstPythonDocLineIndex(lines, searchStart, searchEnd)
+            if (docLineIdx == -1) return null
 
-            if (docLineIdx != -1) {
-                val line = lines[docLineIdx].trim()
-                val quote = when {
-                    line.startsWith("\"\"\"") || line.startsWith("r\"\"\"") || line.startsWith("f\"\"\"") -> "\"\"\""
-                    line.startsWith("'''") || line.startsWith("r'''") || line.startsWith("f'''") -> "'''"
-                    else -> null
-                }
-                if (quote != null) {
-                    val afterFirst = line.substring(line.indexOf(quote) + quote.length)
-                    if (afterFirst.contains(quote)) {
-                        val content = afterFirst.substringBefore(quote).trim()
-                        if (content.isNotEmpty()) return content
-                    } else {
-                        val contentLines = mutableListOf<String>()
-                        if (afterFirst.trim().isNotEmpty()) {
-                            contentLines.add(afterFirst.trim())
-                        }
-                        for (idx in (docLineIdx + 1) until searchEnd) {
-                            val curLine = lines[idx].trim()
-                            if (curLine.contains(quote)) {
-                                val beforeEnd = curLine.substringBefore(quote).trim()
-                                if (beforeEnd.isNotEmpty() && !beforeEnd.startsWith(":") && !beforeEnd.startsWith("@")) {
-                                    contentLines.add(beforeEnd)
-                                }
-                                break
-                            } else {
-                                if (curLine.startsWith(":") || curLine.startsWith("@")) break
-                                if (curLine.isNotEmpty()) contentLines.add(curLine)
-                            }
-                        }
-                        val result = contentLines.joinToString(" ").trim()
-                        if (result.isNotEmpty()) return result
-                    }
+            val line = lines[docLineIdx].trim()
+            val quote = detectPythonTripleQuote(line) ?: return null
+            val afterFirst = line.substring(line.indexOf(quote) + quote.length)
+            if (afterFirst.contains(quote)) {
+                val content = afterFirst.substringBefore(quote).trim()
+                return if (content.isNotEmpty()) content else null
+            }
+            return collectMultilineDocContent(lines, docLineIdx + 1, searchEnd, quote, afterFirst)
+        }
+
+        private fun findPrecedingCommentEndIndex(lines: List<String>, startIdx: Int): Int {
+            var cur = startIdx - 1
+            while (cur >= 0 && lines[cur].trim().startsWith("@")) cur--
+            return cur
+        }
+
+        private fun isPythonNonDocComment(lowercaseLine: String): Boolean {
+            for (prefix in PYTHON_NON_DOC_PREFIXES) {
+                if (lowercaseLine.startsWith(prefix)) return true
+            }
+            return false
+        }
+
+        private fun findPrecedingCommentStartIndex(lines: List<String>, commentEnd: Int): Int {
+            var cStart = commentEnd
+            while (cStart > 0 && lines[cStart - 1].trim().startsWith("#")) {
+                val prevLow = lines[cStart - 1].trim().lowercase()
+                if (isPythonNonDocComment(prevLow)) break
+                cStart--
+            }
+            return cStart
+        }
+
+        private fun collectPrecedingCommentLines(lines: List<String>, cStart: Int, cEnd: Int): String? {
+            val commentLines = mutableListOf<String>()
+            for (i in cStart..cEnd) {
+                val cTrim = lines[i].trim()
+                val cLow = cTrim.lowercase()
+                if (isPythonNonDocComment(cLow)) break
+                val c = cTrim.removePrefix("#").trim()
+                if (c.isNotEmpty()) {
+                    commentLines.add(c)
                 }
             }
+            val result = commentLines.joinToString(" ").trim()
+            return if (result.isNotEmpty()) result else null
+        }
 
-            // Fallback: check preceding # comments right before declStartLine
+        private fun extractPythonPrecedingComments(lines: List<String>, declStartLine: Int): String? {
             val startIdx = declStartLine - 1
-            if (startIdx > 0) {
-                var cur = startIdx - 1
-                while (cur >= 0 && lines[cur].trim().startsWith("@")) cur--
-                if (cur >= 0 && lines[cur].trim().startsWith("#")) {
-                    var cEnd = cur
-                    var cStart = cur
-                    while (cStart > 0 && lines[cStart - 1].trim().startsWith("#")) {
-                        val prevLow = lines[cStart - 1].trim().lowercase()
-                        if (PYTHON_NON_DOC_PREFIXES.any { prevLow.startsWith(it) }) break
-                        cStart--
-                    }
-                    val commentLines = mutableListOf<String>()
-                    for (i in cStart..cEnd) {
-                        val cTrim = lines[i].trim()
-                        val cLow = cTrim.lowercase()
-                        if (PYTHON_NON_DOC_PREFIXES.any { cLow.startsWith(it) }) break
-                        val c = cTrim.removePrefix("#").trim()
-                        if (c.isNotEmpty()) {
-                            commentLines.add(c)
-                        }
-                    }
-                    val result = commentLines.joinToString(" ").trim()
-                    if (result.isNotEmpty()) return result
-                }
-            }
-
-            return null
+            if (startIdx <= 0) return null
+            val cEnd = findPrecedingCommentEndIndex(lines, startIdx)
+            if (cEnd < 0) return null
+            if (!lines[cEnd].trim().startsWith("#")) return null
+            val cStart = findPrecedingCommentStartIndex(lines, cEnd)
+            return collectPrecedingCommentLines(lines, cStart, cEnd)
         }
 
         private fun extractKotlin(
