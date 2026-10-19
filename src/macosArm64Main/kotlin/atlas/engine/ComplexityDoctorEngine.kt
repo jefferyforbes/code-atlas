@@ -55,13 +55,24 @@ class ComplexityDoctorEngine(
                 continue
             }
 
+            val ext = if (filePath.contains('.')) "." + filePath.substringAfterLast('.') else ""
+            val lang = PolyglotAstExtractor.supportedLanguage(ext)
+            val preExtractedNodes = if (lang.isNotEmpty()) {
+                try {
+                    PolyglotAstExtractor.extractFile(projectId, filePath, sourceText).first
+                } catch (_: Exception) {
+                    null
+                }
+            } else null
+
             for (node in nodes) {
                 val prescriptions = analyzeSource(
                     filePath = filePath,
                     sourceText = sourceText,
                     nodeId = node.nodeId,
                     inDegree = node.inDegree,
-                    projectId = projectId
+                    projectId = projectId,
+                    preExtractedNodes = preExtractedNodes
                 )
                 candidatePrescriptions.addAll(prescriptions)
             }
@@ -90,19 +101,19 @@ class ComplexityDoctorEngine(
         sourceText: String,
         nodeId: String = "",
         inDegree: Int = 0,
-        projectId: String = "default"
+        projectId: String = "default",
+        preExtractedNodes: List<GraphNode>? = null
     ): List<ComplexityDoctorReport.Prescription> {
         val ext = if (filePath.contains('.')) "." + filePath.substringAfterLast('.') else ""
         val lang = PolyglotAstExtractor.supportedLanguage(ext)
         if (lang.isEmpty()) return emptyList()
 
-        val extracted = try {
-            PolyglotAstExtractor.extractFile(projectId, filePath, sourceText)
+        val nodes = preExtractedNodes ?: try {
+            PolyglotAstExtractor.extractFile(projectId, filePath, sourceText).first
         } catch (_: Exception) {
             return emptyList()
         }
 
-        val nodes = extracted.first
         val candidatePrescriptions = mutableListOf<ComplexityDoctorReport.Prescription>()
 
         val funcNodes = nodes.filter { it.kind in setOf("function", "method", "composable") }
