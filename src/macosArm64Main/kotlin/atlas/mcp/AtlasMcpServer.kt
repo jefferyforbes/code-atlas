@@ -963,195 +963,302 @@ class AtlasMcpServer(
         }
     }
 
+    private fun extractAuditTargets(args: JsonObject): List<String> {
+        val fromArray = args["targets"]?.jsonArray ?: args["seeds"]?.jsonArray
+        if (fromArray != null) {
+            return fromArray.map { it.jsonPrimitive.content }.filter { it.isNotBlank() }
+        }
+        val single = args["target"]?.jsonPrimitive?.contentOrNull?.ifBlank { null }
+        return if (single != null) listOf(single) else emptyList()
+    }
+
     private fun handleAudit(args: JsonObject): JsonObject {
         val action = args["action"]?.jsonPrimitive?.content ?: "verify_architecture"
         val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
-        val targets = (args["targets"]?.jsonArray?.map { it.jsonPrimitive.content }
-            ?: args["seeds"]?.jsonArray?.map { it.jsonPrimitive.content }
-            ?: listOfNotNull(args["target"]?.jsonPrimitive?.contentOrNull?.ifBlank { null }))
-            .filter { it.isNotBlank() }
-        val stabilityConfigPath = args["stability_config_path"]?.jsonPrimitive?.contentOrNull
-        val compilerReportsDir = args["compiler_reports_dir"]?.jsonPrimitive?.contentOrNull
-        val traceLogPath = args["trace_log_path"]?.jsonPrimitive?.contentOrNull
-        val strongSkipping = args["strong_skipping"]?.jsonPrimitive?.booleanOrNull ?: true
-        val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 10
+        val targets = extractAuditTargets(args)
 
+        return when {
+            action.startsWith("figma_") -> handleAuditFigmaAction(action, args)
+            action.startsWith("compose_") || action == "audit_compose" -> handleAuditComposeAction(action, args, project, targets)
+            action.startsWith("complexity_") || action == "audit_complexity" -> handleAuditComplexityAction(action, args, project, targets)
+            else -> handleAuditCoreAction(action, args, project, targets)
+        }
+    }
+
+    private fun handleAuditFigmaAction(action: String, args: JsonObject): JsonObject {
         return when (action) {
-            "sync_index" -> {
-                if (stabilityConfigPath != null || compilerReportsDir != null || traceLogPath != null) {
-                    indexComposeArtifacts(
-                        projectId = project,
-                        subpaths = if (targets.isNotEmpty()) targets else null,
-                        stabilityConfigPath = stabilityConfigPath,
-                        compilerReportsDir = compilerReportsDir,
-                        traceLogPath = traceLogPath
-                    )
-                } else {
-                    indexWorkspace(project, subpaths = if (targets.isNotEmpty()) targets else null)
-                }
-            }
-            "synthesize_3d_scope" -> {
-                val rec = synthesizer.synthesizeScope(project, targets)
-                val baseObj = json.encodeToJsonElement(rec).jsonObject
-                val scopeAnnotations = rec.seedTargets.flatMap { target ->
-                    val node = store.getNode(project, target)
-                    if (node != null) memory.getActiveAnnotations(project, node.nodeId)
-                    else emptyList()
-                }
-                buildJsonObject {
-                    baseObj.forEach { (k, v) -> put(k, v) }
-                    put("yaml_block", rec.toYamlBlock())
-                    put("annotations", json.encodeToJsonElement(scopeAnnotations))
-                }
-            }
-            "architect_context" -> {
-                val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 2
-                val result = architectContextEngine.synthesizeContext(
-                    projectId = project,
-                    seedTargets = targets,
-                    depth = depth
-                )
-                json.encodeToJsonElement(result).jsonObject
-            }
-            "verify_architecture" -> {
-                val descMode = args["description_mode"]?.jsonPrimitive?.contentOrNull ?: "domain-only"
-                val report = auditor.runFullAudit(
-                    projectId = project,
-                    pathPrefixes = if (targets.isNotEmpty()) targets else null,
-                    descriptionMode = descMode
-                )
-                json.encodeToJsonElement(report).jsonObject
-            }
-            "check_descriptions" -> {
-                val descMode = args["description_mode"]?.jsonPrimitive?.contentOrNull ?: "domain-only"
-                val suggestions = auditor.checkTopLevelDescriptions(
-                    projectId = project,
-                    pathPrefixes = targets,
-                    mode = descMode
-                )
-                buildJsonObject {
-                    put("project", project)
-                    put("mode", descMode)
-                    put("total_suggestions", suggestions.size)
-                    put("suggestions", json.encodeToJsonElement(suggestions))
-                }
-            }
-            "audit_compose" -> {
-                if (stabilityConfigPath != null || compilerReportsDir != null || traceLogPath != null) {
-                    indexComposeArtifacts(
-                        projectId = project,
-                        subpaths = if (targets.isNotEmpty()) targets else null,
-                        stabilityConfigPath = stabilityConfigPath,
-                        compilerReportsDir = compilerReportsDir,
-                        traceLogPath = traceLogPath
-                    )
-                }
-                val report = auditor.runComposeAudit(project, strongSkipping = strongSkipping)
-                json.encodeToJsonElement(report).jsonObject
-            }
-            "compose_doctor" -> {
-                val targetSym = targets.firstOrNull() ?: args["target"]?.jsonPrimitive?.contentOrNull
-                val report = composeEngine.runDoctor(project, target = targetSym, limit = limit, workspaceRoot = workspaceRoot)
-                json.encodeToJsonElement(report).jsonObject
-            }
-            "audit_complexity" -> handleAuditComplexity(args, project, targets)
-            "complexity_doctor" -> handleAuditComplexityDoctor(args, project, targets, limit)
-            "synthesize_compose_scope" -> {
-                val scope = synthesizer.synthesizeComposeScope(project, targets)
-                val baseObj = json.encodeToJsonElement(scope).jsonObject
-                val scopeAnnotations = scope.sharedStableModels.flatMap { modelId ->
-                    memory.getActiveAnnotations(project, modelId)
-                }
-                buildJsonObject {
-                    baseObj.forEach { (k, v) -> put(k, v) }
-                    put("annotations", json.encodeToJsonElement(scopeAnnotations))
-                }
-            }
-            "verify_remediation" -> {
-                val filePath = args["file_path"]?.jsonPrimitive?.contentOrNull
-                    ?: (targets.firstOrNull() ?: (args["target"]?.jsonPrimitive?.contentOrNull ?: ""))
-                val beforeSnippet = args["before_snippet"]?.jsonPrimitive?.content ?: ""
-                val afterSnippet = args["after_snippet"]?.jsonPrimitive?.content ?: ""
-                val ruleId = args["rule_id"]?.jsonPrimitive?.content ?: "GENERIC"
-                val targetNodeId = args["target_node_id"]?.jsonPrimitive?.contentOrNull
-                val writeSiteSafe = args["write_site_safe"]?.jsonPrimitive?.booleanOrNull ?: true
-                val dryRun = args["dry_run"]?.jsonPrimitive?.booleanOrNull ?: true
-                val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
-                val res = resolveServerForProject(project).remediationVerifier.verifyAndApply(
-                    projectSlug = project,
-                    relPath = filePath,
-                    beforeSnippet = beforeSnippet,
-                    afterSnippet = afterSnippet,
-                    ruleId = ruleId,
-                    targetNodeId = targetNodeId,
-                    writeSiteSafe = writeSiteSafe,
-                    dryRun = dryRun,
-                    testCommand = testCmd
-                )
-                json.encodeToJsonElement(res).jsonObject
-            }
-            "dead_code" -> {
-                val deadNodes = auditor.detectDeadCode(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
-                buildJsonObject {
-                    put("project", project)
-                    put("dead_code_count", deadNodes.size)
-                    put("dead_nodes", json.encodeToJsonElement(deadNodes))
-                }
-            }
-            "record_memory" -> {
-                val targetStr = if (targets.isNotEmpty()) targets[0] else ""
-                val node = store.getNode(project, targetStr)
-                val nodeId = node?.nodeId ?: targetStr
-                val outcome = args["outcome"]?.jsonPrimitive?.content ?: "useful"
-                val note = args["note"]?.jsonPrimitive?.content ?: ""
-                val annId = memory.recordOutcome(project, nodeId, outcome, note)
-                buildJsonObject {
-                    put("annotation_id", annId)
-                    put("node_id", nodeId)
-                    put("outcome", outcome)
-                }
-            }
-            "remedy_architecture", "fix_architecture", "fix", "remedy" -> {
-                val targetList = if (targets.isNotEmpty()) targets else (args["path"]?.jsonPrimitive?.contentOrNull?.let { listOf(it) } ?: emptyList())
-                val ruleFilter = args["rule"]?.jsonPrimitive?.contentOrNull ?: args["rule_id"]?.jsonPrimitive?.contentOrNull
-                val dryRun = args["dry_run"]?.jsonPrimitive?.booleanOrNull ?: (!args["apply"]?.jsonPrimitive?.booleanOrNull.let { it == true })
-                val split = args["split"]?.jsonPrimitive?.booleanOrNull ?: true
-                val makePrivate = args["make_private"]?.jsonPrimitive?.booleanOrNull ?: false
-                val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
-                val limitArg = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
-                val active = resolveServerForProject(project)
-                val report = active.remediationEngine.planAndRemediate(
-                    projectId = project,
-                    targetPaths = targetList,
-                    ruleFilter = ruleFilter,
-                    dryRun = dryRun,
-                    splitBoost003 = split,
-                    makePrivateBoost003 = makePrivate,
-                    testCommand = testCmd,
-                    limit = limitArg
-                )
-                if (!dryRun) {
-                    active.indexer.indexWorkspace(project, force = true)
-                }
-                json.encodeToJsonElement(report).jsonObject
-            }
-            "migrate_tools", "check_legacy_tools" -> {
-                val apply = args["apply"]?.jsonPrimitive?.booleanOrNull ?: false
-                val scanPaths = if (targets.isNotEmpty()) {
-                    targets
-                } else {
-                    val p = args["path"]?.jsonPrimitive?.contentOrNull
-                        ?: args["file_path"]?.jsonPrimitive?.contentOrNull
-                        ?: workspaceRoot
-                    listOf(p)
-                }
-                val report = ToolMigrationEngine.scanAndMigrate(scanPaths, apply = apply)
-                json.encodeToJsonElement(report).jsonObject
-            }
             "figma_audit" -> handleFigmaAudit(args)
             "figma_scope" -> handleFigmaScope(args)
+            else -> throw IllegalArgumentException("Unsupported figma action: $action")
+        }
+    }
+
+    private fun handleAuditComposeAction(
+        action: String,
+        args: JsonObject,
+        project: String,
+        targets: List<String>
+    ): JsonObject {
+        return when (action) {
+            "audit_compose" -> {
+                val stabilityConfigPath = args["stability_config_path"]?.jsonPrimitive?.contentOrNull
+                val compilerReportsDir = args["compiler_reports_dir"]?.jsonPrimitive?.contentOrNull
+                val traceLogPath = args["trace_log_path"]?.jsonPrimitive?.contentOrNull
+                val strongSkipping = args["strong_skipping"]?.jsonPrimitive?.booleanOrNull ?: true
+                handleAuditCompose(project, targets, stabilityConfigPath, compilerReportsDir, traceLogPath, strongSkipping)
+            }
+            "compose_doctor" -> {
+                val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 10
+                handleAuditComposeDoctor(args, project, targets, limit)
+            }
+            else -> throw IllegalArgumentException("Unsupported compose action: $action")
+        }
+    }
+
+    private fun handleAuditComplexityAction(
+        action: String,
+        args: JsonObject,
+        project: String,
+        targets: List<String>
+    ): JsonObject {
+        return when (action) {
+            "audit_complexity" -> handleAuditComplexity(args, project, targets)
+            "complexity_doctor" -> {
+                val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 10
+                handleAuditComplexityDoctor(args, project, targets, limit)
+            }
+            else -> throw IllegalArgumentException("Unsupported complexity action: $action")
+        }
+    }
+
+    private fun handleAuditCoreAction(
+        action: String,
+        args: JsonObject,
+        project: String,
+        targets: List<String>
+    ): JsonObject {
+        return when (action) {
+            "sync_index" -> {
+                val stabilityConfigPath = args["stability_config_path"]?.jsonPrimitive?.contentOrNull
+                val compilerReportsDir = args["compiler_reports_dir"]?.jsonPrimitive?.contentOrNull
+                val traceLogPath = args["trace_log_path"]?.jsonPrimitive?.contentOrNull
+                handleAuditSyncIndex(project, targets, stabilityConfigPath, compilerReportsDir, traceLogPath)
+            }
+            "synthesize_3d_scope" -> handleAuditSynthesize3dScope(project, targets)
+            "synthesize_compose_scope" -> handleAuditSynthesizeComposeScope(project, targets)
+            "architect_context" -> handleAuditArchitectContext(args, project, targets)
+            "verify_architecture" -> handleAuditVerifyArchitecture(args, project, targets)
+            "check_descriptions" -> handleAuditCheckDescriptions(args, project, targets)
+            "verify_remediation" -> handleAuditVerifyRemediation(args, project, targets)
+            "dead_code" -> handleAuditDeadCode(project, targets)
+            "record_memory" -> handleAuditRecordMemory(args, project, targets)
+            "remedy_architecture", "fix_architecture", "fix", "remedy" -> handleAuditRemedyArchitecture(args, project, targets)
+            "migrate_tools", "check_legacy_tools" -> handleAuditMigrateTools(args, targets)
             else -> throw IllegalArgumentException("Unsupported atlas_audit action: $action")
         }
+    }
+
+    private fun handleAuditSyncIndex(
+        project: String,
+        targets: List<String>,
+        stabilityConfigPath: String?,
+        compilerReportsDir: String?,
+        traceLogPath: String?
+    ): JsonObject {
+        val hasComposeArtifacts = stabilityConfigPath != null || compilerReportsDir != null || traceLogPath != null
+        val subpaths = if (targets.isNotEmpty()) targets else null
+        return if (hasComposeArtifacts) {
+            indexComposeArtifacts(
+                projectId = project,
+                subpaths = subpaths,
+                stabilityConfigPath = stabilityConfigPath,
+                compilerReportsDir = compilerReportsDir,
+                traceLogPath = traceLogPath
+            )
+        } else {
+            indexWorkspace(project, subpaths = subpaths)
+        }
+    }
+
+    private fun handleAuditSynthesize3dScope(project: String, targets: List<String>): JsonObject {
+        val rec = synthesizer.synthesizeScope(project, targets)
+        val baseObj = json.encodeToJsonElement(rec).jsonObject
+        val scopeAnnotations = rec.seedTargets.flatMap { target ->
+            val node = store.getNode(project, target)
+            if (node != null) memory.getActiveAnnotations(project, node.nodeId)
+            else emptyList()
+        }
+        return buildJsonObject {
+            baseObj.forEach { (k, v) -> put(k, v) }
+            put("yaml_block", rec.toYamlBlock())
+            put("annotations", json.encodeToJsonElement(scopeAnnotations))
+        }
+    }
+
+    private fun handleAuditSynthesizeComposeScope(project: String, targets: List<String>): JsonObject {
+        val scope = synthesizer.synthesizeComposeScope(project, targets)
+        val baseObj = json.encodeToJsonElement(scope).jsonObject
+        val scopeAnnotations = scope.sharedStableModels.flatMap { modelId ->
+            memory.getActiveAnnotations(project, modelId)
+        }
+        return buildJsonObject {
+            baseObj.forEach { (k, v) -> put(k, v) }
+            put("annotations", json.encodeToJsonElement(scopeAnnotations))
+        }
+    }
+
+    private fun handleAuditArchitectContext(args: JsonObject, project: String, targets: List<String>): JsonObject {
+        val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 2
+        val result = architectContextEngine.synthesizeContext(
+            projectId = project,
+            seedTargets = targets,
+            depth = depth
+        )
+        return json.encodeToJsonElement(result).jsonObject
+    }
+
+    private fun handleAuditVerifyArchitecture(args: JsonObject, project: String, targets: List<String>): JsonObject {
+        val descMode = args["description_mode"]?.jsonPrimitive?.contentOrNull ?: "domain-only"
+        val report = auditor.runFullAudit(
+            projectId = project,
+            pathPrefixes = if (targets.isNotEmpty()) targets else null,
+            descriptionMode = descMode
+        )
+        return json.encodeToJsonElement(report).jsonObject
+    }
+
+    private fun handleAuditCheckDescriptions(args: JsonObject, project: String, targets: List<String>): JsonObject {
+        val descMode = args["description_mode"]?.jsonPrimitive?.contentOrNull ?: "domain-only"
+        val suggestions = auditor.checkTopLevelDescriptions(
+            projectId = project,
+            pathPrefixes = targets,
+            mode = descMode
+        )
+        return buildJsonObject {
+            put("project", project)
+            put("mode", descMode)
+            put("total_suggestions", suggestions.size)
+            put("suggestions", json.encodeToJsonElement(suggestions))
+        }
+    }
+
+    private fun handleAuditCompose(
+        project: String,
+        targets: List<String>,
+        stabilityConfigPath: String?,
+        compilerReportsDir: String?,
+        traceLogPath: String?,
+        strongSkipping: Boolean
+    ): JsonObject {
+        if (stabilityConfigPath != null || compilerReportsDir != null || traceLogPath != null) {
+            indexComposeArtifacts(
+                projectId = project,
+                subpaths = if (targets.isNotEmpty()) targets else null,
+                stabilityConfigPath = stabilityConfigPath,
+                compilerReportsDir = compilerReportsDir,
+                traceLogPath = traceLogPath
+            )
+        }
+        val report = auditor.runComposeAudit(project, strongSkipping = strongSkipping)
+        return json.encodeToJsonElement(report).jsonObject
+    }
+
+    private fun handleAuditComposeDoctor(args: JsonObject, project: String, targets: List<String>, limit: Int): JsonObject {
+        val targetSym = targets.firstOrNull() ?: args["target"]?.jsonPrimitive?.contentOrNull
+        val report = composeEngine.runDoctor(project, target = targetSym, limit = limit, workspaceRoot = workspaceRoot)
+        return json.encodeToJsonElement(report).jsonObject
+    }
+
+    private fun handleAuditVerifyRemediation(args: JsonObject, project: String, targets: List<String>): JsonObject {
+        val filePath = args["file_path"]?.jsonPrimitive?.contentOrNull
+            ?: targets.firstOrNull()
+            ?: args["target"]?.jsonPrimitive?.contentOrNull
+            ?: ""
+        val beforeSnippet = args["before_snippet"]?.jsonPrimitive?.content ?: ""
+        val afterSnippet = args["after_snippet"]?.jsonPrimitive?.content ?: ""
+        val ruleId = args["rule_id"]?.jsonPrimitive?.content ?: "GENERIC"
+        val targetNodeId = args["target_node_id"]?.jsonPrimitive?.contentOrNull
+        val writeSiteSafe = args["write_site_safe"]?.jsonPrimitive?.booleanOrNull ?: true
+        val dryRun = args["dry_run"]?.jsonPrimitive?.booleanOrNull ?: true
+        val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
+        val res = resolveServerForProject(project).remediationVerifier.verifyAndApply(
+            projectSlug = project,
+            relPath = filePath,
+            beforeSnippet = beforeSnippet,
+            afterSnippet = afterSnippet,
+            ruleId = ruleId,
+            targetNodeId = targetNodeId,
+            writeSiteSafe = writeSiteSafe,
+            dryRun = dryRun,
+            testCommand = testCmd
+        )
+        return json.encodeToJsonElement(res).jsonObject
+    }
+
+    private fun handleAuditDeadCode(project: String, targets: List<String>): JsonObject {
+        val deadNodes = auditor.detectDeadCode(project, pathPrefixes = if (targets.isNotEmpty()) targets else null)
+        return buildJsonObject {
+            put("project", project)
+            put("dead_code_count", deadNodes.size)
+            put("dead_nodes", json.encodeToJsonElement(deadNodes))
+        }
+    }
+
+    private fun handleAuditRecordMemory(args: JsonObject, project: String, targets: List<String>): JsonObject {
+        val targetStr = if (targets.isNotEmpty()) targets[0] else ""
+        val node = store.getNode(project, targetStr)
+        val nodeId = node?.nodeId ?: targetStr
+        val outcome = args["outcome"]?.jsonPrimitive?.content ?: "useful"
+        val note = args["note"]?.jsonPrimitive?.content ?: ""
+        val annId = memory.recordOutcome(project, nodeId, outcome, note)
+        return buildJsonObject {
+            put("annotation_id", annId)
+            put("node_id", nodeId)
+            put("outcome", outcome)
+        }
+    }
+
+    private fun handleAuditRemedyArchitecture(args: JsonObject, project: String, targets: List<String>): JsonObject {
+        val targetList = if (targets.isNotEmpty()) {
+            targets
+        } else {
+            args["path"]?.jsonPrimitive?.contentOrNull?.let { listOf(it) } ?: emptyList()
+        }
+        val ruleFilter = args["rule"]?.jsonPrimitive?.contentOrNull ?: args["rule_id"]?.jsonPrimitive?.contentOrNull
+        val dryRun = args["dry_run"]?.jsonPrimitive?.booleanOrNull ?: (!args["apply"]?.jsonPrimitive?.booleanOrNull.let { it == true })
+        val split = args["split"]?.jsonPrimitive?.booleanOrNull ?: true
+        val makePrivate = args["make_private"]?.jsonPrimitive?.booleanOrNull ?: false
+        val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
+        val limitArg = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
+        val active = resolveServerForProject(project)
+        val report = active.remediationEngine.planAndRemediate(
+            projectId = project,
+            targetPaths = targetList,
+            ruleFilter = ruleFilter,
+            dryRun = dryRun,
+            splitBoost003 = split,
+            makePrivateBoost003 = makePrivate,
+            testCommand = testCmd,
+            limit = limitArg
+        )
+        if (!dryRun) {
+            active.indexer.indexWorkspace(project, force = true)
+        }
+        return json.encodeToJsonElement(report).jsonObject
+    }
+
+    private fun handleAuditMigrateTools(args: JsonObject, targets: List<String>): JsonObject {
+        val apply = args["apply"]?.jsonPrimitive?.booleanOrNull ?: false
+        val scanPaths = if (targets.isNotEmpty()) {
+            targets
+        } else {
+            val p = args["path"]?.jsonPrimitive?.contentOrNull
+                ?: args["file_path"]?.jsonPrimitive?.contentOrNull
+                ?: workspaceRoot
+            listOf(p)
+        }
+        val report = ToolMigrationEngine.scanAndMigrate(scanPaths, apply = apply)
+        return json.encodeToJsonElement(report).jsonObject
     }
 
     private fun handleAuditComplexity(
