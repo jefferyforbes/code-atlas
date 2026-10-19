@@ -772,6 +772,175 @@ class PolyglotAstExtractor {
             return tokens.any { it in kws }
         }
 
+        private val LINE_CONTINUATION_SUFFIXES = setOf(
+            "=", "+", "-", "*", "/", "%", "&&", "||", "?:",
+            ".", "?.", "::", ",", "->", ":", "&", "|"
+        )
+
+        private val NEXT_LINE_CONTINUATION_PREFIXES = setOf(
+            ".", "?.", "?:", "->", "+", "-", "*", "/", "&&", "||", "&", "|"
+        )
+
+        private val COMPARISON_CHARS = setOf('=', '!', '<', '>')
+
+        private class BlockScanState {
+            var depth = 0
+            var started = false
+            var hasEquals = false
+            var seenKeyword = false
+            var parenDepth = 0
+            var bracketDepth = 0
+
+            fun isExpressionBoundary(): Boolean {
+                if (!seenKeyword) return false
+                if (parenDepth != 0) return false
+                return bracketDepth == 0
+            }
+
+            fun scanLine(clean: String) {
+                if (!seenKeyword && hasDeclarationKeyword(clean)) {
+                    seenKeyword = true
+                }
+                for (i in clean.indices) {
+                    processChar(clean, i)
+                }
+            }
+
+            private fun processChar(clean: String, i: Int) {
+                when (clean[i]) {
+                    '(' -> parenDepth++
+                    ')' -> if (parenDepth > 0) parenDepth--
+                    '[' -> bracketDepth++
+                    ']' -> if (bracketDepth > 0) bracketDepth--
+                    '=' -> recordEquals(clean, i)
+                    '{' -> recordOpenBrace()
+                    '}' -> recordCloseBrace()
+                }
+            }
+
+            private fun recordEquals(clean: String, i: Int) {
+                if (started) return
+                if (parenDepth != 0) return
+                if (bracketDepth != 0) return
+                val prev = if (i > 0) clean[i - 1] else ' '
+                val next = if (i + 1 < clean.length) clean[i + 1] else ' '
+                if (prev in COMPARISON_CHARS) return
+                if (next == '=') return
+                hasEquals = true
+            }
+
+            private fun recordOpenBrace() {
+                if (parenDepth == 0 && bracketDepth == 0) {
+                    depth++
+                    started = true
+                } else if (started) {
+                    depth++
+                }
+            }
+
+            private fun recordCloseBrace() {
+                if (started) {
+                    depth--
+                }
+            }
+        }
+
+        private fun isLineContinuation(trimmed: String): Boolean =
+            LINE_CONTINUATION_SUFFIXES.any { trimmed.endsWith(it) }
+
+        private fun isNextLineContinuation(nextTrimmed: String): Boolean =
+            NEXT_LINE_CONTINUATION_PREFIXES.any { nextTrimmed.startsWith(it) }
+
+        private fun findNextNonEmptyLineIndex(cleanLines: List<String>, fromIndex: Int): Int {
+            var lookAhead = fromIndex
+            while (lookAhead < cleanLines.size && cleanLines[lookAhead].trim().isEmpty()) {
+                lookAhead++
+            }
+            return lookAhead
+        }
+
+        private fun isBlockContinuation(trimmed: String, cleanLines: List<String>, fromIndex: Int): Boolean {
+            if (isLineContinuation(trimmed)) return true
+            val lookAhead = findNextNonEmptyLineIndex(cleanLines, fromIndex)
+            if (lookAhead >= cleanLines.size) return false
+            return isNextLineContinuation(cleanLines[lookAhead].trim())
+        }
+
+        private fun isNonEqualsTerminated(nextTrimmed: String): Boolean =
+            !nextTrimmed.startsWith("=") && !nextTrimmed.startsWith("=>")
+
+        private fun isIndentedPastBase(lines: List<String>, startLine: Int, lookAhead: Int): Boolean {
+            val baseIndent = lines[startLine - 1].takeWhile { it == ' ' || it == '\t' }.length
+            val nextIndent = lines[lookAhead].takeWhile { it == ' ' || it == '\t' }.length
+            return nextIndent <= baseIndent
+        }
+
+        private fun isSingleExpressionTerminated(
+            lines: List<String>,
+            cleanLines: List<String>,
+            startLine: Int,
+            lookAhead: Int,
+            hasEquals: Boolean
+        ): Boolean {
+            val nextTrimmed = cleanLines[lookAhead].trim()
+            if (nextTrimmed.startsWith("{")) return false
+            if (!hasEquals) return isNonEqualsTerminated(nextTrimmed)
+            if (isNewDeclarationStart(nextTrimmed)) return true
+            if (nextTrimmed.startsWith("}")) return true
+            return isIndentedPastBase(lines, startLine, lookAhead)
+        }
+
+        private fun checkExpressionEndLine(
+            lines: List<String>,
+            cleanLines: List<String>,
+            clean: String,
+            idx: Int,
+            startLine: Int,
+            hasEquals: Boolean
+        ): Int? {
+            val trimmed = clean.trimEnd()
+            if (trimmed.endsWith(";")) return idx + 1
+            if (isLineContinuation(trimmed)) return null
+
+            val lookAhead = findNextNonEmptyLineIndex(cleanLines, idx + 1)
+            if (lookAhead >= cleanLines.size) return idx + 1
+            if (isNextLineContinuation(cleanLines[lookAhead].trim())) return null
+
+            if (isSingleExpressionTerminated(lines, cleanLines, startLine, lookAhead, hasEquals)) {
+                return idx + 1
+            }
+            return null
+        }
+
+        private fun checkStartedBlockEnd(
+            clean: String,
+            cleanLines: List<String>,
+            idx: Int,
+            state: BlockScanState
+        ): Int? {
+            if (state.depth > 0) return null
+            if (!state.hasEquals) return idx + 1
+            if (isBlockContinuation(clean.trimEnd(), cleanLines, idx + 1)) return null
+            return idx + 1
+        }
+
+        private fun checkLineTermination(
+            lines: List<String>,
+            cleanLines: List<String>,
+            clean: String,
+            idx: Int,
+            startLine: Int,
+            state: BlockScanState
+        ): Int? {
+            if (state.started) {
+                return checkStartedBlockEnd(clean, cleanLines, idx, state)
+            }
+            if (state.isExpressionBoundary()) {
+                return checkExpressionEndLine(lines, cleanLines, clean, idx, startLine, state.hasEquals)
+            }
+            return null
+        }
+
         private fun findBlockEndLine(
             lines: List<String>,
             startLine: Int,
@@ -781,184 +950,14 @@ class PolyglotAstExtractor {
 
             val startIdx = startLine - 1
             val cleanLines = precomputedCleanLines ?: cleanLinesFrom(lines, 0)
-
-            var depth = 0
-            var started = false
-            var hasEquals = false
-            var seenKeyword = false
-            var parenDepth = 0
-            var bracketDepth = 0
+            val state = BlockScanState()
 
             for (idx in startIdx until cleanLines.size) {
                 val clean = cleanLines[idx]
+                state.scanLine(clean)
 
-                if (!seenKeyword) {
-                    if (hasDeclarationKeyword(clean)) {
-                        seenKeyword = true
-                    }
-                }
-
-                for (i in clean.indices) {
-                    val c = clean[i]
-                    when (c) {
-                        '(' -> parenDepth++
-                        ')' -> if (parenDepth > 0) parenDepth--
-                        '[' -> bracketDepth++
-                        ']' -> if (bracketDepth > 0) bracketDepth--
-                        '=' -> {
-                            if (!started && parenDepth == 0 && bracketDepth == 0) {
-                                val prev = if (i > 0) clean[i - 1] else ' '
-                                val next = if (i + 1 < clean.length) clean[i + 1] else ' '
-                                val isComparison = prev in listOf('=', '!', '<', '>') || next == '='
-                                if (!isComparison) {
-                                    hasEquals = true
-                                }
-                            }
-                        }
-                        '{' -> {
-                            if (parenDepth == 0 && bracketDepth == 0) {
-                                depth++
-                                started = true
-                            } else if (started) {
-                                depth++
-                            }
-                        }
-                        '}' -> {
-                            if (started) {
-                                depth--
-                            }
-                        }
-                    }
-                }
-
-                if (started && depth <= 0) {
-                    if (!hasEquals) {
-                        return idx + 1
-                    }
-                    val trimmed = clean.trimEnd()
-                    val isContinuation = trimmed.endsWith("=") ||
-                        trimmed.endsWith("+") ||
-                        trimmed.endsWith("-") ||
-                        trimmed.endsWith("*") ||
-                        trimmed.endsWith("/") ||
-                        trimmed.endsWith("%") ||
-                        trimmed.endsWith("&&") ||
-                        trimmed.endsWith("||") ||
-                        trimmed.endsWith("?:") ||
-                        trimmed.endsWith(".") ||
-                        trimmed.endsWith("?.") ||
-                        trimmed.endsWith("::") ||
-                        trimmed.endsWith(",") ||
-                        trimmed.endsWith("->") ||
-                        trimmed.endsWith(":") ||
-                        trimmed.endsWith("&") ||
-                        trimmed.endsWith("|")
-
-                    var lookAhead = idx + 1
-                    while (lookAhead < cleanLines.size && cleanLines[lookAhead].trim().isEmpty()) {
-                        lookAhead++
-                    }
-
-                    if (lookAhead >= cleanLines.size) {
-                        return idx + 1
-                    }
-
-                    val nextClean = cleanLines[lookAhead]
-                    val nextTrimmed = nextClean.trim()
-                    val nextIsContinuation = nextTrimmed.startsWith(".") ||
-                        nextTrimmed.startsWith("?.") ||
-                        nextTrimmed.startsWith("?:") ||
-                        nextTrimmed.startsWith("->") ||
-                        nextTrimmed.startsWith("+") ||
-                        nextTrimmed.startsWith("-") ||
-                        nextTrimmed.startsWith("*") ||
-                        nextTrimmed.startsWith("/") ||
-                        nextTrimmed.startsWith("&&") ||
-                        nextTrimmed.startsWith("||") ||
-                        nextTrimmed.startsWith("&") ||
-                        nextTrimmed.startsWith("|")
-
-                    if (!isContinuation && !nextIsContinuation) {
-                        return idx + 1
-                    }
-                    continue
-                }
-
-                if (started) {
-                    continue
-                }
-
-                if (seenKeyword && parenDepth == 0 && bracketDepth == 0) {
-                    val trimmed = clean.trimEnd()
-                    if (trimmed.endsWith(";")) {
-                        return idx + 1
-                    }
-
-                    val isContinuation = trimmed.endsWith("=") ||
-                        trimmed.endsWith("+") ||
-                        trimmed.endsWith("-") ||
-                        trimmed.endsWith("*") ||
-                        trimmed.endsWith("/") ||
-                        trimmed.endsWith("%") ||
-                        trimmed.endsWith("&&") ||
-                        trimmed.endsWith("||") ||
-                        trimmed.endsWith("?:") ||
-                        trimmed.endsWith(".") ||
-                        trimmed.endsWith("?.") ||
-                        trimmed.endsWith("::") ||
-                        trimmed.endsWith(",") ||
-                        trimmed.endsWith("->") ||
-                        trimmed.endsWith(":") ||
-                        trimmed.endsWith("&") ||
-                        trimmed.endsWith("|")
-
-                    var lookAhead = idx + 1
-                    while (lookAhead < cleanLines.size && cleanLines[lookAhead].trim().isEmpty()) {
-                        lookAhead++
-                    }
-
-                    if (lookAhead >= cleanLines.size) {
-                        return idx + 1
-                    }
-
-                    val nextClean = cleanLines[lookAhead]
-                    val nextTrimmed = nextClean.trim()
-
-                    val nextIsContinuation = nextTrimmed.startsWith(".") ||
-                        nextTrimmed.startsWith("?.") ||
-                        nextTrimmed.startsWith("?:") ||
-                        nextTrimmed.startsWith("->") ||
-                        nextTrimmed.startsWith("+") ||
-                        nextTrimmed.startsWith("-") ||
-                        nextTrimmed.startsWith("*") ||
-                        nextTrimmed.startsWith("/") ||
-                        nextTrimmed.startsWith("&&") ||
-                        nextTrimmed.startsWith("||") ||
-                        nextTrimmed.startsWith("&") ||
-                        nextTrimmed.startsWith("|")
-
-                    if (!isContinuation && !nextIsContinuation) {
-                        if (nextTrimmed.startsWith("{")) {
-                            continue
-                        }
-
-                        if (hasEquals) {
-                            if (isNewDeclarationStart(nextTrimmed) || nextTrimmed.startsWith("}")) {
-                                return idx + 1
-                            }
-                            val baseIndent = lines[startLine - 1].takeWhile { it == ' ' || it == '\t' }.length
-                            val nextRaw = lines[lookAhead]
-                            val nextIndent = nextRaw.takeWhile { it == ' ' || it == '\t' }.length
-                            if (nextIndent <= baseIndent) {
-                                return idx + 1
-                            }
-                        } else {
-                            if (!nextTrimmed.startsWith("=") && !nextTrimmed.startsWith("=>")) {
-                                return idx + 1
-                            }
-                        }
-                    }
-                }
+                val terminatedLine = checkLineTermination(lines, cleanLines, clean, idx, startLine, state)
+                if (terminatedLine != null) return terminatedLine
             }
             return minOf(lines.size, startLine)
         }

@@ -396,14 +396,13 @@ object VaultPlanBridge {
         private fun isIgnoredLink(link: String): Boolean =
             link.isEmpty() || link.startsWith("#")
 
-        private fun processMarkdownUrlMatch(match: MatchResult) {
-            val rawLink = match.groupValues[1].trim()
+        private fun processMarkdownUrlMatch(urlMatch: MatchResult) {
+            val rawLink = urlMatch.groupValues[1].trim()
             if (isIgnoredLink(rawLink)) return
-            val lineNo = lineNumberAt(match.range.first)
-            val handled = handleSkillReference(rawLink, lineNo) || handleCodeLocationReference(rawLink, lineNo)
-            if (!handled) {
-                handleGenericUrlReference(rawLink, lineNo)
-            }
+            val lineNo = lineNumberAt(urlMatch.range.first)
+            if (handleSkillReference(rawLink, lineNo)) return
+            if (handleCodeLocationReference(rawLink, lineNo)) return
+            handleGenericUrlReference(rawLink, lineNo)
         }
 
         private fun extractMarkdownUrls() {
