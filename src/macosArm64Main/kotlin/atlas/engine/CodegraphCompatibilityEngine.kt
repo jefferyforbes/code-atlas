@@ -23,6 +23,22 @@ class CodegraphCompatibilityEngine(
             "how", "does", "the", "work", "what", "is", "where", "to", "in", "for", "a",
             "an", "and", "or", "of", "from", "with", "by", "on", "at", "it", "this", "that"
         )
+
+        private val EXTENSION_LANG_MAP = mapOf(
+            "kt" to "kotlin", "kts" to "kotlin",
+            "swift" to "swift",
+            "ts" to "typescript", "tsx" to "tsx",
+            "js" to "javascript", "jsx" to "jsx",
+            "py" to "python",
+            "rs" to "rust",
+            "go" to "go",
+            "java" to "java",
+            "c" to "c", "h" to "c",
+            "cpp" to "cpp", "cc" to "cpp", "cxx" to "cpp", "hpp" to "cpp",
+            "json" to "json",
+            "xml" to "xml",
+            "yaml" to "yaml", "yml" to "yaml"
+        )
     }
 
     fun explore(projectId: String, query: String, maxFiles: Int = 12): JsonObject {
@@ -34,10 +50,43 @@ class CodegraphCompatibilityEngine(
         }
 
         val tokens = tokenizeQuery(trimmedQuery)
+        val matchedNodes = collectExploreNodes(projectId, trimmedQuery, tokens)
+        if (matchedNodes.isEmpty()) {
+            return buildJsonObject {
+                put("text", "No relevant code found for \"$trimmedQuery\" in project '$projectId'.")
+            }
+        }
+
+        val effectiveMaxFiles = maxFiles.coerceIn(1, 20)
+        val sb = StringBuilder()
+        sb.append("### CodeGraph Explore Context for \"$trimmedQuery\"\n\n")
+
+        appendTargetFiles(projectId, sb, matchedNodes, effectiveMaxFiles)
+        appendCallRelationships(projectId, sb, matchedNodes)
+        appendFlowPath(projectId, sb, tokens, matchedNodes)
+
+        return buildJsonObject {
+            put("text", sb.toString().trimEnd())
+        }
+    }
+
+    private fun collectExploreNodes(projectId: String, trimmedQuery: String, tokens: List<String>): List<GraphNode> {
         val matchedNodes = mutableListOf<GraphNode>()
         val seenNodeIds = mutableSetOf<String>()
 
-        // 1. Exact or direct match for individual tokens
+        collectTokenMatches(projectId, tokens, matchedNodes, seenNodeIds)
+        if (matchedNodes.size < 5) {
+            collectFullQueryMatches(projectId, trimmedQuery, matchedNodes, seenNodeIds)
+        }
+        return matchedNodes
+    }
+
+    private fun collectTokenMatches(
+        projectId: String,
+        tokens: List<String>,
+        matchedNodes: MutableList<GraphNode>,
+        seenNodeIds: MutableSet<String>
+    ) {
         for (token in tokens) {
             val directNode = store.getNode(projectId, token)
             if (directNode != null && seenNodeIds.add(directNode.nodeId)) {
@@ -50,56 +99,53 @@ class CodegraphCompatibilityEngine(
                 }
             }
         }
+    }
 
-        // 2. Full query search if token search yielded few results
-        if (matchedNodes.size < 5) {
-            val fullMatches = store.searchNodes(projectId, trimmedQuery, limit = 15)
-            for (m in fullMatches) {
-                if (seenNodeIds.add(m.nodeId)) {
-                    matchedNodes.add(m)
-                }
+    private fun collectFullQueryMatches(
+        projectId: String,
+        query: String,
+        matchedNodes: MutableList<GraphNode>,
+        seenNodeIds: MutableSet<String>
+    ) {
+        val fullMatches = store.searchNodes(projectId, query, limit = 15)
+        for (m in fullMatches) {
+            if (seenNodeIds.add(m.nodeId)) {
+                matchedNodes.add(m)
             }
         }
+    }
 
-        if (matchedNodes.isEmpty()) {
-            return buildJsonObject {
-                put("text", "No relevant code found for \"$trimmedQuery\" in project '$projectId'.")
-            }
-        }
-
-        // Group matched nodes by file
+    private fun appendTargetFiles(projectId: String, sb: StringBuilder, matchedNodes: List<GraphNode>, maxFiles: Int) {
         val nodesByFile = matchedNodes.groupBy { node ->
             if (node.fileId.contains(':')) node.fileId.substringAfter(':') else node.fileId
         }
-
-        val effectiveMaxFiles = maxFiles.coerceIn(1, 20)
-        val targetFiles = nodesByFile.keys.take(effectiveMaxFiles)
-
-        val sb = StringBuilder()
-        sb.append("### CodeGraph Explore Context for \"$trimmedQuery\"\n\n")
+        val targetFiles = nodesByFile.keys.take(maxFiles)
 
         for (fileRelPath in targetFiles) {
             val fileNodes = nodesByFile[fileRelPath] ?: emptyList()
             sb.append("## $fileRelPath\n")
-            val topNodes = fileNodes.take(3)
-            for (node in topNodes) {
-                val slice = store.sliceLiveSource(workspaceRoot, projectId, node)
-                val lang = detectLanguage(fileRelPath)
-                sb.append("```$lang\n")
-                if (slice.source.isNotEmpty()) {
-                    sb.append(slice.source)
-                    sb.append("\n")
-                } else {
-                    sb.append("// ${node.kind} ${node.name} (lines ${node.startLine}-${node.endLine})\n")
-                    if (!node.signature.isNullOrEmpty()) {
-                        sb.append("${node.signature}\n")
-                    }
-                }
-                sb.append("```\n\n")
+            for (node in fileNodes.take(3)) {
+                appendNodeSourcePreview(projectId, sb, node, fileRelPath)
             }
         }
+    }
 
-        // Surface call relationships
+    private fun appendNodeSourcePreview(projectId: String, sb: StringBuilder, node: GraphNode, fileRelPath: String) {
+        val slice = store.sliceLiveSource(workspaceRoot, projectId, node)
+        val lang = detectLanguage(fileRelPath)
+        sb.append("```$lang\n")
+        if (slice.source.isNotEmpty()) {
+            sb.append(slice.source).append("\n")
+        } else {
+            sb.append("// ${node.kind} ${node.name} (lines ${node.startLine}-${node.endLine})\n")
+            if (!node.signature.isNullOrEmpty()) {
+                sb.append("${node.signature}\n")
+            }
+        }
+        sb.append("```\n\n")
+    }
+
+    private fun appendCallRelationships(projectId: String, sb: StringBuilder, matchedNodes: List<GraphNode>) {
         val relationships = mutableListOf<String>()
         val topPrimaryNodes = matchedNodes.take(6)
         for (node in topPrimaryNodes) {
@@ -118,23 +164,19 @@ class CodegraphCompatibilityEngine(
             relationships.distinct().take(12).forEach { sb.append(it).append("\n") }
             sb.append("\n")
         }
+    }
 
-        // Check for flow path between 2 endpoint tokens
-        if (tokens.size >= 2) {
-            val firstNode = matchedNodes.firstOrNull { it.name.equals(tokens[0], ignoreCase = true) }
-            val secondNode = matchedNodes.firstOrNull { it.name.equals(tokens[1], ignoreCase = true) }
-            if (firstNode != null && secondNode != null && firstNode.nodeId != secondNode.nodeId) {
-                val path = store.getShortestPath(projectId, firstNode.nodeId, secondNode.nodeId)
-                if (path.isNotEmpty()) {
-                    sb.append("### Call Flow Path\n")
-                    val pathStr = path.map { id -> id.substringAfterLast('#').substringAfterLast('.') }
-                    sb.append(pathStr.joinToString(" -> ") { "`$it`" }).append("\n\n")
-                }
+    private fun appendFlowPath(projectId: String, sb: StringBuilder, tokens: List<String>, matchedNodes: List<GraphNode>) {
+        if (tokens.size < 2) return
+        val firstNode = matchedNodes.firstOrNull { it.name.equals(tokens[0], ignoreCase = true) }
+        val secondNode = matchedNodes.firstOrNull { it.name.equals(tokens[1], ignoreCase = true) }
+        if (firstNode != null && secondNode != null && firstNode.nodeId != secondNode.nodeId) {
+            val path = store.getShortestPath(projectId, firstNode.nodeId, secondNode.nodeId)
+            if (path.isNotEmpty()) {
+                sb.append("### Call Flow Path\n")
+                val pathStr = path.map { id -> id.substringAfterLast('#').substringAfterLast('.') }
+                sb.append(pathStr.joinToString(" -> ") { "`$it`" }).append("\n\n")
             }
-        }
-
-        return buildJsonObject {
-            put("text", sb.toString().trimEnd())
         }
     }
 
@@ -148,59 +190,10 @@ class CodegraphCompatibilityEngine(
         symbolsOnly: Boolean = false,
         line: Int? = null
     ): JsonObject {
-        // Mode 1: File reading mode (symbol is omitted, file is specified)
         if (symbol.isNullOrBlank() && !file.isNullOrBlank()) {
-            val resolvedRelPath = resolveFilePath(projectId, file)
-                ?: return buildJsonObject {
-                    put("text", "No indexed file matches \"$file\".")
-                }
-
-            val fullDiskPath = if (workspaceRoot.endsWith("/")) "$workspaceRoot$resolvedRelPath" else "$workspaceRoot/$resolvedRelPath"
-            if (!PlatformFiles.exists(fullDiskPath)) {
-                return buildJsonObject {
-                    put("text", "File missing on disk: $fullDiskPath")
-                }
-            }
-
-            if (symbolsOnly) {
-                val fileNodes = store.getNodesForFile(projectId, resolvedRelPath)
-                val sb = StringBuilder()
-                sb.append("### Symbols in `$resolvedRelPath` (${fileNodes.size} symbols)\n\n")
-                fileNodes.forEach { n ->
-                    sb.append("- **${n.name}** (`${n.kind}`) lines ${n.startLine}-${n.endLine}")
-                    if (!n.signature.isNullOrEmpty()) sb.append(": `${n.signature}`")
-                    sb.append("\n")
-                }
-                return buildJsonObject {
-                    put("text", sb.toString().trimEnd())
-                }
-            }
-
-            val rawBytes = PlatformFiles.readBytes(fullDiskPath)
-            val lines = rawBytes.decodeToString().lines()
-            val total = lines.size
-            val startLine = (offset ?: 1).coerceAtLeast(1)
-            val lineLimit = (limit ?: 2000).coerceAtLeast(1)
-
-            if (startLine > total) {
-                return buildJsonObject {
-                    put("text", "**$resolvedRelPath** has $total lines — offset $startLine is past the end.")
-                }
-            }
-
-            val endLine = (startLine + lineLimit - 1).coerceAtMost(total)
-            val sb = StringBuilder()
-            sb.append("// $resolvedRelPath (lines $startLine-$endLine of $total)\n")
-            for (idx in (startLine - 1) until endLine) {
-                sb.append("${idx + 1}\t${lines[idx]}\n")
-            }
-
-            return buildJsonObject {
-                put("text", sb.toString().trimEnd())
-            }
+            return readNodeFile(projectId, file, symbolsOnly, offset, limit)
         }
 
-        // Mode 2: Symbol inspection mode
         val targetSymbol = symbol?.trim().orEmpty()
         if (targetSymbol.isEmpty()) {
             return buildJsonObject {
@@ -208,21 +201,88 @@ class CodegraphCompatibilityEngine(
             }
         }
 
-        val node = findNode(projectId, targetSymbol, file, line)
-        if (node == null) {
-            val candidates = store.searchNodes(projectId, targetSymbol, limit = 5)
-            val sb = StringBuilder()
-            sb.append("Symbol \"$targetSymbol\" not found in project '$projectId'.")
-            if (candidates.isNotEmpty()) {
-                sb.append(" Did you mean:\n")
-                candidates.forEach { c ->
-                    sb.append("- **${c.name}** (${c.kind}) at `${c.fileId.substringAfter(":")}:${c.startLine}`\n")
-                }
+        return inspectNodeSymbol(projectId, targetSymbol, file, line, includeCode)
+    }
+
+    private fun readNodeFile(
+        projectId: String,
+        file: String,
+        symbolsOnly: Boolean,
+        offset: Int?,
+        limit: Int?
+    ): JsonObject {
+        val resolvedRelPath = resolveFilePath(projectId, file)
+            ?: return buildJsonObject {
+                put("text", "No indexed file matches \"$file\".")
             }
+
+        val fullDiskPath = if (workspaceRoot.endsWith("/")) "$workspaceRoot$resolvedRelPath" else "$workspaceRoot/$resolvedRelPath"
+        if (!PlatformFiles.exists(fullDiskPath)) {
             return buildJsonObject {
-                put("text", sb.toString().trimEnd())
+                put("text", "File missing on disk: $fullDiskPath")
             }
         }
+
+        return if (symbolsOnly) {
+            readNodeFileSymbols(projectId, resolvedRelPath)
+        } else {
+            readNodeFileLines(resolvedRelPath, fullDiskPath, offset, limit)
+        }
+    }
+
+    private fun readNodeFileSymbols(projectId: String, resolvedRelPath: String): JsonObject {
+        val fileNodes = store.getNodesForFile(projectId, resolvedRelPath)
+        val sb = StringBuilder()
+        sb.append("### Symbols in `$resolvedRelPath` (${fileNodes.size} symbols)\n\n")
+        fileNodes.forEach { n ->
+            sb.append("- **${n.name}** (`${n.kind}`) lines ${n.startLine}-${n.endLine}")
+            if (!n.signature.isNullOrEmpty()) sb.append(": `${n.signature}`")
+            sb.append("\n")
+        }
+        return buildJsonObject {
+            put("text", sb.toString().trimEnd())
+        }
+    }
+
+    private fun readNodeFileLines(
+        resolvedRelPath: String,
+        fullDiskPath: String,
+        offset: Int?,
+        limit: Int?
+    ): JsonObject {
+        val rawBytes = PlatformFiles.readBytes(fullDiskPath)
+        val lines = rawBytes.decodeToString().lines()
+        val total = lines.size
+        val startLine = (offset ?: 1).coerceAtLeast(1)
+        val lineLimit = (limit ?: 2000).coerceAtLeast(1)
+
+        if (startLine > total) {
+            return buildJsonObject {
+                put("text", "**$resolvedRelPath** has $total lines — offset $startLine is past the end.")
+            }
+        }
+
+        val endLine = (startLine + lineLimit - 1).coerceAtMost(total)
+        val sb = StringBuilder()
+        sb.append("// $resolvedRelPath (lines $startLine-$endLine of $total)\n")
+        for (idx in (startLine - 1) until endLine) {
+            sb.append("${idx + 1}\t${lines[idx]}\n")
+        }
+
+        return buildJsonObject {
+            put("text", sb.toString().trimEnd())
+        }
+    }
+
+    private fun inspectNodeSymbol(
+        projectId: String,
+        targetSymbol: String,
+        file: String?,
+        line: Int?,
+        includeCode: Boolean
+    ): JsonObject {
+        val node = findNode(projectId, targetSymbol, file, line)
+            ?: return buildSymbolNotFoundResponse(projectId, targetSymbol)
 
         val sb = StringBuilder()
         val relPath = if (node.fileId.contains(':')) node.fileId.substringAfter(':') else node.fileId
@@ -234,17 +294,44 @@ class CodegraphCompatibilityEngine(
         sb.append("- **Connections:** in-degree=${node.inDegree}, out-degree=${node.outDegree}\n\n")
 
         if (includeCode) {
-            val slice = store.sliceLiveSource(workspaceRoot, projectId, node)
-            val lang = detectLanguage(relPath)
-            sb.append("```$lang\n")
-            if (slice.source.isNotEmpty()) {
-                sb.append(slice.source).append("\n")
-            } else {
-                sb.append("// Source unavailable\n")
-            }
-            sb.append("```\n\n")
+            appendSymbolSourceCode(projectId, sb, node, relPath)
         }
 
+        appendSymbolCallersCallees(projectId, sb, node)
+
+        return buildJsonObject {
+            put("text", sb.toString().trimEnd())
+        }
+    }
+
+    private fun buildSymbolNotFoundResponse(projectId: String, targetSymbol: String): JsonObject {
+        val candidates = store.searchNodes(projectId, targetSymbol, limit = 5)
+        val sb = StringBuilder()
+        sb.append("Symbol \"$targetSymbol\" not found in project '$projectId'.")
+        if (candidates.isNotEmpty()) {
+            sb.append(" Did you mean:\n")
+            candidates.forEach { c ->
+                sb.append("- **${c.name}** (${c.kind}) at `${c.fileId.substringAfter(":")}:${c.startLine}`\n")
+            }
+        }
+        return buildJsonObject {
+            put("text", sb.toString().trimEnd())
+        }
+    }
+
+    private fun appendSymbolSourceCode(projectId: String, sb: StringBuilder, node: GraphNode, relPath: String) {
+        val slice = store.sliceLiveSource(workspaceRoot, projectId, node)
+        val lang = detectLanguage(relPath)
+        sb.append("```$lang\n")
+        if (slice.source.isNotEmpty()) {
+            sb.append(slice.source).append("\n")
+        } else {
+            sb.append("// Source unavailable\n")
+        }
+        sb.append("```\n\n")
+    }
+
+    private fun appendSymbolCallersCallees(projectId: String, sb: StringBuilder, node: GraphNode) {
         val callers = store.getCallers(projectId, node.nodeId, depth = 1).take(10)
         if (callers.isNotEmpty()) {
             sb.append("#### Direct Callers (${callers.size}):\n")
@@ -263,10 +350,6 @@ class CodegraphCompatibilityEngine(
                 sb.append("- `${c.name}` in `$f:${c.startLine}`\n")
             }
             sb.append("\n")
-        }
-
-        return buildJsonObject {
-            put("text", sb.toString().trimEnd())
         }
     }
 
@@ -439,23 +522,22 @@ class CodegraphCompatibilityEngine(
     private fun findNode(projectId: String, symbol: String, file: String? = null, line: Int? = null): GraphNode? {
         val cleanSymbol = symbol.trim()
         if (!file.isNullOrBlank()) {
-            val cleanFile = file.trim()
-            val nodesInFile = store.getNodesForFile(projectId, cleanFile)
-            if (nodesInFile.isNotEmpty()) {
-                val matched = if (line != null) {
-                    nodesInFile.firstOrNull { it.name == cleanSymbol && it.startLine <= line && it.endLine >= line }
-                        ?: nodesInFile.firstOrNull { it.name == cleanSymbol }
-                } else {
-                    nodesInFile.firstOrNull { it.name == cleanSymbol }
-                }
-                if (matched != null) return matched
-            }
+            val nodesInFile = store.getNodesForFile(projectId, file.trim())
+            val matched = findNodeInFile(nodesInFile, cleanSymbol, line)
+            if (matched != null) return matched
         }
 
-        val direct = store.getNode(projectId, cleanSymbol)
-        if (direct != null) return direct
+        return store.getNode(projectId, cleanSymbol)
+            ?: store.searchNodes(projectId, cleanSymbol, limit = 1).firstOrNull()
+    }
 
-        return store.searchNodes(projectId, cleanSymbol, limit = 1).firstOrNull()
+    private fun findNodeInFile(nodesInFile: List<GraphNode>, symbol: String, line: Int?): GraphNode? {
+        if (nodesInFile.isEmpty()) return null
+        if (line != null) {
+            val atLine = nodesInFile.firstOrNull { it.name == symbol && it.startLine <= line && it.endLine >= line }
+            if (atLine != null) return atLine
+        }
+        return nodesInFile.firstOrNull { it.name == symbol }
     }
 
     private fun resolveFilePath(projectId: String, fileQuery: String): String? {
@@ -479,24 +561,7 @@ class CodegraphCompatibilityEngine(
 
     private fun detectLanguage(filePath: String): String {
         val ext = filePath.substringAfterLast('.', "").lowercase()
-        return when (ext) {
-            "kt", "kts" -> "kotlin"
-            "swift" -> "swift"
-            "ts" -> "typescript"
-            "tsx" -> "tsx"
-            "js" -> "javascript"
-            "jsx" -> "jsx"
-            "py" -> "python"
-            "rs" -> "rust"
-            "go" -> "go"
-            "java" -> "java"
-            "c", "h" -> "c"
-            "cpp", "cc", "cxx", "hpp" -> "cpp"
-            "json" -> "json"
-            "xml" -> "xml"
-            "yaml", "yml" -> "yaml"
-            else -> ""
-        }
+        return EXTENSION_LANG_MAP[ext] ?: ""
     }
 
     private fun globToRegex(glob: String): Regex {

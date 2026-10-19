@@ -64,20 +64,8 @@ class SemioticLayerClassifier {
                 return Triple("pragmatic", "presentation", false)
             }
 
-            if (listOf("/dto/", "/entity/", "/schema/", "/tokens/", "/contract/", "/model/").any { it in checkPath } ||
-                listOf("dto", "entity", "schema", "token", "node", "edge", "recommendation", "contract").any { symLow.endsWith(it) } ||
-                normPath.endsWith(".sql")
-            ) {
-                val arch = if (listOf("/data/", "/db/", "/room/", "sqlite").any { it in checkPath } ||
-                    symLow.endsWith("dto") || symLow.endsWith("entity")
-                ) "data" else "domain"
-                return Triple("syntactic", arch, false)
-            }
-
-            if (listOf("/data/", "/repository/", "/db/", "/storage/", "/store/", "/network/", "/api/").any { it in checkPath } ||
-                listOf("store", "repository", "dao", "client", "adapter").any { symLow.endsWith(it) }
-            ) {
-                return Triple("semantic", "data", false)
+            if ("/engine/" in checkPath) {
+                return Triple("semantic", "application", false)
             }
 
             if (listOf("/extract/", "/bridge/", "/config/", "/util/", "/tools/", "/scripts/", "/orchestrator/",
@@ -87,8 +75,20 @@ class SemioticLayerClassifier {
                 return Triple("semantic", "infrastructure", false)
             }
 
-            if ("/engine/" in checkPath) {
-                return Triple("semantic", "application", false)
+            if (listOf("/data/", "/repository/", "/db/", "/storage/", "/store/", "/network/", "/api/").any { it in checkPath } ||
+                listOf("store", "repository", "dao", "client", "adapter").any { symLow.endsWith(it) }
+            ) {
+                return Triple("semantic", "data", false)
+            }
+
+            if (listOf("/dto/", "/entity/", "/schema/", "/tokens/", "/contract/", "/model/").any { it in checkPath } ||
+                listOf("dto", "entity", "schema", "token", "node", "edge", "recommendation", "contract").any { symLow.endsWith(it) } ||
+                normPath.endsWith(".sql")
+            ) {
+                val arch = if (listOf("/data/", "/db/", "/room/", "sqlite").any { it in checkPath } ||
+                    symLow.endsWith("dto") || symLow.endsWith("entity")
+                ) "data" else "domain"
+                return Triple("syntactic", arch, false)
             }
 
             return Triple("semantic", "domain", false)

@@ -77,22 +77,30 @@ object CacheProfileResolver {
         val home = PlatformFiles.userHome()
         val normalizedTarget = projectId.lowercase().replace("_", "-").trim()
 
-        if (normalizedTarget == "agent-os" || normalizedTarget == "agent" || normalizedTarget == "agents") {
+        val special = resolveSpecialWorkspace(normalizedTarget, home)
+        if (special != null) return special
+
+        return findWorkspaceInSearchRoots(normalizedTarget, home) ?: defaultWorkspace
+    }
+
+    private fun resolveSpecialWorkspace(target: String, home: String): String? {
+        if (target == "agent-os" || target == "agent" || target == "agents") {
             val agentConfig = "$home/.gemini/config"
             if (PlatformFiles.isDirectory(agentConfig)) return agentConfig
         }
-
-        if (normalizedTarget == "vault") {
+        if (target == "vault") {
             val candidates = listOf(
                 "$home/vault",
                 "$home/Documents/vault",
                 "$home/Obsidian/vault",
                 "$home/Documents/Obsidian Vault"
             )
-            val found = candidates.firstOrNull { PlatformFiles.isDirectory(it) }
-            if (found != null) return found
+            return candidates.firstOrNull { PlatformFiles.isDirectory(it) }
         }
+        return null
+    }
 
+    private fun findWorkspaceInSearchRoots(target: String, home: String): String? {
         val searchRoots = listOf(
             "$home/StudioProjects",
             "$home/Development",
@@ -100,17 +108,18 @@ object CacheProfileResolver {
             "$home/code"
         )
         for (root in searchRoots) {
-            if (!PlatformFiles.isDirectory(root)) continue
-            val entries = PlatformFiles.listDirectory(root)
-            val matchedEntry = entries.firstOrNull { entry ->
-                entry.lowercase().replace("_", "-") == normalizedTarget
-            }
-            if (matchedEntry != null) {
-                val candidateDir = "$root/$matchedEntry"
-                if (PlatformFiles.isDirectory(candidateDir)) return candidateDir
-            }
+            val found = matchProjectInDirectory(root, target)
+            if (found != null) return found
         }
-        return defaultWorkspace
+        return null
+    }
+
+    private fun matchProjectInDirectory(root: String, target: String): String? {
+        if (!PlatformFiles.isDirectory(root)) return null
+        val entries = PlatformFiles.listDirectory(root)
+        val matchedEntry = entries.firstOrNull { it.lowercase().replace("_", "-") == target } ?: return null
+        val candidateDir = "$root/$matchedEntry"
+        return if (PlatformFiles.isDirectory(candidateDir)) candidateDir else null
     }
 }
 
