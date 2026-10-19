@@ -38,7 +38,9 @@ class SqliteGraphStore(val dbPath: String) {
                 db.exec("DROP TABLE IF EXISTS figma_spatial_index;")
                 db.exec("DROP TABLE IF EXISTS figma_nodes;")
             }
-        } catch (_: Throwable) {}
+        } catch (e: Exception) {
+            PlatformFiles.logWarning("SqliteGraphStore", "legacy schema migration failed: ${e.message}")
+        }
     }
 
     private fun initSchema() {
@@ -350,7 +352,9 @@ class SqliteGraphStore(val dbPath: String) {
                     db.exec("ALTER TABLE compose_nodes ADD COLUMN violation_mask INTEGER NOT NULL DEFAULT 0;")
                 }
             }
-        } catch (_: Throwable) {}
+        } catch (e: Exception) {
+            PlatformFiles.logWarning("SqliteGraphStore", "compose nodes schema migration failed: ${e.message}")
+        }
     }
 
     fun migrateNodesSchema() {
@@ -385,7 +389,9 @@ class SqliteGraphStore(val dbPath: String) {
                 }
                 db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_complexity ON nodes(project_id, cognitive_complexity) WHERE cognitive_complexity >= 10;")
             }
-        } catch (_: Throwable) {}
+        } catch (e: Exception) {
+            PlatformFiles.logWarning("SqliteGraphStore", "nodes schema migration failed: ${e.message}")
+        }
     }
 
     fun <T> withSavepoint(name: String, block: () -> T): T = db.withSavepoint(name, block)
@@ -401,7 +407,9 @@ class SqliteGraphStore(val dbPath: String) {
 
         fun closeAll() {
             for (i in statements.indices.reversed()) {
-                try { statements[i].close() } catch (_: Throwable) {}
+                try { statements[i].close() } catch (e: Exception) {
+                    PlatformFiles.logWarning("SqliteGraphStore", "failed to close statement: ${e.message}")
+                }
             }
             statements.clear()
         }
@@ -1373,7 +1381,9 @@ class SqliteGraphStore(val dbPath: String) {
                 } finally {
                     ftsStmt.close()
                 }
-            } catch (_: Throwable) {}
+            } catch (e: Exception) {
+                PlatformFiles.logWarning("SqliteGraphStore", "FTS segment ranking failed: ${e.message}")
+            }
 
             for (chunk in segments.chunked(250)) {
                 val placeholders = chunk.joinToString(",") { "?" }
