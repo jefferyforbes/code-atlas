@@ -1,6 +1,10 @@
 package atlas.engine
 
 import atlas.util.PlatformFiles
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class WorkspaceInitEngine(val workspaceRoot: String) {
 
@@ -14,8 +18,39 @@ class WorkspaceInitEngine(val workspaceRoot: String) {
         val scriptContent: String? = null
     )
 
+    private fun readProjectFromBaseline(path: String): String? {
+        if (!PlatformFiles.exists(path)) return null
+        return try {
+            val content = PlatformFiles.readText(path)
+            val json = Json { ignoreUnknownKeys = true }
+            val parsed = json.parseToJsonElement(content).jsonObject
+            parsed["project"]?.jsonPrimitive?.contentOrNull?.ifBlank { null }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun readBaselineProject(root: String): String? {
+        val f1 = "$root/complexity-baseline.json"
+        val f2 = "$root/.atlas/complexity-baseline.json"
+        return readProjectFromBaseline(f1) ?: readProjectFromBaseline(f2)
+    }
+
+    private fun deriveDirectorySlug(root: String): String {
+        val dirName = root.substringAfterLast('/')
+        return if (dirName.isNotBlank() && dirName != ".") dirName else "organisation"
+    }
+
+    fun resolveProjectSlug(explicitProject: String? = null): String {
+        if (!explicitProject.isNullOrBlank() && explicitProject != "organisation") {
+            return explicitProject
+        }
+        val root = workspaceRoot.trimEnd('/')
+        return readBaselineProject(root) ?: deriveDirectorySlug(root)
+    }
+
     fun initHook(
-        project: String,
+        project: String = "organisation",
         hookType: String = "pre-commit",
         force: Boolean = false,
         threshold: Int = 15,
@@ -44,7 +79,8 @@ class WorkspaceInitEngine(val workspaceRoot: String) {
 
         val hooksDir = "$gitDir/hooks"
         val hookPath = "$hooksDir/$hookType"
-        val scriptContent = generateHookScript(project = project, hookType = hookType, threshold = threshold)
+        val effectiveProject = resolveProjectSlug(project)
+        val scriptContent = generateHookScript(project = effectiveProject, hookType = hookType, threshold = threshold)
 
         if (dryRun) {
             return InitResult(
