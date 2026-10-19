@@ -238,4 +238,41 @@ class NativeSqliteStatementTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testSqliteGraphStorePreparedStatementLifecycleUnderBindingError() {
+        val dbPath = "/tmp/atlas_stmt_store_lifecycle_${getpid()}_${Random.nextInt(100000, 999999)}.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val map = store.getFileRecordsMap("non_existent")
+            assertTrue(map.isEmpty())
+
+            val rawEdges = store.listRawSymbolEdges("non_existent")
+            assertTrue(rawEdges.isEmpty())
+
+            val indexedFiles = store.listIndexedFiles("non_existent")
+            assertTrue(indexedFiles.isEmpty())
+
+            val godNodes = store.getGodNodes("non_existent", 5)
+            assertTrue(godNodes.isEmpty())
+
+            val nodes = store.listNodes("non_existent")
+            assertTrue(nodes.isEmpty())
+
+            val files = store.listFiles("non_existent")
+            assertTrue(files.isEmpty())
+
+            val doc = store.getFigmaDocument("non_existent")
+            assertEquals(null, doc)
+
+            val figmaNodes = store.queryFigmaNodesByName("non_existent", "btn")
+            assertTrue(figmaNodes.isEmpty())
+
+            val mutations = store.countPropertyMutations("non_existent", "sym:test")
+            assertEquals(0, mutations)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }

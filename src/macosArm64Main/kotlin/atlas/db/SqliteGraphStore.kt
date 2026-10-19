@@ -401,7 +401,12 @@ class SqliteGraphStore(val dbPath: String) {
 
         fun prepare(sql: String): NativeSqliteStatement {
             val stmt = db.prepare(sql)
-            statements.add(stmt)
+            try {
+                statements.add(stmt)
+            } catch (t: Throwable) {
+                stmt.close()
+                throw t
+            }
             return stmt
         }
 
@@ -481,9 +486,9 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun getFileRecordsMap(projectId: String): Map<String, Pair<String, Double>> {
         val stmt = db.prepare("SELECT rel_path, sha256, mtime FROM files WHERE project_id = ? AND rel_path != '__endpoints__';")
-        stmt.bindString(1, projectId)
         val result = mutableMapOf<String, Pair<String, Double>>()
         try {
+            stmt.bindString(1, projectId)
             while (stmt.step()) {
                 val relPath = stmt.columnString(0)
                 val sha256 = stmt.columnString(1)
@@ -579,9 +584,9 @@ class SqliteGraphStore(val dbPath: String) {
             ORDER BY rowid ASC;
             """.trimIndent()
         )
-        stmt.bindString(1, projectId)
         val results = mutableListOf<GraphEdge>()
         try {
+            stmt.bindString(1, projectId)
             while (stmt.step()) {
                 val rawEdgeId = stmt.columnString(0)
                 val projId = stmt.columnString(1)
@@ -806,8 +811,8 @@ class SqliteGraphStore(val dbPath: String) {
     fun listIndexedFiles(projectId: String): List<String> {
         val res = mutableListOf<String>()
         val stmt = db.prepare("SELECT rel_path FROM files WHERE project_id = ? AND rel_path != '__endpoints__';")
-        stmt.bindString(1, projectId)
         try {
+            stmt.bindString(1, projectId)
             while (stmt.step()) {
                 res.add(stmt.columnString(0))
             }
@@ -1669,10 +1674,10 @@ class SqliteGraphStore(val dbPath: String) {
             LIMIT ?;
             """.trimIndent()
         )
-        stmt.bindString(1, projectId)
-        stmt.bindInt(2, topN)
         val results = mutableListOf<GraphNode>()
         try {
+            stmt.bindString(1, projectId)
+            stmt.bindInt(2, topN)
             while (stmt.step()) {
                 results.add(rowToNode(stmt))
             }
@@ -2084,9 +2089,9 @@ class SqliteGraphStore(val dbPath: String) {
             FROM files WHERE project_id = ? AND rel_path != '__endpoints__' ORDER BY rel_path ASC;
             """.trimIndent()
         )
-        stmt.bindString(1, projectId)
         val results = mutableListOf<FileRecord>()
         try {
+            stmt.bindString(1, projectId)
             while (stmt.step()) {
                 results.add(
                     FileRecord(
@@ -2121,9 +2126,9 @@ class SqliteGraphStore(val dbPath: String) {
             FROM nodes WHERE project_id = ? ORDER BY node_id ASC;
             """.trimIndent()
         )
-        stmt.bindString(1, projectId)
         val results = mutableListOf<GraphNode>()
         try {
+            stmt.bindString(1, projectId)
             while (stmt.step()) {
                 results.add(rowToNode(stmt))
             }
@@ -2234,8 +2239,8 @@ class SqliteGraphStore(val dbPath: String) {
             FROM figma_documents WHERE file_key = ?;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
         try {
+            stmt.bindString(1, fileKey)
             if (stmt.step()) {
                 return FigmaDocument(
                     fileKey = stmt.columnString(0),
@@ -2506,14 +2511,13 @@ class SqliteGraphStore(val dbPath: String) {
             ORDER BY n.canvas_y, n.canvas_x;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindDouble(2, qMinX)
-        stmt.bindDouble(3, qMaxX)
-        stmt.bindDouble(4, qMinY)
-        stmt.bindDouble(5, qMaxY)
-
         val results = mutableListOf<FigmaNode>()
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindDouble(2, qMinX)
+            stmt.bindDouble(3, qMaxX)
+            stmt.bindDouble(4, qMinY)
+            stmt.bindDouble(5, qMaxY)
             while (stmt.step()) {
                 results.add(rowToFigmaNode(stmt))
             }
@@ -2541,9 +2545,9 @@ class SqliteGraphStore(val dbPath: String) {
             WHERE file_key = ? AND node_id = ?;
             """.trimIndent()
         )
-        stmt.bindString(1, normFileKey)
-        stmt.bindString(2, normNodeId)
         try {
+            stmt.bindString(1, normFileKey)
+            stmt.bindString(2, normNodeId)
             if (stmt.step()) {
                 return rowToFigmaNode(stmt)
             }
@@ -2566,10 +2570,10 @@ class SqliteGraphStore(val dbPath: String) {
             WHERE file_key = ? AND name = ?;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, name)
         val results = mutableListOf<FigmaNode>()
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindString(2, name)
             while (stmt.step()) {
                 results.add(rowToFigmaNode(stmt))
             }
@@ -2592,10 +2596,10 @@ class SqliteGraphStore(val dbPath: String) {
             WHERE file_key = ? AND node_type = ?;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, nodeType)
         val results = mutableListOf<FigmaNode>()
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindString(2, nodeType)
             while (stmt.step()) {
                 results.add(rowToFigmaNode(stmt))
             }
@@ -2614,9 +2618,9 @@ class SqliteGraphStore(val dbPath: String) {
             WHERE file_key = ? AND variable_id = ?;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, variableId)
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindString(2, variableId)
             if (stmt.step()) {
                 return rowToFigmaVariable(stmt)
             }
@@ -2635,9 +2639,9 @@ class SqliteGraphStore(val dbPath: String) {
             WHERE file_key = ? AND name = ?;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, name)
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindString(2, name)
             if (stmt.step()) {
                 return rowToFigmaVariable(stmt)
             }
@@ -2655,10 +2659,10 @@ class SqliteGraphStore(val dbPath: String) {
             WHERE file_key = ? AND source_node_id = ?;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, sourceNodeId)
         val results = mutableListOf<FigmaEdge>()
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindString(2, sourceNodeId)
             while (stmt.step()) {
                 results.add(rowToFigmaEdge(stmt))
             }
@@ -2676,10 +2680,10 @@ class SqliteGraphStore(val dbPath: String) {
             WHERE file_key = ? AND target_node_id = ?;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, targetNodeId)
         val results = mutableListOf<FigmaEdge>()
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindString(2, targetNodeId)
             while (stmt.step()) {
                 results.add(rowToFigmaEdge(stmt))
             }
@@ -2697,10 +2701,10 @@ class SqliteGraphStore(val dbPath: String) {
             WHERE file_key = ? AND edge_type = ?;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, edgeType)
         val results = mutableListOf<FigmaEdge>()
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindString(2, edgeType)
             while (stmt.step()) {
                 results.add(rowToFigmaEdge(stmt))
             }
@@ -2740,14 +2744,13 @@ class SqliteGraphStore(val dbPath: String) {
             ORDER BY MIN(depth), name;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, variableIdOrName)
-        stmt.bindString(3, variableIdOrName)
-        stmt.bindString(4, fileKey)
-        stmt.bindInt(5, maxDepth)
-
         val results = mutableListOf<FigmaVariable>()
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindString(2, variableIdOrName)
+            stmt.bindString(3, variableIdOrName)
+            stmt.bindString(4, fileKey)
+            stmt.bindInt(5, maxDepth)
             while (stmt.step()) {
                 results.add(rowToFigmaVariable(stmt))
             }
@@ -2779,15 +2782,14 @@ class SqliteGraphStore(val dbPath: String) {
             ORDER BY n.name;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindString(2, variableId)
-        stmt.bindString(3, fileKey)
-        stmt.bindString(4, variableId)
-        stmt.bindString(5, fileKey)
-        stmt.bindString(6, variableId)
-
         val results = mutableListOf<FigmaNode>()
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindString(2, variableId)
+            stmt.bindString(3, fileKey)
+            stmt.bindString(4, variableId)
+            stmt.bindString(5, fileKey)
+            stmt.bindString(6, variableId)
             while (stmt.step()) {
                 results.add(rowToFigmaNode(stmt))
             }
@@ -2869,17 +2871,16 @@ class SqliteGraphStore(val dbPath: String) {
             ORDER BY MIN(c.hop), n.name;
             """.trimIndent()
         )
-        stmt.bindString(1, normFileKey)
-        stmt.bindString(2, normTarget)
-        stmt.bindString(3, normFileKey)
-        stmt.bindString(4, normTarget)
-        stmt.bindString(5, normFileKey)
-        stmt.bindString(6, normFileKey)
-        stmt.bindInt(7, maxDepth)
-        stmt.bindString(8, normFileKey)
-
         val results = mutableListOf<FigmaNode>()
         try {
+            stmt.bindString(1, normFileKey)
+            stmt.bindString(2, normTarget)
+            stmt.bindString(3, normFileKey)
+            stmt.bindString(4, normTarget)
+            stmt.bindString(5, normFileKey)
+            stmt.bindString(6, normFileKey)
+            stmt.bindInt(7, maxDepth)
+            stmt.bindString(8, normFileKey)
             while (stmt.step()) {
                 results.add(rowToFigmaNode(stmt))
             }
@@ -2983,10 +2984,10 @@ class SqliteGraphStore(val dbPath: String) {
             LIMIT ?;
             """.trimIndent()
         )
-        stmt.bindString(1, fileKey)
-        stmt.bindInt(2, limit)
         val results = mutableListOf<Pair<FigmaNode, Int>>()
         try {
+            stmt.bindString(1, fileKey)
+            stmt.bindInt(2, limit)
             while (stmt.step()) {
                 val node = rowToFigmaNode(stmt)
                 val count = stmt.columnInt(29)
@@ -4072,10 +4073,9 @@ class SqliteGraphStore(val dbPath: String) {
     ): Int {
         val cleanSym = targetSymbolOrNodeId.removePrefix("sym:")
         val escSym = cleanSym.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        val stmt = if (ownerClassName != null && ownerClassName.isNotEmpty()) {
-            val cleanClass = ownerClassName.substringAfterLast('.').removePrefix("sym:")
-            val escClass = cleanClass.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            val s = db.prepare(
+        val hasOwner = ownerClassName != null && ownerClassName.isNotEmpty()
+        val stmt = if (hasOwner) {
+            db.prepare(
                 """
                 SELECT COUNT(*) FROM edges
                 WHERE project_id = ?
@@ -4089,15 +4089,8 @@ class SqliteGraphStore(val dbPath: String) {
                   );
                 """.trimIndent()
             )
-            s.bindString(1, projectSlug)
-            s.bindString(2, "sym:$cleanClass.$cleanSym")
-            s.bindString(3, "$cleanClass.$cleanSym")
-            s.bindString(4, targetSymbolOrNodeId)
-            s.bindString(5, "%#$escClass.$escSym")
-            s.bindString(6, "%#$escSym")
-            s
         } else {
-            val s = db.prepare(
+            db.prepare(
                 """
                 SELECT COUNT(*) FROM edges
                 WHERE project_id = ?
@@ -4109,13 +4102,23 @@ class SqliteGraphStore(val dbPath: String) {
                   );
                 """.trimIndent()
             )
-            s.bindString(1, projectSlug)
-            s.bindString(2, targetSymbolOrNodeId)
-            s.bindString(3, "sym:$cleanSym")
-            s.bindString(4, "%#$escSym")
-            s
         }
         try {
+            if (hasOwner) {
+                val cleanClass = ownerClassName!!.substringAfterLast('.').removePrefix("sym:")
+                val escClass = cleanClass.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                stmt.bindString(1, projectSlug)
+                stmt.bindString(2, "sym:$cleanClass.$cleanSym")
+                stmt.bindString(3, "$cleanClass.$cleanSym")
+                stmt.bindString(4, targetSymbolOrNodeId)
+                stmt.bindString(5, "%#$escClass.$escSym")
+                stmt.bindString(6, "%#$escSym")
+            } else {
+                stmt.bindString(1, projectSlug)
+                stmt.bindString(2, targetSymbolOrNodeId)
+                stmt.bindString(3, "sym:$cleanSym")
+                stmt.bindString(4, "%#$escSym")
+            }
             if (stmt.step()) {
                 return stmt.columnInt(0)
             }
