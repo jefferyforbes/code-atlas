@@ -2292,5 +2292,78 @@ class EngineAndMcpTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testDeleteAllResolvedCodeEdgesPreservesSkillAndTagEdges() {
+        val dbPath = "/tmp/test_atlas_preserve_edges_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val edgeTypes = listOf(
+                "CALLS",
+                "IMPORTS",
+                "PLAN_SCOPES_FILE",
+                "WIKILINK_REFS",
+                "CODE_SPAN_REFS",
+                "URL_REFS",
+                "TAGGED_WITH",
+                "TRIGGERS_SKILL",
+                "DEPENDS_ON_SKILL"
+            )
+            val nodes = mutableListOf<GraphNode>()
+            val edges = edgeTypes.mapIndexed { idx, type ->
+                nodes.add(
+                    GraphNode(
+                        nodeId = "src-$idx",
+                        projectId = "proj",
+                        fileId = "proj:src/File$idx.kt",
+                        name = "src$idx",
+                        qualifiedName = "src$idx",
+                        kind = "function"
+                    )
+                )
+                nodes.add(
+                    GraphNode(
+                        nodeId = "tgt-$idx",
+                        projectId = "proj",
+                        fileId = "proj:src/File$idx.kt",
+                        name = "tgt$idx",
+                        qualifiedName = "tgt$idx",
+                        kind = "function"
+                    )
+                )
+                GraphEdge(
+                    edgeId = "edge-$idx",
+                    projectId = "proj",
+                    sourceNodeId = "src-$idx",
+                    targetNodeId = "tgt-$idx",
+                    edgeType = type
+                )
+            }
+            store.upsertNodesAndEdges("proj", nodes, edges)
+
+            val before = store.listEdges("proj")
+            assertEquals(9, before.size)
+
+            store.deleteAllResolvedCodeEdges("proj")
+
+            val after = store.listEdges("proj")
+            val remainingTypes = after.map { it.edgeType }.toSet()
+
+            assertEquals(7, after.size)
+            assertFalse(remainingTypes.contains("CALLS"))
+            assertFalse(remainingTypes.contains("IMPORTS"))
+            assertTrue(remainingTypes.contains("PLAN_SCOPES_FILE"))
+            assertTrue(remainingTypes.contains("WIKILINK_REFS"))
+            assertTrue(remainingTypes.contains("CODE_SPAN_REFS"))
+            assertTrue(remainingTypes.contains("URL_REFS"))
+            assertTrue(remainingTypes.contains("TAGGED_WITH"))
+            assertTrue(remainingTypes.contains("TRIGGERS_SKILL"))
+            assertTrue(remainingTypes.contains("DEPENDS_ON_SKILL"))
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }
 
