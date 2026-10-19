@@ -1625,8 +1625,9 @@ class AtlasCli {
             isJson: Boolean
         ): Int {
             val engine = WorkspaceInitEngine(workspace)
+            val effectiveProject = engine.resolveProjectSlug(project)
             val result = engine.initHook(
-                project = project,
+                project = effectiveProject,
                 hookType = hookType,
                 force = force,
                 threshold = threshold,
@@ -1636,6 +1637,7 @@ class AtlasCli {
             if (isJson) {
                 val jsonObject = buildJsonObject {
                     put("success", result.success)
+                    put("project", effectiveProject)
                     put("hook_path", result.hookPath)
                     put("hook_type", result.hookType)
                     put("message", result.message)
@@ -1648,14 +1650,14 @@ class AtlasCli {
                 println(jsonPretty.encodeToString(jsonObject))
             } else {
                 if (result.success) {
-                    println("[Init] $project: ${result.message}")
+                    println("[Init] $effectiveProject: ${result.message}")
                     if (result.dryRun && result.scriptContent != null) {
                         println("--- Script Preview ---")
                         println(result.scriptContent)
                         println("----------------------")
                     }
                 } else {
-                    println("[Init Error] $project: ${result.message}")
+                    println("[Init Error] $effectiveProject: ${result.message}")
                 }
             }
             return if (result.success) 0 else 1

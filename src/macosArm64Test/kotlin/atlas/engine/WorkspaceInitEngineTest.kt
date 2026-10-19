@@ -122,4 +122,39 @@ class WorkspaceInitEngineTest {
             PlatformFiles.deleteRecursively(tempDir)
         }
     }
+
+    @Test
+    fun testDynamicProjectSlugResolutionFromBaselineAndDirectory() {
+        val tempDir = "/tmp/atlas_init_dyn_slug_${Random.nextInt(100000, 999999)}"
+        PlatformFiles.mkdirs("$tempDir/.git")
+        try {
+            val engine = WorkspaceInitEngine(tempDir)
+
+            // 1. Without baseline, defaults to directory name if project is "organisation"
+            val expectedDirSlug = tempDir.substringAfterLast('/')
+            val resolvedDirSlug = engine.resolveProjectSlug("organisation")
+            assertEquals(expectedDirSlug, resolvedDirSlug)
+
+            // 2. With complexity-baseline.json containing custom project slug
+            PlatformFiles.writeText(
+                "$tempDir/complexity-baseline.json",
+                """{"project": "custom-atlas-project", "ratchet": 50, "high_ratchet": 20}"""
+            )
+            val resolvedFromBaseline = engine.resolveProjectSlug("organisation")
+            assertEquals("custom-atlas-project", resolvedFromBaseline)
+
+            // 3. Dry-run initHook picks up baseline slug and embeds in hook script
+            val res = engine.initHook(project = "organisation", dryRun = true)
+            assertTrue(res.success)
+            assertNotNull(res.scriptContent)
+            assertTrue(res.scriptContent.contains("--project custom-atlas-project"))
+            assertFalse(res.scriptContent.contains("--project organisation"))
+
+            // 4. Explicit non-organisation project slug is preserved
+            val explicitSlug = engine.resolveProjectSlug("override-slug")
+            assertEquals("override-slug", explicitSlug)
+        } finally {
+            PlatformFiles.deleteRecursively(tempDir)
+        }
+    }
 }
