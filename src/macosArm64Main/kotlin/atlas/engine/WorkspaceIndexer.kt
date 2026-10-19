@@ -149,7 +149,7 @@ class WorkspaceIndexer(
                     )
                     filesIndexed++
                 } else {
-                    unchangedMarkdownQueue.add(Pair(relStr, rawBytes.decodeToString()))
+                    unchangedMarkdownQueue.add(Pair(relStr, filePath))
                     filesSkipped++
                 }
                 continue
@@ -380,18 +380,19 @@ class WorkspaceIndexer(
         // When code files were incrementally re-indexed or deleted, also re-evaluate markdown files
         // so PLAN_SCOPES_FILE, codespan, and wikilink edges link against newly added or updated code symbols.
         if (codeFilesIndexed > 0 || filesDeleted > 0) {
-            val queuedRels = markdownQueue.map { it.first }.toSet()
-            for ((relMd, mdText) in unchangedMarkdownQueue) {
-                if (relMd !in queuedRels) {
+            val queuedRels = markdownQueue.mapTo(mutableSetOf()) { it.first }
+            for ((relMd, filePath) in unchangedMarkdownQueue) {
+                if (queuedRels.add(relMd)) {
                     store.deleteOutgoingEdgesForFile(projectId, "$projectId:$relMd")
-                    markdownQueue.add(Pair(relMd, mdText))
+                    markdownQueue.add(Pair(relMd, PlatformFiles.readText(filePath)))
                 }
             }
             if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
                 for (indexedRel in cachedFiles.keys) {
-                    if (indexedRel.endsWith(".md") && indexedRel !in markdownQueue.map { it.first }) {
+                    if (indexedRel.endsWith(".md") && indexedRel !in queuedRels) {
                         val fullMdPath = "$root/$indexedRel"
                         if (PlatformFiles.exists(fullMdPath)) {
+                            queuedRels.add(indexedRel)
                             store.deleteOutgoingEdgesForFile(projectId, "$projectId:$indexedRel")
                             markdownQueue.add(Pair(indexedRel, PlatformFiles.readText(fullMdPath)))
                         }
