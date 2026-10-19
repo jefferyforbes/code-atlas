@@ -17,7 +17,7 @@ import kotlin.math.round
 /**
  * Application intelligence engine (`semantic:application`) for Jetpack Compose & KMP
  * stability queries (`summary`, `cascade`, `blame`), 12-rule Gate 1 compliance auditing
- * (`<= 95.0/100` autonomous score cap + mandatory Remaining 5% Polish Delta),
+ * (100-point world-class benchmark + mandatory Remaining 5% Polish Delta),
  * Strong Skipping Reality Check correlation, and write-site verified Doctor remediation previews.
  */
 class ComposeStabilityEngine(private val store: SqliteGraphStore) {
@@ -319,7 +319,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
             }
         }
 
-        // Compute RawScore with per-rule 25.0 deduction cap, then clamp to Gate 1 <= 95.0 ceiling
+        // Compute RawScore with per-rule 25.0 deduction cap, then clamp to Gate 1 <= 100.0 ceiling
         var totalDeduction = 0.0
         for (rule in RULES) {
             val ruleViolations = violations.filter { it.ruleId == rule.ruleId }

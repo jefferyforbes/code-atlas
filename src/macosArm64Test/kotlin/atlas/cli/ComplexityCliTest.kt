@@ -316,4 +316,44 @@ class ComplexityCliTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testGeneralDoctorCliTriage() {
+        val dbPath = makeTempDb()
+        val tmpDir = makeTempDir()
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val node = GraphNode(
+                nodeId = "proj:src/Main.kt#run",
+                projectId = "proj",
+                fileId = "proj:src/Main.kt",
+                name = "run",
+                qualifiedName = "atlas.sample.Main.run",
+                kind = "function",
+                startLine = 1,
+                endLine = 20,
+                cognitiveComplexity = 5,
+                cyclomaticComplexity = 2,
+                maxNestingDepth = 1,
+                complexityScore = 20.0
+            )
+            store.upsertNodesAndEdges("proj", listOf(node), emptyList())
+
+            // General doctor without --complexity or compose should execute general triage and return 0
+            val exitGeneralDoctor = AtlasCli.run(
+                arrayOf("doctor", "--project", "proj", "--db", dbPath, "--workspace", tmpDir)
+            )
+            assertEquals(0, exitGeneralDoctor)
+
+            // General doctor with --json flag
+            val exitGeneralDoctorJson = AtlasCli.run(
+                arrayOf("doctor", "--project", "proj", "--db", dbPath, "--workspace", tmpDir, "--json")
+            )
+            assertEquals(0, exitGeneralDoctorJson)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+            cleanDir(tmpDir)
+        }
+    }
 }
