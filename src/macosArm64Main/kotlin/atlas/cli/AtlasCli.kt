@@ -367,7 +367,7 @@ class AtlasCli {
                     )
                 }
 
-                if (subsystem == "compose" || (command == "query" && action in setOf("summary", "cascade", "blame", "compose_summary", "compose_cascade", "compose_blame")) || (command == "audit" && isComposeAuditFlag) || command == "doctor") {
+                if (subsystem == "compose" || (command == "query" && action in setOf("summary", "cascade", "blame", "compose_summary", "compose_cascade", "compose_blame")) || (command == "audit" && isComposeAuditFlag) || (command == "doctor" && (subsystem == "compose" || isComposeAuditFlag))) {
                     val effCmd = if (command == "audit" && isComposeAuditFlag) "audit" else command
                     return runComposeCommand(
                         server = server,
@@ -637,6 +637,21 @@ class AtlasCli {
                         } else {
                             if (vCount > 0 || total == 0) 0 else 1
                         }
+                    }
+                    "doctor" -> {
+                        return runGeneralDoctorCommand(
+                            server = server,
+                            project = project,
+                            paths = paths,
+                            target = target,
+                            limit = limit,
+                            apply = applyRemediation,
+                            testCmd = testCmdArg,
+                            threshold = thresholdArg,
+                            split = splitBoost003,
+                            makePrivate = makePrivateBoost003,
+                            isJson = isJson
+                        )
                     }
                     "dead-code" -> {
                         val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
@@ -1077,14 +1092,14 @@ class AtlasCli {
                     }
                     val res = server.callTool("atlas_audit", toolArgs)
                     val data = loadSpilledData(res)
-                    val score = data["overall_score"]?.jsonPrimitive?.doubleOrNull ?: 95.0
+                    val score = data["overall_score"]?.jsonPrimitive?.doubleOrNull ?: 100.0
                     val status = data["status"]?.jsonPrimitive?.content ?: (if (score >= 80.0) "PASS" else "FAIL")
                     val vCount = data["violations"]?.jsonArray?.size ?: 0
                     val totalComp = data["total_composables"]?.jsonPrimitive?.intOrNull ?: 0
                     if (isJson) {
                         println(jsonPretty.encodeToString(data))
                     } else {
-                        val text = "[Compose Audit] project=$project status=$status score=$score/100 (Gate1<=95.0) composables=$totalComp violations=$vCount strong_skipping=$strongSkipping"
+                        val text = "[Compose Audit] project=$project status=$status score=$score/100 composables=$totalComp violations=$vCount strong_skipping=$strongSkipping"
                         println(truncateSummary(text, false))
                     }
                     return if (score >= 80.0) 0 else 1
@@ -1255,6 +1270,108 @@ class AtlasCli {
             }
             val truncatedBytes = bytes.copyOfRange(0, end)
             return truncatedBytes.decodeToString() + "..."
+        }
+
+        private fun runGeneralDoctorCommand(
+            server: AtlasMcpServer,
+            project: String,
+            paths: List<String>,
+            target: String,
+            limit: Int,
+            apply: Boolean,
+            testCmd: String?,
+            threshold: Int?,
+            split: Boolean,
+            makePrivate: Boolean,
+            isJson: Boolean
+        ): Int {
+            val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
+            val archArgs = buildJsonObject {
+                put("action", if (apply) "remedy_architecture" else "verify_architecture")
+                put("project", project)
+                if (filterPaths.isNotEmpty()) {
+                    putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                }
+                if (apply) {
+                    put("dry_run", false)
+                    put("split", split)
+                    put("make_private", makePrivate)
+                    if (!testCmd.isNullOrBlank()) put("test_command", testCmd)
+                    put("limit", limit)
+                }
+            }
+            val archRes = server.callTool("atlas_audit", archArgs)
+            val archData = loadSpilledData(archRes)
+
+            val compArgs = buildJsonObject {
+                put("action", "complexity_doctor")
+                put("project", project)
+                if (target.isNotEmpty()) put("target", target)
+                put("limit", limit)
+                put("apply", apply)
+                if (threshold != null) put("threshold", threshold)
+                if (!testCmd.isNullOrBlank()) put("test_command", testCmd)
+            }
+            val compRes = server.callTool("atlas_audit", compArgs)
+            val compData = loadSpilledData(compRes)
+
+            val hasCompose = try {
+                server.store.listComposeNodes(project).isNotEmpty()
+            } catch (_: Exception) {
+                false
+            }
+            val composeData = if (hasCompose) {
+                val compDoctorArgs = buildJsonObject {
+                    put("action", "compose_doctor")
+                    put("project", project)
+                    put("limit", limit)
+                    if (target.isNotEmpty()) putJsonArray("targets") { add(target) }
+                }
+                val cRes = server.callTool("atlas_audit", compDoctorArgs)
+                loadSpilledData(cRes)
+            } else null
+
+            val archViolations = if (apply) {
+                archData["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
+            } else {
+                val bViolations = (archData["single_declaration_violations"] ?: archData["singleDeclarationViolations"])?.jsonArray?.size ?: 0
+                val lInversions = (archData["layer_inversions"] ?: archData["layerInversions"])?.jsonArray?.size ?: 0
+                val pCollisions = (archData["plan_3d_collisions"] ?: archData["plan3dCollisions"])?.jsonArray?.size ?: 0
+                val cViolations = (archData["complexity_violations"] ?: archData["complexityViolations"])?.jsonArray?.size ?: 0
+                bViolations + lInversions + pCollisions + cViolations
+            }
+            val compPrescriptions = compData["total_prescriptions"]?.jsonPrimitive?.intOrNull ?: 0
+            val composePrescriptions = composeData?.get("total_prescriptions")?.jsonPrimitive?.intOrNull ?: 0
+
+            if (isJson) {
+                val combined = buildJsonObject {
+                    put("project", project)
+                    put("mode", if (apply) "applied" else "triage")
+                    put("architecture", archData)
+                    put("complexity", compData)
+                    if (composeData != null) put("compose", composeData)
+                }
+                println(jsonPretty.encodeToString(combined))
+            } else {
+                val mode = if (apply) "apply" else "triage"
+                val text = "[Doctor: $mode] project=$project architecture_violations=$archViolations complexity_prescriptions=$compPrescriptions compose_prescriptions=$composePrescriptions"
+                println(truncateSummary(text, false))
+                if (archViolations > 0 && !apply) {
+                    println("  - Architecture: $archViolations violation(s) detected. Run 'atlas fix' or 'atlas doctor --apply' to remediate.")
+                }
+                if (compPrescriptions > 0) {
+                    val verified = compData["verified_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    if (apply) {
+                        println("  - Complexity: $compPrescriptions prescription(s), $verified verified & applied.")
+                    } else {
+                        println("  - Complexity: $compPrescriptions prescription(s) available. Run 'atlas doctor --complexity' for breakdown.")
+                    }
+                }
+                if (composePrescriptions > 0) {
+                    println("  - Compose: $composePrescriptions prescription(s) available. Run 'atlas compose doctor' for breakdown.")
+                }
+            }
+            return 0
         }
 
         private fun runComplexityDoctorCommand(

@@ -20,7 +20,7 @@ class ComposeStabilityEngineTest {
         val store = SqliteGraphStore(dbPath)
         val engine = ComposeStabilityEngine(store)
         try {
-            // 1. Seed a clean composable -> raw score is 100.0, clamped to 95.0 (Gate 1 Ceiling)
+            // 1. Seed a clean composable -> raw score is 100.0 (100-Point World-Class Calibration)
             val cleanNode = ComposeNodeRecord(
                 nodeId = "proj:ui/CleanScreen.kt#CleanScreen",
                 projectSlug = "proj",
@@ -93,7 +93,7 @@ class ComposeStabilityEngineTest {
 
             val audit = engine.auditCompose("proj", strongSkipping = true)
             assertEquals("PASS", audit.status)
-            assertEquals(95.0, audit.overallScore, "Overall score must be capped at 95.0 Gate 1 Ceiling")
+            assertEquals(95.0, audit.overallScore, "Overall score must reflect 100.0 minus 5.0 deduction")
             assertEquals(95.0, audit.rawUnclampedScore)
             assertEquals(4, audit.remainingPolishDelta.size, "Must populate 4 Remaining 5% Polish Delta items")
 

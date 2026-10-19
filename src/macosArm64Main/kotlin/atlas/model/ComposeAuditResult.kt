@@ -12,7 +12,7 @@ data class ComposeAuditResult(
     val status: String,
     @SerialName("overall_score") val overallScore: Double,
     @SerialName("raw_unclamped_score") val rawUnclampedScore: Double,
-    @SerialName("gate1_target") val gate1Target: Double = 95.0,
+    @SerialName("gate1_target") val gate1Target: Double = 100.0,
     @SerialName("pass_threshold") val passThreshold: Double = 80.0,
     @SerialName("total_composables") val totalComposables: Int,
     @SerialName("skippable_composables") val skippableComposables: Int,
