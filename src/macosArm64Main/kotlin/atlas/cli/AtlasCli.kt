@@ -142,15 +142,19 @@ class AtlasCli {
                         command = "query"
                         action = "shortest_path"
                     }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "fix" || arg == "remedy" || arg == "remediate" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" || arg == "init" || arg == "migrate-tools" || arg == "migrate_tools" -> {
+                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "fix" || arg == "remedy" || arg == "remediate" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "serve" || arg == "explore" || arg == "callers" || arg == "callees" || arg == "impact" || arg == "status" || arg == "files" || arg == "search" || arg == "node" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" || arg == "init" || arg == "migrate-tools" || arg == "migrate_tools" -> {
                         command = when (arg) {
                             "dead_code" -> "dead-code"
                             "record_memory" -> "record-memory"
                             "verify_remediation" -> "verify-remediation"
                             "remedy", "remediate" -> "fix"
                             "migrate_tools" -> "migrate-tools"
+                            "serve" -> "serve-mcp"
                             else -> arg
                         }
+                    }
+                    arg == "--mcp" -> {
+                        if (command == "serve" || command.isEmpty()) command = "serve-mcp"
                     }
                     arg == "--compose" -> isComposeAuditFlag = true
                     arg == "--complexity" -> isComplexityFlag = true
@@ -176,7 +180,27 @@ class AtlasCli {
                     }
                     arg == "--outcome" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> outcome = argv[++idx]
                     arg == "--note" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> note = argv[++idx]
-                    arg == "--project" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> project = argv[++idx]
+                    (arg == "--project" || arg == "--project-path" || arg == "--projectPath") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> {
+                        val p = argv[++idx]
+                        if (p.contains('/') || p == ".") {
+                            workspace = p
+                            val clean = p.trimEnd('/', '\\')
+                            project = if (clean.contains('/')) clean.substringAfterLast('/') else clean
+                        } else {
+                            project = p
+                        }
+                    }
+                    arg.startsWith("--project-path=") || arg.startsWith("--projectPath=") -> {
+                        val p = arg.substringAfter('=')
+                        if (p.contains('/') || p == ".") {
+                            workspace = p
+                            val clean = p.trimEnd('/', '\\')
+                            project = if (clean.contains('/')) clean.substringAfterLast('/') else clean
+                        } else {
+                            project = p
+                        }
+                    }
+                    arg.startsWith("--project=") -> project = arg.substringAfter('=')
                     arg == "--workspace" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> workspace = argv[++idx]
                     arg == "--db" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> customDb = argv[++idx]
                     arg == "--cache-profile" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> cacheProfile = argv[++idx]
@@ -269,10 +293,12 @@ class AtlasCli {
                 return 1
             }
 
+            val isMcpServe = command == "serve-mcp" || argv.contains("--mcp") || argv.contains("serve")
             val server = AtlasMcpServer(
                 workspaceRoot = workspace,
                 customDbPath = customDb,
-                cacheProfile = cacheProfile
+                cacheProfile = cacheProfile,
+                enableCodegraphTools = isMcpServe || (PlatformFiles.getenv("ATLAS_CODEGRAPH_COMPAT") == "1")
             )
 
             try {
@@ -371,6 +397,64 @@ class AtlasCli {
                     }
                     "serve-mcp" -> {
                         server.serveStdio()
+                        return 0
+                    }
+                    "explore" -> {
+                        val effectiveServer = server.resolveServerForProject(project, workspace)
+                        val queryText = if (target.isNotEmpty()) target else paths.joinToString(" ")
+                        val res = effectiveServer.codegraphEngine.explore(project, queryText, maxFiles = limit)
+                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                        println(text)
+                        return 0
+                    }
+                    "callers" -> {
+                        val effectiveServer = server.resolveServerForProject(project, workspace)
+                        val res = effectiveServer.codegraphEngine.callers(project, target, file = fileKey, limit = limit)
+                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                        println(text)
+                        return 0
+                    }
+                    "callees" -> {
+                        val effectiveServer = server.resolveServerForProject(project, workspace)
+                        val res = effectiveServer.codegraphEngine.callees(project, target, file = fileKey, limit = limit)
+                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                        println(text)
+                        return 0
+                    }
+                    "impact" -> {
+                        val effectiveServer = server.resolveServerForProject(project, workspace)
+                        val res = effectiveServer.codegraphEngine.impact(project, target, file = fileKey, depth = depth)
+                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                        println(text)
+                        return 0
+                    }
+                    "status" -> {
+                        val effectiveServer = server.resolveServerForProject(project, workspace)
+                        val res = effectiveServer.codegraphEngine.status(project)
+                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                        println(text)
+                        return 0
+                    }
+                    "files" -> {
+                        val effectiveServer = server.resolveServerForProject(project, workspace)
+                        val res = effectiveServer.codegraphEngine.files(project, path = paths.firstOrNull(), pattern = if (target.isNotEmpty()) target else null)
+                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                        println(text)
+                        return 0
+                    }
+                    "search" -> {
+                        val effectiveServer = server.resolveServerForProject(project, workspace)
+                        val queryText = if (target.isNotEmpty()) target else paths.joinToString(" ")
+                        val res = effectiveServer.codegraphEngine.search(project, queryText, limit = limit)
+                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                        println(text)
+                        return 0
+                    }
+                    "node" -> {
+                        val effectiveServer = server.resolveServerForProject(project, workspace)
+                        val res = effectiveServer.codegraphEngine.node(project, symbol = target.ifEmpty { null }, file = fileKey, includeCode = includeSource)
+                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                        println(text)
                         return 0
                     }
                     "index" -> {

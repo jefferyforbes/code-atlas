@@ -93,16 +93,24 @@ object CacheProfileResolver {
             if (found != null) return found
         }
 
-        val devRoot = "$home/Development"
-        if (!PlatformFiles.isDirectory(devRoot)) return defaultWorkspace
-
-        val entries = PlatformFiles.listDirectory(devRoot)
-        val matchedEntry = entries.firstOrNull { entry ->
-            entry.lowercase().replace("_", "-") == normalizedTarget
-        } ?: return defaultWorkspace
-
-        val candidateDir = "$devRoot/$matchedEntry"
-        return if (PlatformFiles.isDirectory(candidateDir)) candidateDir else defaultWorkspace
+        val searchRoots = listOf(
+            "$home/StudioProjects",
+            "$home/Development",
+            "$home/Projects",
+            "$home/code"
+        )
+        for (root in searchRoots) {
+            if (!PlatformFiles.isDirectory(root)) continue
+            val entries = PlatformFiles.listDirectory(root)
+            val matchedEntry = entries.firstOrNull { entry ->
+                entry.lowercase().replace("_", "-") == normalizedTarget
+            }
+            if (matchedEntry != null) {
+                val candidateDir = "$root/$matchedEntry"
+                if (PlatformFiles.isDirectory(candidateDir)) return candidateDir
+            }
+        }
+        return defaultWorkspace
     }
 }
 

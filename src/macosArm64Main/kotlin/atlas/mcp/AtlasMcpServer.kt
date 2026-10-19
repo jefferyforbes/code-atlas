@@ -5,6 +5,7 @@ import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectureAuditor
 import atlas.engine.ArchitectureRemediationEngine
 import atlas.engine.AutonomousRemediationVerifier
+import atlas.engine.CodegraphCompatibilityEngine
 import atlas.engine.ComplexityDoctorEngine
 import atlas.engine.ComposeStabilityEngine
 import atlas.engine.FigmaDesignAuditor
@@ -52,7 +53,8 @@ import platform.posix.time
 class AtlasMcpServer(
     val workspaceRoot: String,
     val customDbPath: String? = null,
-    val cacheProfile: String? = null
+    val cacheProfile: String? = null,
+    val enableCodegraphTools: Boolean = (PlatformFiles.getenv("ATLAS_CODEGRAPH_COMPAT") == "1")
 ) {
     companion object {
         const val SPILLOVER_THRESHOLD_BYTES = 32768
@@ -71,6 +73,7 @@ class AtlasMcpServer(
     val indexer: WorkspaceIndexer
     val remediationVerifier: AutonomousRemediationVerifier
     val remediationEngine: ArchitectureRemediationEngine
+    val codegraphEngine: CodegraphCompatibilityEngine
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -96,6 +99,7 @@ class AtlasMcpServer(
         indexer = WorkspaceIndexer(workspaceRoot, store)
         remediationVerifier = AutonomousRemediationVerifier(workspaceRoot, store)
         remediationEngine = ArchitectureRemediationEngine(workspaceRoot, store, remediationVerifier)
+        codegraphEngine = CodegraphCompatibilityEngine(store, workspaceRoot)
     }
 
     fun toolDefinitions(): List<JsonObject> {
@@ -354,7 +358,244 @@ class AtlasMcpServer(
             }
         }
 
-        return listOf(
+        val codegraphExploreSchema = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("query") {
+                    put("type", "string")
+                    put("description", "Symbol names, file names, or short code terms to explore.")
+                }
+                putJsonObject("maxFiles") {
+                    put("type", "integer")
+                    put("description", "Maximum number of files to include source code from (default: 12).")
+                }
+                putJsonObject("projectPath") {
+                    put("type", "string")
+                    put("description", "Optional project path or root directory to query.")
+                }
+                putJsonObject("project") {
+                    put("type", "string")
+                    put("description", "Optional project slug.")
+                }
+            }
+            putJsonArray("required") {
+                add("query")
+            }
+        }
+
+        val codegraphNodeSchema = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("symbol") {
+                    put("type", "string")
+                    put("description", "Name of the symbol to inspect or read.")
+                }
+                putJsonObject("file") {
+                    put("type", "string")
+                    put("description", "A file path or basename to read or disambiguate symbol.")
+                }
+                putJsonObject("includeCode") {
+                    put("type", "boolean")
+                    put("description", "Include the symbol's full body (default: false).")
+                }
+                putJsonObject("offset") {
+                    put("type", "integer")
+                    put("description", "1-based line to start reading from in file mode.")
+                }
+                putJsonObject("limit") {
+                    put("type", "integer")
+                    put("description", "Maximum number of lines to return in file mode (default: 2000).")
+                }
+                putJsonObject("symbolsOnly") {
+                    put("type", "boolean")
+                    put("description", "Return symbol map instead of source (default: false).")
+                }
+                putJsonObject("line") {
+                    put("type", "integer")
+                    put("description", "Disambiguate symbol around this line.")
+                }
+                putJsonObject("projectPath") {
+                    put("type", "string")
+                    put("description", "Optional project path or root directory.")
+                }
+                putJsonObject("project") {
+                    put("type", "string")
+                    put("description", "Optional project slug.")
+                }
+            }
+        }
+
+        val codegraphSearchSchema = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("query") {
+                    put("type", "string")
+                    put("description", "Symbol name or partial name to search.")
+                }
+                putJsonObject("kind") {
+                    put("type", "string")
+                    putJsonArray("enum") {
+                        add("function")
+                        add("method")
+                        add("class")
+                        add("interface")
+                        add("type")
+                        add("variable")
+                        add("route")
+                        add("component")
+                    }
+                    put("description", "Filter by node kind.")
+                }
+                putJsonObject("limit") {
+                    put("type", "integer")
+                    put("description", "Maximum results (default: 10).")
+                }
+                putJsonObject("projectPath") {
+                    put("type", "string")
+                    put("description", "Optional project path or root directory.")
+                }
+                putJsonObject("project") {
+                    put("type", "string")
+                    put("description", "Optional project slug.")
+                }
+            }
+            putJsonArray("required") {
+                add("query")
+            }
+        }
+
+        val codegraphCallersSchema = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("symbol") {
+                    put("type", "string")
+                    put("description", "Name of the function, method, or class to find callers for.")
+                }
+                putJsonObject("file") {
+                    put("type", "string")
+                    put("description", "Narrow to definition in this file.")
+                }
+                putJsonObject("limit") {
+                    put("type", "integer")
+                    put("description", "Maximum number of callers to return (default: 20).")
+                }
+                putJsonObject("projectPath") {
+                    put("type", "string")
+                    put("description", "Optional project path or root directory.")
+                }
+                putJsonObject("project") {
+                    put("type", "string")
+                    put("description", "Optional project slug.")
+                }
+            }
+            putJsonArray("required") {
+                add("symbol")
+            }
+        }
+
+        val codegraphCalleesSchema = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("symbol") {
+                    put("type", "string")
+                    put("description", "Name of the function, method, or class to find callees for.")
+                }
+                putJsonObject("file") {
+                    put("type", "string")
+                    put("description", "Narrow to definition in this file.")
+                }
+                putJsonObject("limit") {
+                    put("type", "integer")
+                    put("description", "Maximum number of callees to return (default: 20).")
+                }
+                putJsonObject("projectPath") {
+                    put("type", "string")
+                    put("description", "Optional project path or root directory.")
+                }
+                putJsonObject("project") {
+                    put("type", "string")
+                    put("description", "Optional project slug.")
+                }
+            }
+            putJsonArray("required") {
+                add("symbol")
+            }
+        }
+
+        val codegraphImpactSchema = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("symbol") {
+                    put("type", "string")
+                    put("description", "Name of the symbol to analyze impact for.")
+                }
+                putJsonObject("file") {
+                    put("type", "string")
+                    put("description", "Narrow to definition in this file.")
+                }
+                putJsonObject("depth") {
+                    put("type", "integer")
+                    put("description", "Levels of dependencies to traverse (default: 2).")
+                }
+                putJsonObject("projectPath") {
+                    put("type", "string")
+                    put("description", "Optional project path or root directory.")
+                }
+                putJsonObject("project") {
+                    put("type", "string")
+                    put("description", "Optional project slug.")
+                }
+            }
+            putJsonArray("required") {
+                add("symbol")
+            }
+        }
+
+        val codegraphStatusSchema = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("projectPath") {
+                    put("type", "string")
+                    put("description", "Optional project path or root directory.")
+                }
+                putJsonObject("project") {
+                    put("type", "string")
+                    put("description", "Optional project slug.")
+                }
+            }
+        }
+
+        val codegraphFilesSchema = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("path") {
+                    put("type", "string")
+                    put("description", "Filter files under this directory path.")
+                }
+                putJsonObject("pattern") {
+                    put("type", "string")
+                    put("description", "Filter files matching this glob pattern.")
+                }
+                putJsonObject("format") {
+                    put("type", "string")
+                    putJsonArray("enum") {
+                        add("tree")
+                        add("flat")
+                    }
+                    put("description", "Output format: tree (default) or flat.")
+                }
+                putJsonObject("projectPath") {
+                    put("type", "string")
+                    put("description", "Optional project path or root directory.")
+                }
+                putJsonObject("project") {
+                    put("type", "string")
+                    put("description", "Optional project slug.")
+                }
+            }
+        }
+
+        val baseTools = listOf(
             buildJsonObject {
                 put("name", "atlas_query")
                 put("description", "Query indexed polyglot AST symbols, callers, callees, blast radius, Compose stability, or live source slices.")
@@ -374,6 +615,53 @@ class AtlasMcpServer(
                 put("name", "figma_scope")
                 put("description", "Synthesize Figma 3D Concurrency Scope (spatial canvas bounds, shared components, token layers).")
                 put("inputSchema", figmaScopeSchema)
+            }
+        )
+
+        if (!enableCodegraphTools) {
+            return baseTools
+        }
+
+        return baseTools + listOf(
+            buildJsonObject {
+                put("name", "codegraph_explore")
+                put("description", "Explore relevant code symbols, live line-numbered source, and caller relationships in one round-trip.")
+                put("inputSchema", codegraphExploreSchema)
+            },
+            buildJsonObject {
+                put("name", "codegraph_node")
+                put("description", "Read whole file with line numbers or inspect symbol details, body, callers, and callees.")
+                put("inputSchema", codegraphNodeSchema)
+            },
+            buildJsonObject {
+                put("name", "codegraph_search")
+                put("description", "Quick symbol search by name and kind. Returns locations and signatures.")
+                put("inputSchema", codegraphSearchSchema)
+            },
+            buildJsonObject {
+                put("name", "codegraph_callers")
+                put("description", "List functions and methods that call a symbol.")
+                put("inputSchema", codegraphCallersSchema)
+            },
+            buildJsonObject {
+                put("name", "codegraph_callees")
+                put("description", "List functions and methods that a symbol calls.")
+                put("inputSchema", codegraphCalleesSchema)
+            },
+            buildJsonObject {
+                put("name", "codegraph_impact")
+                put("description", "List symbols affected by changing a symbol before refactoring.")
+                put("inputSchema", codegraphImpactSchema)
+            },
+            buildJsonObject {
+                put("name", "codegraph_status")
+                put("description", "Index health check reporting indexed files, nodes, edges, and database location.")
+                put("inputSchema", codegraphStatusSchema)
+            },
+            buildJsonObject {
+                put("name", "codegraph_files")
+                put("description", "Indexed file tree with pattern and directory filtering.")
+                put("inputSchema", codegraphFilesSchema)
             }
         )
     }
@@ -400,12 +688,18 @@ class AtlasMcpServer(
         traceLogPath = traceLogPath
     )
 
-    fun resolveServerForProject(projectId: String): AtlasMcpServer {
-        if (customDbPath != null || projectId.isEmpty()) return this
+    fun resolveServerForProject(projectId: String, explicitWorkspace: String? = null): AtlasMcpServer {
+        if (customDbPath != null || (projectId.isEmpty() && explicitWorkspace.isNullOrEmpty())) return this
         val localStats = store.getStats(projectId)
         if (localStats.files > 0) return this
 
-        val candidateWs = CacheProfileResolver.resolveProjectWorkspace(workspaceRoot, projectId)
+        val candidateWs = if (!explicitWorkspace.isNullOrEmpty() && explicitWorkspace != "." && explicitWorkspace != workspaceRoot) {
+            val path = if (PlatformFiles.isDirectory(explicitWorkspace)) explicitWorkspace
+                       else PlatformFiles.parentOf(explicitWorkspace)
+            PlatformFiles.canonicalPath(path)
+        } else {
+            CacheProfileResolver.resolveProjectWorkspace(workspaceRoot, projectId)
+        }
         val canonCurrent = PlatformFiles.canonicalPath(workspaceRoot).replace('\\', '/').trimEnd('/')
         val canonCandidate = PlatformFiles.canonicalPath(candidateWs).replace('\\', '/').trimEnd('/')
         if (canonCandidate == canonCurrent) return this
@@ -414,7 +708,8 @@ class AtlasMcpServer(
             AtlasMcpServer(
                 workspaceRoot = canonCandidate,
                 customDbPath = null,
-                cacheProfile = cacheProfile
+                cacheProfile = cacheProfile,
+                enableCodegraphTools = enableCodegraphTools
             )
         }
     }
@@ -426,8 +721,18 @@ class AtlasMcpServer(
     }
 
     fun callTool(name: String, arguments: JsonObject): JsonObject {
-        val project = arguments["project"]?.jsonPrimitive?.content ?: "organisation"
-        val activeServer = resolveServerForProject(project)
+        val explicitPath = arguments["projectPath"]?.jsonPrimitive?.contentOrNull
+            ?: arguments["project-path"]?.jsonPrimitive?.contentOrNull
+        val explicitProject = arguments["project"]?.jsonPrimitive?.contentOrNull
+        val project = when {
+            !explicitProject.isNullOrBlank() -> explicitProject
+            !explicitPath.isNullOrBlank() -> {
+                val clean = explicitPath.trimEnd('/', '\\')
+                if (clean.contains('/')) clean.substringAfterLast('/') else clean
+            }
+            else -> "organisation"
+        }
+        val activeServer = resolveServerForProject(project, explicitPath)
         if (activeServer !== this) {
             return activeServer.callToolDirect(name, arguments)
         }
@@ -435,12 +740,20 @@ class AtlasMcpServer(
     }
 
     private fun callToolDirect(name: String, arguments: JsonObject): JsonObject {
-        val project = arguments["project"]?.jsonPrimitive?.content ?: "organisation"
+        val project = resolveProjectFromArgs(arguments)
         val payload = when (name) {
             "atlas_query" -> handleQuery(arguments)
             "atlas_audit" -> handleAudit(arguments)
             "figma_audit" -> handleFigmaAudit(arguments)
             "figma_scope" -> handleFigmaScope(arguments)
+            "codegraph_explore" -> handleCodegraphExplore(arguments)
+            "codegraph_node" -> handleCodegraphNode(arguments)
+            "codegraph_search" -> handleCodegraphSearch(arguments)
+            "codegraph_callers" -> handleCodegraphCallers(arguments)
+            "codegraph_callees" -> handleCodegraphCallees(arguments)
+            "codegraph_impact" -> handleCodegraphImpact(arguments)
+            "codegraph_status" -> handleCodegraphStatus(arguments)
+            "codegraph_files" -> handleCodegraphFiles(arguments)
             else -> throw IllegalArgumentException("Unknown MCP tool: $name")
         }
         return enforceSpillover(project, payload)
@@ -925,6 +1238,82 @@ class AtlasMcpServer(
         return json.encodeToJsonElement(scope).jsonObject
     }
 
+    private fun resolveProjectFromArgs(args: JsonObject): String {
+        val explicitProject = args["project"]?.jsonPrimitive?.contentOrNull
+        if (!explicitProject.isNullOrBlank()) return explicitProject
+        val explicitPath = args["projectPath"]?.jsonPrimitive?.contentOrNull
+            ?: args["project-path"]?.jsonPrimitive?.contentOrNull
+        if (!explicitPath.isNullOrBlank()) {
+            val clean = explicitPath.trimEnd('/', '\\')
+            return if (clean.contains('/')) clean.substringAfterLast('/') else clean
+        }
+        return "organisation"
+    }
+
+    private fun handleCodegraphExplore(args: JsonObject): JsonObject {
+        val query = args["query"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val maxFiles = args["maxFiles"]?.jsonPrimitive?.intOrNull ?: 12
+        val project = resolveProjectFromArgs(args)
+        return codegraphEngine.explore(project, query, maxFiles)
+    }
+
+    private fun handleCodegraphNode(args: JsonObject): JsonObject {
+        val symbol = args["symbol"]?.jsonPrimitive?.contentOrNull
+        val file = args["file"]?.jsonPrimitive?.contentOrNull
+        val includeCode = args["includeCode"]?.jsonPrimitive?.booleanOrNull ?: false
+        val offset = args["offset"]?.jsonPrimitive?.intOrNull
+        val limit = args["limit"]?.jsonPrimitive?.intOrNull
+        val symbolsOnly = args["symbolsOnly"]?.jsonPrimitive?.booleanOrNull ?: false
+        val line = args["line"]?.jsonPrimitive?.intOrNull
+        val project = resolveProjectFromArgs(args)
+        return codegraphEngine.node(project, symbol, file, includeCode, offset, limit, symbolsOnly, line)
+    }
+
+    private fun handleCodegraphSearch(args: JsonObject): JsonObject {
+        val query = args["query"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val kind = args["kind"]?.jsonPrimitive?.contentOrNull
+        val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 10
+        val project = resolveProjectFromArgs(args)
+        return codegraphEngine.search(project, query, kind, limit)
+    }
+
+    private fun handleCodegraphCallers(args: JsonObject): JsonObject {
+        val symbol = args["symbol"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val file = args["file"]?.jsonPrimitive?.contentOrNull
+        val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 20
+        val project = resolveProjectFromArgs(args)
+        return codegraphEngine.callers(project, symbol, file, limit)
+    }
+
+    private fun handleCodegraphCallees(args: JsonObject): JsonObject {
+        val symbol = args["symbol"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val file = args["file"]?.jsonPrimitive?.contentOrNull
+        val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 20
+        val project = resolveProjectFromArgs(args)
+        return codegraphEngine.callees(project, symbol, file, limit)
+    }
+
+    private fun handleCodegraphImpact(args: JsonObject): JsonObject {
+        val symbol = args["symbol"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val file = args["file"]?.jsonPrimitive?.contentOrNull
+        val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 2
+        val project = resolveProjectFromArgs(args)
+        return codegraphEngine.impact(project, symbol, file, depth)
+    }
+
+    private fun handleCodegraphStatus(args: JsonObject): JsonObject {
+        val project = resolveProjectFromArgs(args)
+        return codegraphEngine.status(project)
+    }
+
+    private fun handleCodegraphFiles(args: JsonObject): JsonObject {
+        val path = args["path"]?.jsonPrimitive?.contentOrNull
+        val pattern = args["pattern"]?.jsonPrimitive?.contentOrNull
+        val format = args["format"]?.jsonPrimitive?.contentOrNull ?: "tree"
+        val project = resolveProjectFromArgs(args)
+        return codegraphEngine.files(project, path, pattern, format)
+    }
+
     private fun enforceSpillover(projectId: String, payload: JsonObject): JsonObject {
         val rawJson = json.encodeToString(payload)
         val byteLen = rawJson.encodeToByteArray().size
@@ -1101,7 +1490,8 @@ class AtlasMcpServer(
                                     putJsonArray("content") {
                                         addJsonObject {
                                             put("type", "text")
-                                            put("text", json.encodeToString(out))
+                                            val rawText = out["text"]?.jsonPrimitive?.contentOrNull
+                                            put("text", rawText ?: json.encodeToString(out))
                                         }
                                     }
                                     if (isToolErr) {
