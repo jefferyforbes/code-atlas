@@ -1,6 +1,6 @@
 plugins {
-    kotlin("multiplatform") version "2.2.0"
-    kotlin("plugin.serialization") version "2.2.0"
+    kotlin("multiplatform") version "2.4.21"
+    kotlin("plugin.serialization") version "2.4.21"
 }
 
 group = "com.orion"
@@ -31,7 +31,7 @@ kotlin {
     sourceSets {
         val macosArm64Main by getting {
             dependencies {
-                implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+                implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
             }
         }
         val macosArm64Test by getting {
