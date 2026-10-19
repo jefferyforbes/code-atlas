@@ -414,7 +414,7 @@ class AtlasCli {
                     }
                     "context" -> {
                         val effectiveServer = server.resolveServerForProject(project, workspace)
-                        val targetsList = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
+                        val targetsList = if (seeds.isNotEmpty()) seeds else (if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList()))
                         val res = effectiveServer.architectContextEngine.synthesizeContext(
                             projectId = project,
                             seedTargets = targetsList,
