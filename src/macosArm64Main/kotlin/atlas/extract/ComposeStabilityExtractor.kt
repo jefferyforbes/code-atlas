@@ -1059,98 +1059,148 @@ class ComposeStabilityExtractor {
         return -1
     }
 
-    private fun resolveReturnTypeAndBodyBounds(masked: String, closeParenIdx: Int): Triple<Boolean, Int, Int> {
-        var i = closeParenIdx + 1
-        while (i < masked.length && masked[i].isWhitespace()) i++
+    private fun skipWhitespace(text: String, startIdx: Int): Int {
+        var i = startIdx
+        while (i < text.length && text[i].isWhitespace()) i++
+        return i
+    }
 
+    private fun isReturnTypeTerminator(c: Char, angleDepth: Int): Boolean {
+        if (angleDepth > 0) return false
+        return c == '{' || c == '=' || c == '\n'
+    }
+
+    private fun isUnitReturnType(retType: String): Boolean =
+        retType.isEmpty() || retType == "Unit"
+
+    private fun scanReturnTypeEnd(masked: String, startIdx: Int): Int {
+        var i = startIdx
+        var angleDepth = 0
+        while (i < masked.length) {
+            val c = masked[i]
+            if (c == '<') {
+                angleDepth++
+            } else if (c == '>') {
+                if (angleDepth > 0) angleDepth--
+            } else if (isReturnTypeTerminator(c, angleDepth)) {
+                break
+            }
+            i++
+        }
+        return i
+    }
+
+    private fun parseReturnType(masked: String, colonIdx: Int): Pair<Boolean, Int> {
+        val retStart = colonIdx + 1
+        val endIdx = scanReturnTypeEnd(masked, retStart)
+        val retType = masked.substring(retStart, endIdx).trim()
+        return Pair(isUnitReturnType(retType), endIdx)
+    }
+
+    private fun findBlockBodyBounds(masked: String, openBrace: Int): Pair<Int, Int>? {
+        var depth = 0
+        for (j in openBrace until masked.length) {
+            when (masked[j]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return Pair(openBrace, j)
+                }
+            }
+        }
+        return null
+    }
+
+    private val exprContinuationSuffixes = listOf(
+        "+", "-", "*", "/", "%", "&&", "||", "?:", ".", "?.", "::", ",", "->", "="
+    )
+
+    private fun hasTrailingContinuation(prevTrimmed: String): Boolean =
+        exprContinuationSuffixes.any { prevTrimmed.endsWith(it) }
+
+    private fun hasLeadingContinuation(masked: String, startK: Int): Boolean {
+        var k = startK
+        while (k < masked.length && (masked[k] == ' ' || masked[k] == '\t' || masked[k] == '\r')) {
+            k++
+        }
+        if (k >= masked.length) return false
+        return masked.startsWith(".", k) || masked.startsWith("?.", k) || masked.startsWith("::", k)
+    }
+
+    private fun isExpressionLineContinuation(masked: String, exprStart: Int, newlineIdx: Int): Boolean {
+        val prevTrimmed = masked.substring(exprStart + 1, newlineIdx).trimEnd()
+        if (hasTrailingContinuation(prevTrimmed)) return true
+        return hasLeadingContinuation(masked, newlineIdx + 1)
+    }
+
+    private class DepthTracker {
+        var paren = 0
+        var brace = 0
+        var bracket = 0
+        val isZero: Boolean get() = paren == 0 && brace == 0 && bracket == 0
+
+        fun update(c: Char) {
+            when (c) {
+                '(' -> paren++
+                ')' -> if (paren > 0) paren--
+                '{' -> brace++
+                '}' -> if (brace > 0) brace--
+                '[' -> bracket++
+                ']' -> if (bracket > 0) bracket--
+            }
+        }
+    }
+
+    private fun isExpressionCompleteAtNewline(
+        c: Char,
+        startedExpr: Boolean,
+        depths: DepthTracker,
+        masked: String,
+        exprStart: Int,
+        j: Int
+    ): Boolean {
+        if (c != '\n') return false
+        if (!startedExpr || !depths.isZero) return false
+        return !isExpressionLineContinuation(masked, exprStart, j)
+    }
+
+    private fun findExpressionBodyBounds(masked: String, exprStart: Int): Pair<Int, Int> {
+        val depths = DepthTracker()
+        var j = exprStart + 1
+        var startedExpr = false
+
+        while (j < masked.length) {
+            val c = masked[j]
+            if (!startedExpr && !c.isWhitespace()) {
+                startedExpr = true
+            }
+            if (isExpressionCompleteAtNewline(c, startedExpr, depths, masked, exprStart, j)) {
+                return Pair(exprStart, j - 1)
+            }
+            depths.update(c)
+            j++
+        }
+        return Pair(exprStart, (masked.length - 1).coerceAtLeast(exprStart))
+    }
+
+    private fun resolveReturnTypeAndBodyBounds(masked: String, closeParenIdx: Int): Triple<Boolean, Int, Int> {
+        var i = skipWhitespace(masked, closeParenIdx + 1)
         var returnsUnit = true
         if (i < masked.length && masked[i] == ':') {
-            i++
-            val retStart = i
-            var angleDepth = 0
-            while (i < masked.length) {
-                val c = masked[i]
-                if (c == '<') angleDepth++
-                else if (c == '>' && angleDepth > 0) angleDepth--
-                else if (angleDepth == 0 && (c == '{' || c == '=' || c == '\n')) break
-                i++
-            }
-            val retType = masked.substring(retStart, i).trim()
-            returnsUnit = retType.isEmpty() || retType == "Unit"
+            val (unitResult, nextIdx) = parseReturnType(masked, i)
+            returnsUnit = unitResult
+            i = nextIdx
         }
 
-        while (i < masked.length && masked[i].isWhitespace()) i++
+        i = skipWhitespace(masked, i)
         if (i < masked.length && masked[i] == '{') {
-            val openBrace = i
-            var depth = 0
-            for (j in openBrace until masked.length) {
-                when (masked[j]) {
-                    '{' -> depth++
-                    '}' -> {
-                        depth--
-                        if (depth == 0) return Triple(returnsUnit, openBrace, j)
-                    }
-                }
+            val bounds = findBlockBodyBounds(masked, i)
+            if (bounds != null) {
+                return Triple(returnsUnit, bounds.first, bounds.second)
             }
         } else if (i < masked.length && masked[i] == '=') {
-            val exprStart = i
-            var depthParen = 0
-            var depthBrace = 0
-            var depthBracket = 0
-            var j = i + 1
-            var startedExpr = false
-            var exprEnd = (masked.length - 1).coerceAtLeast(exprStart)
-
-            while (j < masked.length) {
-                val c = masked[j]
-                if (!startedExpr && !c.isWhitespace()) {
-                    startedExpr = true
-                }
-                when (c) {
-                    '(' -> depthParen++
-                    ')' -> if (depthParen > 0) depthParen--
-                    '{' -> depthBrace++
-                    '}' -> if (depthBrace > 0) depthBrace--
-                    '[' -> depthBracket++
-                    ']' -> if (depthBracket > 0) depthBracket--
-                    '\n' -> {
-                        if (startedExpr && depthParen == 0 && depthBrace == 0 && depthBracket == 0) {
-                            val prevTrimmed = masked.substring(i + 1, j).trimEnd()
-                            val isContinuation = prevTrimmed.endsWith("+") ||
-                                prevTrimmed.endsWith("-") ||
-                                prevTrimmed.endsWith("*") ||
-                                prevTrimmed.endsWith("/") ||
-                                prevTrimmed.endsWith("%") ||
-                                prevTrimmed.endsWith("&&") ||
-                                prevTrimmed.endsWith("||") ||
-                                prevTrimmed.endsWith("?:") ||
-                                prevTrimmed.endsWith(".") ||
-                                prevTrimmed.endsWith("?.") ||
-                                prevTrimmed.endsWith("::") ||
-                                prevTrimmed.endsWith(",") ||
-                                prevTrimmed.endsWith("->") ||
-                                prevTrimmed.endsWith("=")
-
-                            var nextK = j + 1
-                            while (nextK < masked.length && (masked[nextK] == ' ' || masked[nextK] == '\t' || masked[nextK] == '\r')) {
-                                nextK++
-                            }
-                            val nextStartsContinuation = if (nextK < masked.length) {
-                                masked.startsWith(".", nextK) ||
-                                masked.startsWith("?.", nextK) ||
-                                masked.startsWith("::", nextK)
-                            } else false
-
-                            if (!isContinuation && !nextStartsContinuation) {
-                                exprEnd = j - 1
-                                return Triple(returnsUnit, exprStart, exprEnd)
-                            }
-                        }
-                    }
-                }
-                j++
-            }
-            return Triple(returnsUnit, exprStart, exprEnd)
+            val bounds = findExpressionBodyBounds(masked, i)
+            return Triple(returnsUnit, bounds.first, bounds.second)
         }
         return Triple(returnsUnit, -1, -1)
     }
