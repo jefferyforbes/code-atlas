@@ -87,6 +87,76 @@ class FigmaSnapshotExtractor {
         return snapshot
     }
 
+    private fun parseDocumentMetadata(fileKey: String, rootObj: JsonObject?): FigmaDocument {
+        val docName = rootObj?.get("name").asString()
+            ?: rootObj?.get("document")?.jsonObject?.get("name").asString()
+            ?: fileKey
+        val docVersion = rootObj?.get("version").asString() ?: "1.0.0"
+        val docLastModified = rootObj?.get("lastModified").asString() ?: ""
+        val docThumbnailUrl = rootObj?.get("thumbnailUrl").asString() ?: ""
+        return FigmaDocument(
+            fileKey = fileKey,
+            name = docName,
+            version = docVersion,
+            lastModified = docLastModified,
+            thumbnailUrl = docThumbnailUrl
+        )
+    }
+
+    private fun traverseNodesMap(
+        nodesMap: JsonObject,
+        fileKey: String,
+        nodes: MutableList<FigmaNode>,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        for ((_, nodeVal) in nodesMap) {
+            val targetNode = (nodeVal as? JsonObject)?.let { it["document"]?.jsonObject ?: it }
+            if (targetNode != null) {
+                traverseNodeTree(fileKey, targetNode, null, "Page 1", null, nodes, edges)
+            }
+        }
+    }
+
+    private fun traverseRootArray(
+        rootElement: JsonArray,
+        fileKey: String,
+        nodes: MutableList<FigmaNode>,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        for (item in rootElement.filterIsInstance<JsonObject>()) {
+            traverseNodeTree(fileKey, item, null, "Page 1", null, nodes, edges)
+        }
+    }
+
+    private fun traverseDocumentRoots(
+        fileKey: String,
+        rootElement: JsonElement,
+        rootObj: JsonObject?,
+        nodes: MutableList<FigmaNode>,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        val docObj = rootObj?.get("document")?.jsonObject
+        if (docObj != null) {
+            traverseNodeTree(fileKey, docObj, null, "Document", null, nodes, edges)
+            return
+        }
+
+        val nodesMap = rootObj?.get("nodes")?.jsonObject
+        if (nodesMap != null) {
+            traverseNodesMap(nodesMap, fileKey, nodes, edges)
+            return
+        }
+
+        if (rootObj != null && (rootObj.containsKey("id") || rootObj.containsKey("type"))) {
+            traverseNodeTree(fileKey, rootObj, null, "Page 1", null, nodes, edges)
+            return
+        }
+
+        if (rootElement is JsonArray) {
+            traverseRootArray(rootElement, fileKey, nodes, edges)
+        }
+    }
+
     /**
      * Extracts Figma document AST JSON into document, nodes, variables, and edges.
      */
@@ -97,88 +167,17 @@ class FigmaSnapshotExtractor {
 
         val rootElement = json.parseToJsonElement(astJson)
         val rootObj = rootElement as? JsonObject
-
-        val docName = rootObj?.get("name").asString()
-            ?: rootObj?.get("document")?.jsonObject?.get("name").asString()
-            ?: fileKey
-        val docVersion = rootObj?.get("version").asString() ?: "1.0.0"
-        val docLastModified = rootObj?.get("lastModified").asString() ?: ""
-        val docThumbnailUrl = rootObj?.get("thumbnailUrl").asString() ?: ""
-
-        val document = FigmaDocument(
-            fileKey = fileKey,
-            name = docName,
-            version = docVersion,
-            lastModified = docLastModified,
-            thumbnailUrl = docThumbnailUrl
-        )
+        val document = parseDocumentMetadata(fileKey, rootObj)
 
         val extractedNodes = mutableListOf<FigmaNode>()
         val extractedEdges = LinkedHashMap<String, FigmaEdge>()
         val extractedVars = LinkedHashMap<String, FigmaVariable>()
 
-        // 1. Extract embedded variables if present in AST payload
         if (rootObj != null) {
             extractVariablesFromAstRoot(fileKey, rootObj, extractedVars, extractedEdges)
         }
 
-        // 2. Identify AST root nodes for traversal
-        when {
-            rootObj?.containsKey("document") == true && rootObj["document"] is JsonObject -> {
-                traverseNodeTree(
-                    fileKey = fileKey,
-                    nodeObj = rootObj["document"]!!.jsonObject,
-                    parentId = null,
-                    pageName = "Document",
-                    sectionId = null,
-                    nodes = extractedNodes,
-                    edges = extractedEdges
-                )
-            }
-            rootObj?.containsKey("nodes") == true && rootObj["nodes"] is JsonObject -> {
-                val nodesMap = rootObj["nodes"]!!.jsonObject
-                for ((_, nodeVal) in nodesMap) {
-                    if (nodeVal is JsonObject) {
-                        val targetNode = nodeVal["document"]?.jsonObject ?: nodeVal
-                        traverseNodeTree(
-                            fileKey = fileKey,
-                            nodeObj = targetNode,
-                            parentId = null,
-                            pageName = "Page 1",
-                            sectionId = null,
-                            nodes = extractedNodes,
-                            edges = extractedEdges
-                        )
-                    }
-                }
-            }
-            rootObj != null && (rootObj.containsKey("id") || rootObj.containsKey("type")) -> {
-                traverseNodeTree(
-                    fileKey = fileKey,
-                    nodeObj = rootObj,
-                    parentId = null,
-                    pageName = "Page 1",
-                    sectionId = null,
-                    nodes = extractedNodes,
-                    edges = extractedEdges
-                )
-            }
-            rootElement is JsonArray -> {
-                for (item in rootElement) {
-                    if (item is JsonObject) {
-                        traverseNodeTree(
-                            fileKey = fileKey,
-                            nodeObj = item,
-                            parentId = null,
-                            pageName = "Page 1",
-                            sectionId = null,
-                            nodes = extractedNodes,
-                            edges = extractedEdges
-                        )
-                    }
-                }
-            }
-        }
+        traverseDocumentRoots(fileKey, rootElement, rootObj, extractedNodes, extractedEdges)
 
         return FigmaExtractedSnapshot(
             document = document,
