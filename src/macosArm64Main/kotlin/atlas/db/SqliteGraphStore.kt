@@ -3190,20 +3190,53 @@ class SqliteGraphStore(val dbPath: String) {
         return nodeIds.mapNotNull { byId[it] }
     }
 
+    private fun resolveEffectiveFigmaFileKey(fileKey: String, src: String, dst: String): String =
+        UrlTargetResolver.parseFigmaUrl(fileKey)?.fileKey
+            ?: UrlTargetResolver.parseFigmaUrl(src)?.fileKey
+            ?: UrlTargetResolver.parseFigmaUrl(dst)?.fileKey
+            ?: fileKey
+
+    private fun resolveFigmaNode(fileKey: String, target: String): FigmaNode? =
+        queryFigmaNodeById(fileKey, target)
+            ?: queryFigmaNodesByName(fileKey, target).firstOrNull()
+
+    private fun expandFigmaShortestPathNeighbors(
+        edgeStmt: NativeSqliteStatement,
+        fileKey: String,
+        curr: String,
+        path: List<String>,
+        destNodeId: String,
+        visited: MutableSet<String>,
+        queue: MutableList<Pair<String, List<String>>>
+    ): List<String>? {
+        edgeStmt.reset()
+        edgeStmt.clearBindings()
+        edgeStmt.bindString(1, fileKey)
+        edgeStmt.bindString(2, curr)
+        edgeStmt.bindString(3, fileKey)
+        edgeStmt.bindString(4, curr)
+
+        while (edgeStmt.step()) {
+            val nextId = edgeStmt.columnString(0)
+            if (nextId == destNodeId) {
+                return path + nextId
+            }
+            if (visited.add(nextId)) {
+                queue.add(Pair(nextId, path + nextId))
+            }
+        }
+        return null
+    }
+
     fun findFigmaShortestPath(
         fileKey: String,
         sourceTarget: String,
         destTarget: String,
         depth: Int = 10
     ): List<FigmaNode> {
-        val fileKey = UrlTargetResolver.parseFigmaUrl(fileKey)?.fileKey
-            ?: UrlTargetResolver.parseFigmaUrl(sourceTarget)?.fileKey
-            ?: UrlTargetResolver.parseFigmaUrl(destTarget)?.fileKey
-            ?: fileKey
-        val srcNode = queryFigmaNodeById(fileKey, sourceTarget)
-            ?: queryFigmaNodesByName(fileKey, sourceTarget).firstOrNull()
-        val dstNode = queryFigmaNodeById(fileKey, destTarget)
-            ?: queryFigmaNodesByName(fileKey, destTarget).firstOrNull()
+        val effectiveKey = resolveEffectiveFigmaFileKey(fileKey, sourceTarget, destTarget)
+        val srcNode = resolveFigmaNode(effectiveKey, sourceTarget)
+        val dstNode = resolveFigmaNode(effectiveKey, destTarget)
         if (srcNode == null || dstNode == null) return emptyList()
         if (srcNode.nodeId == dstNode.nodeId) return listOf(srcNode)
 
@@ -3228,22 +3261,11 @@ class SqliteGraphStore(val dbPath: String) {
                 val (curr, path) = queue[head++]
                 if (path.size > depth) break
 
-                edgeStmt.reset()
-                edgeStmt.clearBindings()
-                edgeStmt.bindString(1, fileKey)
-                edgeStmt.bindString(2, curr)
-                edgeStmt.bindString(3, fileKey)
-                edgeStmt.bindString(4, curr)
-
-                while (edgeStmt.step()) {
-                    val nextId = edgeStmt.columnString(0)
-                    if (nextId == dstNode.nodeId) {
-                        val fullPathIds = path + nextId
-                        return queryFigmaNodesByIds(fileKey, fullPathIds)
-                    }
-                    if (visited.add(nextId)) {
-                        queue.add(Pair(nextId, path + nextId))
-                    }
+                val foundPath = expandFigmaShortestPathNeighbors(
+                    edgeStmt, effectiveKey, curr, path, dstNode.nodeId, visited, queue
+                )
+                if (foundPath != null) {
+                    return queryFigmaNodesByIds(effectiveKey, foundPath)
                 }
             }
             return emptyList()
