@@ -1187,101 +1187,102 @@ class SqliteGraphStore(val dbPath: String) {
         )
     }
 
-    fun getNode(projectId: String, target: String): GraphNode? {
-        val codeLink = UrlTargetResolver.parseCodeLocationUrl(target)
-        if (codeLink != null) {
-            val escapedSuffix = codeLink.filePathSuffix
-                .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            if (codeLink.startLine != null) {
-                val targetLine = codeLink.startLine
-                val spanStmt = db.prepare(
-                    """
-                    SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                           start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                           is_test_double, in_degree, out_degree, description, is_top_level,
-                           cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
-                    FROM nodes
-                    WHERE project_id = ?
-                      AND kind NOT IN ('file', 'file_scope', 'module')
-                      AND start_line <= ? AND end_line >= ?
-                      AND (file_id = ? OR file_id = ? OR file_id LIKE ? ESCAPE '\' OR file_id LIKE ? ESCAPE '\')
-                    ORDER BY (end_line - start_line) ASC, start_line DESC, in_degree DESC
-                    LIMIT 1;
-                    """.trimIndent()
-                )
-                try {
-                    spanStmt.bindString(1, projectId)
-                    spanStmt.bindInt(2, targetLine)
-                    spanStmt.bindInt(3, targetLine)
-                    spanStmt.bindString(4, "$projectId:${codeLink.filePathSuffix}")
-                    spanStmt.bindString(5, codeLink.filePathSuffix)
-                    spanStmt.bindString(6, "%:$escapedSuffix")
-                    spanStmt.bindString(7, "%/$escapedSuffix")
-                    if (spanStmt.step()) return rowToNode(spanStmt)
-                } finally {
-                    spanStmt.close()
-                }
-            }
-            if (codeLink.symbolFragment != null) {
-                val symStmt = db.prepare(
-                    """
-                    SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                           start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                           is_test_double, in_degree, out_degree, description, is_top_level,
-                           cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
-                    FROM nodes
-                    WHERE project_id = ?
-                      AND (name = ? OR qualified_name LIKE ? ESCAPE '\')
-                      AND (file_id = ? OR file_id = ? OR file_id LIKE ? ESCAPE '\' OR file_id LIKE ? ESCAPE '\')
-                    ORDER BY (name = ?) DESC, in_degree DESC
-                    LIMIT 1;
-                    """.trimIndent()
-                )
-                try {
-                    val escFrag = codeLink.symbolFragment
-                        .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                    symStmt.bindString(1, projectId)
-                    symStmt.bindString(2, codeLink.symbolFragment)
-                    symStmt.bindString(3, "%$escFrag%")
-                    symStmt.bindString(4, "$projectId:${codeLink.filePathSuffix}")
-                    symStmt.bindString(5, codeLink.filePathSuffix)
-                    symStmt.bindString(6, "%:$escapedSuffix")
-                    symStmt.bindString(7, "%/$escapedSuffix")
-                    symStmt.bindString(8, codeLink.symbolFragment)
-                    if (symStmt.step()) return rowToNode(symStmt)
-                } finally {
-                    symStmt.close()
-                }
-            }
-            val fileNodes = getNodesForFile(projectId, codeLink.filePathSuffix)
-            return fileNodes.firstOrNull { it.kind !in setOf("file", "file_scope", "module") }
-                ?: fileNodes.firstOrNull()
-        }
-
-        if (UrlTargetResolver.isHttpRouteCandidate(target, hasExplicitRouteCall = false)) {
-            val canonRoute = UrlTargetResolver.normalizeRouteTemplate(target)
-            val epNodeId = "$projectId:endpoint#$canonRoute"
-            val epStmt = db.prepare(
+    private fun getNodeByCodeLocation(projectId: String, codeLink: UrlTargetResolver.CodeLocationLink): GraphNode? {
+        val escapedSuffix = codeLink.filePathSuffix
+            .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        if (codeLink.startLine != null) {
+            val targetLine = codeLink.startLine
+            val spanStmt = db.prepare(
                 """
                 SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
                        start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
                        is_test_double, in_degree, out_degree, description, is_top_level,
                        cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
                 FROM nodes
-                WHERE project_id = ? AND (node_id = ? OR name = ?)
+                WHERE project_id = ?
+                  AND kind NOT IN ('file', 'file_scope', 'module')
+                  AND start_line <= ? AND end_line >= ?
+                  AND (file_id = ? OR file_id = ? OR file_id LIKE ? ESCAPE '\' OR file_id LIKE ? ESCAPE '\')
+                ORDER BY (end_line - start_line) ASC, start_line DESC, in_degree DESC
                 LIMIT 1;
                 """.trimIndent()
             )
             try {
-                epStmt.bindString(1, projectId)
-                epStmt.bindString(2, epNodeId)
-                epStmt.bindString(3, canonRoute)
-                if (epStmt.step()) return rowToNode(epStmt)
+                spanStmt.bindString(1, projectId)
+                spanStmt.bindInt(2, targetLine)
+                spanStmt.bindInt(3, targetLine)
+                spanStmt.bindString(4, "$projectId:${codeLink.filePathSuffix}")
+                spanStmt.bindString(5, codeLink.filePathSuffix)
+                spanStmt.bindString(6, "%:$escapedSuffix")
+                spanStmt.bindString(7, "%/$escapedSuffix")
+                if (spanStmt.step()) return rowToNode(spanStmt)
             } finally {
-                epStmt.close()
+                spanStmt.close()
             }
         }
+        if (codeLink.symbolFragment != null) {
+            val symStmt = db.prepare(
+                """
+                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                       is_test_double, in_degree, out_degree, description, is_top_level,
+                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+                FROM nodes
+                WHERE project_id = ?
+                  AND (name = ? OR qualified_name LIKE ? ESCAPE '\')
+                  AND (file_id = ? OR file_id = ? OR file_id LIKE ? ESCAPE '\' OR file_id LIKE ? ESCAPE '\')
+                ORDER BY (name = ?) DESC, in_degree DESC
+                LIMIT 1;
+                """.trimIndent()
+            )
+            try {
+                val escFrag = codeLink.symbolFragment
+                    .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                symStmt.bindString(1, projectId)
+                symStmt.bindString(2, codeLink.symbolFragment)
+                symStmt.bindString(3, "%$escFrag%")
+                symStmt.bindString(4, "$projectId:${codeLink.filePathSuffix}")
+                symStmt.bindString(5, codeLink.filePathSuffix)
+                symStmt.bindString(6, "%:$escapedSuffix")
+                symStmt.bindString(7, "%/$escapedSuffix")
+                symStmt.bindString(8, codeLink.symbolFragment)
+                if (symStmt.step()) return rowToNode(symStmt)
+            } finally {
+                symStmt.close()
+            }
+        }
+        val fileNodes = getNodesForFile(projectId, codeLink.filePathSuffix)
+        return fileNodes.firstOrNull { it.kind !in setOf("file", "file_scope", "module") }
+            ?: fileNodes.firstOrNull()
+    }
 
+    private fun getNodeByHttpRoute(projectId: String, target: String): GraphNode? {
+        if (!UrlTargetResolver.isHttpRouteCandidate(target, hasExplicitRouteCall = false)) return null
+        val canonRoute = UrlTargetResolver.normalizeRouteTemplate(target)
+        val epNodeId = "$projectId:endpoint#$canonRoute"
+        val epStmt = db.prepare(
+            """
+            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                   is_test_double, in_degree, out_degree, description, is_top_level,
+                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+            FROM nodes
+            WHERE project_id = ? AND (node_id = ? OR name = ?)
+            LIMIT 1;
+            """.trimIndent()
+        )
+        try {
+            epStmt.bindString(1, projectId)
+            epStmt.bindString(2, epNodeId)
+            epStmt.bindString(3, canonRoute)
+            if (epStmt.step()) return rowToNode(epStmt)
+        } finally {
+            epStmt.close()
+        }
+        return null
+    }
+
+    private fun getNodeByNameOrId(projectId: String, target: String): GraphNode? {
         val escapedTarget = target
             .replace("\\", "\\\\")
             .replace("%", "\\%")
@@ -1337,6 +1338,20 @@ class SqliteGraphStore(val dbPath: String) {
         } finally {
             stmt.close()
         }
+    }
+
+    fun getNode(projectId: String, target: String): GraphNode? {
+        val codeLink = UrlTargetResolver.parseCodeLocationUrl(target)
+        if (codeLink != null) {
+            return getNodeByCodeLocation(projectId, codeLink)
+        }
+
+        val routeNode = getNodeByHttpRoute(projectId, target)
+        if (routeNode != null) {
+            return routeNode
+        }
+
+        return getNodeByNameOrId(projectId, target)
     }
 
     fun getNodesForFile(projectId: String, relPath: String): List<GraphNode> {
