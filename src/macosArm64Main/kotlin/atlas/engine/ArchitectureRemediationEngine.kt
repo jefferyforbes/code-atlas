@@ -109,6 +109,413 @@ class ArchitectureRemediationEngine(
         )
     }
 
+    private fun readTargetFileContent(fullPath: String, relPath: String): Pair<String?, ArchitectureRemediationPrescription?> {
+        if (!PlatformFiles.exists(fullPath)) {
+            return Pair(null, ArchitectureRemediationPrescription(
+                id = "rx-boost003-${relPath.replace('/', '_')}",
+                ruleId = "BOOST-003",
+                filePath = relPath,
+                fixStrategy = "FILE_NOT_FOUND",
+                rationale = "Target file not found on disk: $fullPath",
+                verified = false,
+                applied = false,
+                details = listOf("File does not exist: $fullPath")
+            ))
+        }
+        return try {
+            Pair(PlatformFiles.readText(fullPath), null)
+        } catch (e: Exception) {
+            Pair(null, ArchitectureRemediationPrescription(
+                id = "rx-boost003-${relPath.replace('/', '_')}",
+                ruleId = "BOOST-003",
+                filePath = relPath,
+                fixStrategy = "READ_ERROR",
+                rationale = "Cannot read target file: ${e.message}",
+                verified = false,
+                applied = false,
+                details = listOf("Read error on $fullPath: ${e.message}")
+            ))
+        }
+    }
+
+    private fun filterCandidateTopNodes(nodes: List<GraphNode>): List<GraphNode> {
+        val candidateKinds = setOf(
+            "class", "interface", "object", "function", "composable",
+            "enum", "annotation", "struct", "protocol", "actor"
+        )
+        return nodes.filter { it.isTopLevel && it.kind in candidateKinds }
+    }
+
+    private fun resolvePrimaryAndSecondaryNodes(
+        topNodes: List<GraphNode>,
+        relPath: String,
+        ext: String
+    ): Triple<GraphNode, List<GraphNode>, String?> {
+        val baseFileName = relPath.substringAfterLast('/').substringBeforeLast('.')
+        val matchingNode = topNodes.firstOrNull { it.name.equals(baseFileName, ignoreCase = true) }
+        val primaryNode = matchingNode ?: topNodes.first()
+        val secondaryNodes = topNodes.filter { it != primaryNode }
+        val dir = if (relPath.contains('/')) relPath.substringBeforeLast('/') else ""
+        val targetRenameRelPath = if (matchingNode == null) {
+            val primaryFileName = "${primaryNode.name}$ext"
+            if (dir.isEmpty()) primaryFileName else "$dir/$primaryFileName"
+        } else null
+        return Triple(primaryNode, secondaryNodes, targetRenameRelPath)
+    }
+
+    private fun buildCompliantPrescription(relPath: String, count: Int): ArchitectureRemediationPrescription {
+        return ArchitectureRemediationPrescription(
+            id = "rx-boost003-${relPath.replace('/', '_')}",
+            ruleId = "BOOST-003",
+            filePath = relPath,
+            fixStrategy = "NOOP",
+            rationale = "File already complies with BOOST-003 ($count top-level symbol(s)).",
+            verified = true,
+            applied = false,
+            details = listOf("No top-level declarations require splitting.")
+        )
+    }
+
+    private fun buildManualSplitPrescription(
+        relPath: String,
+        primaryNode: GraphNode,
+        secondaryNodes: List<GraphNode>,
+        count: Int
+    ): ArchitectureRemediationPrescription {
+        return ArchitectureRemediationPrescription(
+            id = "rx-boost003-${relPath.replace('/', '_')}",
+            ruleId = "BOOST-003",
+            filePath = relPath,
+            fixStrategy = "MANUAL_SPLIT_ADVISORY",
+            rationale = "File declares $count top-level symbols. Splitting disabled (--no-split). Run with --split to extract to separate files or --make-private to convert secondary helpers to private.",
+            primaryDeclaration = primaryNode.name,
+            secondaryDeclarations = secondaryNodes.map { it.name },
+            verified = true,
+            applied = false,
+            details = listOf("Splitting disabled (--no-split). Manual refactoring or --make-private recommended.")
+        )
+    }
+
+    private fun buildCollisionPrescription(
+        relPath: String,
+        collisionPath: String,
+        primaryNode: GraphNode,
+        secondaryNodes: List<GraphNode>
+    ): ArchitectureRemediationPrescription {
+        return ArchitectureRemediationPrescription(
+            id = "rx-boost003-${relPath.replace('/', '_')}",
+            ruleId = "BOOST-003",
+            filePath = relPath,
+            fixStrategy = "COLLISION",
+            rationale = "Target file '$collisionPath' already exists. Cannot safely split without overwriting.",
+            primaryDeclaration = primaryNode.name,
+            secondaryDeclarations = secondaryNodes.map { it.name },
+            verified = false,
+            applied = false,
+            details = listOf("Spawn target '$collisionPath' already exists on disk. Collision avoided.")
+        )
+    }
+
+    private fun checkCollision(
+        root: String,
+        dir: String,
+        ext: String,
+        targetRenameRelPath: String?,
+        secondaryNodes: List<GraphNode>,
+        relPath: String,
+        primaryNode: GraphNode
+    ): ArchitectureRemediationPrescription? {
+        if (targetRenameRelPath != null && PlatformFiles.exists("$root/$targetRenameRelPath")) {
+            return buildCollisionPrescription(relPath, targetRenameRelPath, primaryNode, secondaryNodes)
+        }
+        for (sec in secondaryNodes) {
+            val newFileName = "${sec.name}$ext"
+            val newRelPath = if (dir.isEmpty()) newFileName else "$dir/$newFileName"
+            if (PlatformFiles.exists("$root/$newRelPath")) {
+                return buildCollisionPrescription(relPath, newRelPath, primaryNode, secondaryNodes)
+            }
+        }
+        return null
+    }
+
+    private fun buildSpawnedFileContent(
+        headerLines: List<String>,
+        importLines: List<String>,
+        sliceText: String
+    ): String {
+        return buildString {
+            if (headerLines.isNotEmpty()) {
+                headerLines.forEach { append(it.trim()).append("\n") }
+                append("\n")
+            }
+            if (importLines.isNotEmpty()) {
+                importLines.forEach { append(it.trim()).append("\n") }
+                append("\n")
+            }
+            append(sliceText.trim()).append("\n")
+        }
+    }
+
+    private fun extractSpawnedFiles(
+        workingLines: MutableList<String>,
+        secondaryNodes: List<GraphNode>,
+        dir: String,
+        ext: String,
+        headerLines: List<String>,
+        importLines: List<String>
+    ): List<SpawnedFileRecord> {
+        val spawnedFiles = mutableListOf<SpawnedFileRecord>()
+        val sortedSecondariesDesc = secondaryNodes.sortedByDescending { it.startLine }
+
+        for (sec in sortedSecondariesDesc) {
+            val expandedStart = findExpandedStartLine(workingLines, sec.startLine)
+            val startIdx = max(0, expandedStart - 1)
+            val endIdx = min(workingLines.size - 1, sec.endLine - 1)
+            if (startIdx > endIdx) continue
+
+            val sliceLines = workingLines.subList(startIdx, endIdx + 1).toList()
+            val sliceText = sliceLines.joinToString("\n")
+            val newFileName = "${sec.name}$ext"
+            val newRelPath = if (dir.isEmpty()) newFileName else "$dir/$newFileName"
+            val newFileContent = buildSpawnedFileContent(headerLines, importLines, sliceText)
+
+            spawnedFiles.add(
+                SpawnedFileRecord(
+                    relPath = newRelPath,
+                    declarationName = sec.name,
+                    content = newFileContent,
+                    loc = newFileContent.lines().size
+                )
+            )
+
+            for (i in endIdx downTo startIdx) {
+                workingLines.removeAt(i)
+            }
+        }
+        return spawnedFiles
+    }
+
+    private fun verifyAstSplits(
+        projectId: String,
+        effectiveRelPath: String,
+        cleanModified: String,
+        spawnedFiles: List<SpawnedFileRecord>,
+        lang: String,
+        details: MutableList<String>
+    ): Boolean {
+        if (lang.isEmpty()) return true
+
+        val maskedOrig = PolyglotAstExtractor.maskCommentsAndStrings(cleanModified, lang)
+        if (!AutonomousRemediationVerifier.hasBalancedDelimiters(maskedOrig)) {
+            details.add("Syntax check failed: Unbalanced delimiters in modified '$effectiveRelPath'.")
+            return false
+        }
+        val (_, _, origCount) = PolyglotAstExtractor.extractFile(projectId, effectiveRelPath, cleanModified)
+        if (origCount > 1) {
+            details.add("Modified file still declares $origCount top-level symbols (expected <= 1).")
+            return false
+        }
+        details.add("AST verification passed for modified original file '$effectiveRelPath' (topLevelDeclCount=$origCount).")
+
+        for (sf in spawnedFiles) {
+            val maskedSf = PolyglotAstExtractor.maskCommentsAndStrings(sf.content, lang)
+            if (!AutonomousRemediationVerifier.hasBalancedDelimiters(maskedSf)) {
+                details.add("Syntax check failed: Unbalanced delimiters in spawned file '${sf.relPath}'.")
+                return false
+            }
+            val (_, _, sfCount) = PolyglotAstExtractor.extractFile(projectId, sf.relPath, sf.content)
+            if (sfCount != 1) {
+                details.add("Spawned file '${sf.relPath}' has $sfCount declarations (expected exactly 1).")
+                return false
+            }
+            details.add("AST verification passed for spawned file '${sf.relPath}' (decl='${sf.declarationName}').")
+        }
+        return true
+    }
+
+    private fun rollbackFiles(writtenPaths: List<String>, fullPath: String, originalContent: String) {
+        for (w in writtenPaths) {
+            PlatformFiles.delete(w)
+        }
+        PlatformFiles.writeText(fullPath, originalContent)
+    }
+
+    private fun executeTestCommand(cmdStr: String, details: MutableList<String>): Boolean {
+        val cmd = "cd \"$workspaceRoot\" && $cmdStr"
+        val rawStatus = system(cmd)
+        val exitCode = if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
+        if (exitCode != 0) {
+            details.add("Test command '$cmdStr' failed (exit code $exitCode). Automatic rollback performed.")
+            return false
+        }
+        details.add("Test command '$cmdStr' passed (exit code 0).")
+        return true
+    }
+
+    private fun applyFilesAndRunTest(
+        root: String,
+        fullPath: String,
+        primaryNewFullPath: String,
+        targetRenameRelPath: String?,
+        cleanModified: String,
+        originalContent: String,
+        spawnedFiles: List<SpawnedFileRecord>,
+        testCommand: String?,
+        details: MutableList<String>
+    ): Boolean {
+        val writtenPaths = mutableListOf<String>()
+        return try {
+            for (sf in spawnedFiles) {
+                val fPath = "$root/${sf.relPath}"
+                PlatformFiles.mkdirs(fPath.substringBeforeLast('/'))
+                PlatformFiles.writeText(fPath, sf.content)
+                writtenPaths.add(fPath)
+            }
+            if (targetRenameRelPath != null) {
+                PlatformFiles.delete(fullPath)
+                PlatformFiles.writeText(primaryNewFullPath, cleanModified)
+                writtenPaths.add(primaryNewFullPath)
+            } else {
+                PlatformFiles.writeText(fullPath, cleanModified)
+            }
+
+            if (!testCommand.isNullOrBlank()) {
+                val passed = executeTestCommand(testCommand, details)
+                if (!passed) {
+                    rollbackFiles(writtenPaths, fullPath, originalContent)
+                    return false
+                }
+            }
+            true
+        } catch (e: Exception) {
+            details.add("Disk application error: ${e.message}. Performing rollback.")
+            rollbackFiles(writtenPaths, fullPath, originalContent)
+            false
+        }
+    }
+
+    private fun buildInvalidAstPrescription(
+        relPath: String,
+        primaryNode: GraphNode,
+        secondaryNodes: List<GraphNode>,
+        spawnedFiles: List<SpawnedFileRecord>,
+        details: List<String>
+    ): ArchitectureRemediationPrescription {
+        return ArchitectureRemediationPrescription(
+            id = "rx-boost003-${relPath.replace('/', '_')}",
+            ruleId = "BOOST-003",
+            filePath = relPath,
+            fixStrategy = "AST_FILE_SPLIT",
+            rationale = "AST splitting produced invalid syntax or non-compliant declaration counts.",
+            primaryDeclaration = primaryNode.name,
+            secondaryDeclarations = secondaryNodes.map { it.name },
+            spawnedFiles = spawnedFiles,
+            verified = false,
+            applied = false,
+            details = details
+        )
+    }
+
+    private fun buildFinalSplitPrescription(
+        relPath: String,
+        primaryNode: GraphNode,
+        secondaryNodes: List<GraphNode>,
+        spawnedFiles: List<SpawnedFileRecord>,
+        diffPreview: String,
+        targetRenameRelPath: String?,
+        verified: Boolean,
+        applied: Boolean,
+        details: List<String>
+    ): ArchitectureRemediationPrescription {
+        val rationaleMsg = if (targetRenameRelPath != null) {
+            "Split ${secondaryNodes.size} secondary top-level declaration(s) and renamed original file to '$targetRenameRelPath' to match Single Declaration Principle (Rule 6 / BOOST-003)."
+        } else {
+            "Split ${secondaryNodes.size} secondary top-level declaration(s) into dedicated source files matching Single Declaration Principle (Rule 6 / BOOST-003)."
+        }
+        return ArchitectureRemediationPrescription(
+            id = "rx-boost003-${relPath.replace('/', '_')}",
+            ruleId = "BOOST-003",
+            filePath = relPath,
+            line = primaryNode.startLine,
+            fixStrategy = "AST_FILE_SPLIT",
+            rationale = rationaleMsg,
+            primaryDeclaration = primaryNode.name,
+            secondaryDeclarations = secondaryNodes.map { it.name },
+            spawnedFiles = spawnedFiles,
+            diffPreview = diffPreview,
+            verified = verified,
+            applied = applied,
+            details = details
+        )
+    }
+
+    private fun applyOrDryRun(
+        dryRun: Boolean,
+        root: String,
+        fullPath: String,
+        primaryNewFullPath: String,
+        targetRenameRelPath: String?,
+        cleanModified: String,
+        originalContent: String,
+        spawnedFiles: List<SpawnedFileRecord>,
+        testCommand: String?,
+        details: MutableList<String>
+    ): Boolean {
+        if (!dryRun) {
+            return applyFilesAndRunTest(root, fullPath, primaryNewFullPath, targetRenameRelPath, cleanModified, originalContent, spawnedFiles, testCommand, details)
+        }
+        details.add("Dry-run mode: verified AST valid and Single Declaration compliant without modifying disk.")
+        return true
+    }
+
+    private fun executeAstSplitRemediation(
+        projectId: String,
+        relPath: String,
+        root: String,
+        fullPath: String,
+        originalContent: String,
+        ext: String,
+        lang: String,
+        primaryNode: GraphNode,
+        secondaryNodes: List<GraphNode>,
+        targetRenameRelPath: String?,
+        dryRun: Boolean,
+        testCommand: String?,
+        details: MutableList<String>
+    ): ArchitectureRemediationPrescription {
+        val dir = if (relPath.contains('/')) relPath.substringBeforeLast('/') else ""
+        val collisionPrescription = checkCollision(root, dir, ext, targetRenameRelPath, secondaryNodes, relPath, primaryNode)
+        if (collisionPrescription != null) return collisionPrescription
+
+        val originalLines = originalContent.lines()
+        val workingLines = originalLines.toMutableList()
+        val (headerLines, importLines) = extractHeaderAndImports(originalLines, ext)
+        val spawnedFiles = extractSpawnedFiles(workingLines, secondaryNodes, dir, ext, headerLines, importLines)
+
+        val rawModified = workingLines.joinToString("\n")
+        val cleanModified = Regex("""\n{3,}""").replace(rawModified, "\n\n").trimEnd() + "\n"
+        val effectiveRelPath = targetRenameRelPath ?: relPath
+
+        val astValid = verifyAstSplits(projectId, effectiveRelPath, cleanModified, spawnedFiles, lang, details)
+        if (!astValid) {
+            return buildInvalidAstPrescription(relPath, primaryNode, secondaryNodes, spawnedFiles, details)
+        }
+
+        val diffPreview = buildDiffPreview(relPath, originalContent, cleanModified, spawnedFiles, renamedTo = targetRenameRelPath)
+        val primaryNewFullPath = if (targetRenameRelPath != null) "$root/$targetRenameRelPath" else fullPath
+        val testsPreserved = applyOrDryRun(
+            dryRun, root, fullPath, primaryNewFullPath, targetRenameRelPath,
+            cleanModified, originalContent, spawnedFiles, testCommand, details
+        )
+
+        val success = astValid && testsPreserved
+        val applied = !dryRun && success
+        return buildFinalSplitPrescription(
+            relPath, primaryNode, secondaryNodes, spawnedFiles, diffPreview,
+            targetRenameRelPath, success, applied, details
+        )
+    }
+
     private fun remediateBoost003(
         projectId: String,
         violation: SingleDeclarationViolation,
@@ -122,318 +529,35 @@ class ArchitectureRemediationEngine(
         val fullPath = if (relPath.startsWith("/")) relPath else "$root/$relPath"
         val details = mutableListOf<String>()
 
-        if (!PlatformFiles.exists(fullPath)) {
-            return ArchitectureRemediationPrescription(
-                id = "rx-boost003-${relPath.replace('/', '_')}",
-                ruleId = "BOOST-003",
-                filePath = relPath,
-                fixStrategy = "FILE_NOT_FOUND",
-                rationale = "Target file not found on disk: $fullPath",
-                verified = false,
-                applied = false,
-                details = listOf("File does not exist: $fullPath")
-            )
-        }
-
-        val originalContent = try {
-            PlatformFiles.readText(fullPath)
-        } catch (e: Exception) {
-            return ArchitectureRemediationPrescription(
-                id = "rx-boost003-${relPath.replace('/', '_')}",
-                ruleId = "BOOST-003",
-                filePath = relPath,
-                fixStrategy = "READ_ERROR",
-                rationale = "Cannot read target file: ${e.message}",
-                verified = false,
-                applied = false,
-                details = listOf("Read error on $fullPath: ${e.message}")
-            )
-        }
+        val (originalContent, fileErr) = readTargetFileContent(fullPath, relPath)
+        if (fileErr != null) return fileErr
+        val content = originalContent ?: return buildCompliantPrescription(relPath, 0)
 
         val ext = if (relPath.contains('.')) "." + relPath.substringAfterLast('.') else ""
         val lang = PolyglotAstExtractor.supportedLanguage(ext)
-        val (nodes, _, _) = PolyglotAstExtractor.extractFile(projectId, relPath, originalContent)
-
-        val candidateKinds = setOf(
-            "class", "interface", "object", "function", "composable",
-            "enum", "annotation", "struct", "protocol", "actor"
-        )
-        val topNodes = nodes.filter { it.isTopLevel && it.kind in candidateKinds }
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile(projectId, relPath, content)
+        val topNodes = filterCandidateTopNodes(nodes)
 
         if (topNodes.size <= 1) {
-            return ArchitectureRemediationPrescription(
-                id = "rx-boost003-${relPath.replace('/', '_')}",
-                ruleId = "BOOST-003",
-                filePath = relPath,
-                fixStrategy = "NOOP",
-                rationale = "File already complies with BOOST-003 (${topNodes.size} top-level symbol(s)).",
-                verified = true,
-                applied = false,
-                details = listOf("No top-level declarations require splitting.")
-            )
+            return buildCompliantPrescription(relPath, topNodes.size)
         }
 
-        val baseFileName = relPath.substringAfterLast('/').substringBeforeLast('.')
-        val matchingNode = topNodes.firstOrNull { it.name.equals(baseFileName, ignoreCase = true) }
-        val primaryNode = matchingNode ?: topNodes.first()
-        val secondaryNodes = topNodes.filter { it != primaryNode }
+        val (primaryNode, secondaryNodes, targetRenameRelPath) = resolvePrimaryAndSecondaryNodes(topNodes, relPath, ext)
 
-        // Case 1: Manual split advisory if user requested --no-split and not --make-private
         if (!split && !makePrivate) {
-            return ArchitectureRemediationPrescription(
-                id = "rx-boost003-${relPath.replace('/', '_')}",
-                ruleId = "BOOST-003",
-                filePath = relPath,
-                fixStrategy = "MANUAL_SPLIT_ADVISORY",
-                rationale = "File declares ${topNodes.size} top-level symbols. Splitting disabled (--no-split). Run with --split to extract to separate files or --make-private to convert secondary helpers to private.",
-                primaryDeclaration = primaryNode.name,
-                secondaryDeclarations = secondaryNodes.map { it.name },
-                verified = true,
-                applied = false,
-                details = listOf("Splitting disabled (--no-split). Manual refactoring or --make-private recommended.")
-            )
+            return buildManualSplitPrescription(relPath, primaryNode, secondaryNodes, topNodes.size)
         }
 
-        // Case 2: Make secondary declarations private in-place
         if (makePrivate) {
             return remediateBoost003MakePrivate(
-                projectId = projectId,
-                relPath = relPath,
-                fullPath = fullPath,
-                originalContent = originalContent,
-                primaryNode = primaryNode,
-                secondaryNodes = secondaryNodes,
-                lang = lang,
-                dryRun = dryRun,
-                testCommand = testCommand
+                projectId, relPath, fullPath, content,
+                primaryNode, secondaryNodes, lang, dryRun, testCommand
             )
         }
 
-        // Case 3: AST File Splitting
-        val originalLines = originalContent.lines()
-        val workingLines = originalLines.toMutableList()
-        val spawnedFiles = mutableListOf<SpawnedFileRecord>()
-
-        val (headerLines, importLines) = extractHeaderAndImports(originalLines, ext)
-
-        val dir = if (relPath.contains('/')) relPath.substringBeforeLast('/') else ""
-        val targetRenameRelPath = if (matchingNode == null) {
-            val primaryFileName = "${primaryNode.name}$ext"
-            if (dir.isEmpty()) primaryFileName else "$dir/$primaryFileName"
-        } else null
-        val primaryNewFullPath = if (targetRenameRelPath != null) "$root/$targetRenameRelPath" else fullPath
-
-        // Pre-flight collision check
-        if (targetRenameRelPath != null && PlatformFiles.exists(primaryNewFullPath)) {
-            details.add("Spawn target '$targetRenameRelPath' already exists on disk. Collision avoided.")
-            return ArchitectureRemediationPrescription(
-                id = "rx-boost003-${relPath.replace('/', '_')}",
-                ruleId = "BOOST-003",
-                filePath = relPath,
-                fixStrategy = "COLLISION",
-                rationale = "Target file '$targetRenameRelPath' already exists. Cannot safely rename without overwriting.",
-                primaryDeclaration = primaryNode.name,
-                secondaryDeclarations = secondaryNodes.map { it.name },
-                verified = false,
-                applied = false,
-                details = details
-            )
-        }
-
-        for (sec in secondaryNodes) {
-            val newFileName = "${sec.name}$ext"
-            val newRelPath = if (dir.isEmpty()) newFileName else "$dir/$newFileName"
-            val fullNewPath = "$root/$newRelPath"
-            if (PlatformFiles.exists(fullNewPath)) {
-                details.add("Spawn target '$newRelPath' already exists on disk. Collision avoided.")
-                return ArchitectureRemediationPrescription(
-                    id = "rx-boost003-${relPath.replace('/', '_')}",
-                    ruleId = "BOOST-003",
-                    filePath = relPath,
-                    fixStrategy = "COLLISION",
-                    rationale = "Target file '$newRelPath' already exists. Cannot safely split without overwriting.",
-                    primaryDeclaration = primaryNode.name,
-                    secondaryDeclarations = secondaryNodes.map { it.name },
-                    verified = false,
-                    applied = false,
-                    details = details
-                )
-            }
-        }
-
-        // Sort descending by startLine so slice removals do not alter line numbers of earlier declarations
-        val sortedSecondariesDesc = secondaryNodes.sortedByDescending { it.startLine }
-
-        for (sec in sortedSecondariesDesc) {
-            val expandedStart = findExpandedStartLine(workingLines, sec.startLine)
-            val startIdx = max(0, expandedStart - 1)
-            val endIdx = min(workingLines.size - 1, sec.endLine - 1)
-
-            if (startIdx > endIdx) continue
-
-            val sliceLines = workingLines.subList(startIdx, endIdx + 1).toList()
-            val sliceText = sliceLines.joinToString("\n")
-
-            val newFileName = "${sec.name}$ext"
-            val newRelPath = if (dir.isEmpty()) newFileName else "$dir/$newFileName"
-
-            val newFileContent = buildString {
-                if (headerLines.isNotEmpty()) {
-                    headerLines.forEach { append(it.trim()).append("\n") }
-                    append("\n")
-                }
-                if (importLines.isNotEmpty()) {
-                    importLines.forEach { append(it.trim()).append("\n") }
-                    append("\n")
-                }
-                append(sliceText.trim()).append("\n")
-            }
-
-            spawnedFiles.add(
-                SpawnedFileRecord(
-                    relPath = newRelPath,
-                    declarationName = sec.name,
-                    content = newFileContent,
-                    loc = newFileContent.lines().size
-                )
-            )
-
-            // Remove declaration slice from workingLines
-            for (i in endIdx downTo startIdx) {
-                workingLines.removeAt(i)
-            }
-        }
-
-        val rawModified = workingLines.joinToString("\n")
-        val cleanModified = Regex("""\n{3,}""").replace(rawModified, "\n\n").trimEnd() + "\n"
-
-        val effectiveRelPath = targetRenameRelPath ?: relPath
-
-        // AST and Delimiter Verification
-        var astValid = true
-        if (lang.isNotEmpty()) {
-            val maskedOrig = PolyglotAstExtractor.maskCommentsAndStrings(cleanModified, lang)
-            if (!AutonomousRemediationVerifier.hasBalancedDelimiters(maskedOrig)) {
-                astValid = false
-                details.add("Syntax check failed: Unbalanced delimiters in modified '$effectiveRelPath'.")
-            } else {
-                val (_, _, origCount) = PolyglotAstExtractor.extractFile(projectId, effectiveRelPath, cleanModified)
-                if (origCount > 1) {
-                    astValid = false
-                    details.add("Modified file still declares $origCount top-level symbols (expected <= 1).")
-                } else {
-                    details.add("AST verification passed for modified original file '$effectiveRelPath' (topLevelDeclCount=$origCount).")
-                }
-            }
-
-            for (sf in spawnedFiles) {
-                val maskedSf = PolyglotAstExtractor.maskCommentsAndStrings(sf.content, lang)
-                if (!AutonomousRemediationVerifier.hasBalancedDelimiters(maskedSf)) {
-                    astValid = false
-                    details.add("Syntax check failed: Unbalanced delimiters in spawned file '${sf.relPath}'.")
-                } else {
-                    val (_, _, sfCount) = PolyglotAstExtractor.extractFile(projectId, sf.relPath, sf.content)
-                    if (sfCount != 1) {
-                        astValid = false
-                        details.add("Spawned file '${sf.relPath}' has $sfCount declarations (expected exactly 1).")
-                    } else {
-                        details.add("AST verification passed for spawned file '${sf.relPath}' (decl='${sf.declarationName}').")
-                    }
-                }
-            }
-        }
-
-        if (!astValid) {
-            return ArchitectureRemediationPrescription(
-                id = "rx-boost003-${relPath.replace('/', '_')}",
-                ruleId = "BOOST-003",
-                filePath = relPath,
-                fixStrategy = "AST_FILE_SPLIT",
-                rationale = "AST splitting produced invalid syntax or non-compliant declaration counts.",
-                primaryDeclaration = primaryNode.name,
-                secondaryDeclarations = secondaryNodes.map { it.name },
-                spawnedFiles = spawnedFiles,
-                verified = false,
-                applied = false,
-                details = details
-            )
-        }
-
-        val diffPreview = buildDiffPreview(relPath, originalContent, cleanModified, spawnedFiles, renamedTo = targetRenameRelPath)
-
-        // Test Suite Preservation & Commit
-        var testsPreserved = true
-        if (!dryRun) {
-            val writtenPaths = mutableListOf<String>()
-            try {
-                // 1. Stage spawned files
-                for (sf in spawnedFiles) {
-                    val fPath = "$root/${sf.relPath}"
-                    val dirPath = fPath.substringBeforeLast('/')
-                    PlatformFiles.mkdirs(dirPath)
-                    PlatformFiles.writeText(fPath, sf.content)
-                    writtenPaths.add(fPath)
-                }
-
-                // 2. Stage modified/renamed original file
-                if (targetRenameRelPath != null) {
-                    PlatformFiles.delete(fullPath)
-                    PlatformFiles.writeText(primaryNewFullPath, cleanModified)
-                    writtenPaths.add(primaryNewFullPath)
-                } else {
-                    PlatformFiles.writeText(fullPath, cleanModified)
-                }
-
-                // 3. Run test command if specified
-                if (!testCommand.isNullOrBlank()) {
-                    val cmd = "cd \"$workspaceRoot\" && $testCommand"
-                    val rawStatus = system(cmd)
-                    val exitCode = if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
-                    if (exitCode != 0) {
-                        testsPreserved = false
-                        details.add("Test command '$testCommand' failed (exit code $exitCode). Automatic rollback performed.")
-                        // Rollback
-                        for (w in writtenPaths) {
-                            PlatformFiles.delete(w)
-                        }
-                        PlatformFiles.writeText(fullPath, originalContent)
-                    } else {
-                        details.add("Test command '$testCommand' passed (exit code 0).")
-                    }
-                }
-            } catch (e: Exception) {
-                testsPreserved = false
-                details.add("Disk application error: ${e.message}. Performing rollback.")
-                for (w in writtenPaths) {
-                    PlatformFiles.delete(w)
-                }
-                PlatformFiles.writeText(fullPath, originalContent)
-            }
-        } else {
-            details.add("Dry-run mode: verified AST valid and Single Declaration compliant without modifying disk.")
-        }
-
-        val isSuccess = astValid && testsPreserved
-        val rationaleMsg = if (targetRenameRelPath != null) {
-            "Split ${secondaryNodes.size} secondary top-level declaration(s) and renamed original file to '$targetRenameRelPath' to match Single Declaration Principle (Rule 6 / BOOST-003)."
-        } else {
-            "Split ${secondaryNodes.size} secondary top-level declaration(s) into dedicated source files matching Single Declaration Principle (Rule 6 / BOOST-003)."
-        }
-
-        return ArchitectureRemediationPrescription(
-            id = "rx-boost003-${relPath.replace('/', '_')}",
-            ruleId = "BOOST-003",
-            filePath = relPath,
-            line = primaryNode.startLine,
-            fixStrategy = "AST_FILE_SPLIT",
-            rationale = rationaleMsg,
-            primaryDeclaration = primaryNode.name,
-            secondaryDeclarations = secondaryNodes.map { it.name },
-            spawnedFiles = spawnedFiles,
-            diffPreview = diffPreview,
-            verified = isSuccess,
-            applied = !dryRun && isSuccess,
-            details = details
+        return executeAstSplitRemediation(
+            projectId, relPath, root, fullPath, content, ext, lang,
+            primaryNode, secondaryNodes, targetRenameRelPath, dryRun, testCommand, details
         )
     }
 
