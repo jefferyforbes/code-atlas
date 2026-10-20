@@ -48,6 +48,9 @@ class PolyglotAstExtractor {
             """^(?<indent>[ \t]*)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?<kw>struct|enum|trait|fn|type|mod)\s+(?<name>[A-Za-z0-9_]+)""",
             RegexOption.MULTILINE
         )
+        private val RUST_DOC_KINDS = setOf("class", "interface", "enum", "function")
+        private val RUST_SCOPE_KEYWORDS = setOf("struct", "enum", "trait", "fn", "mod")
+        private val RUST_NON_COUNTABLE_TOP_LEVEL = setOf("typealias", "module")
 
         data class ScopeEntry(val name: String, val startLine: Int, val endLine: Int, val kind: String = "")
 
@@ -2328,6 +2331,189 @@ class PolyglotAstExtractor {
             return Triple(nodes, edges, topLevelCount)
         }
 
+        private fun extractRustImports(maskedText: String): List<Pair<String, Int>> =
+            RS_USE_RE.findAll(maskedText).map { match ->
+                val sym = match.groupValues[1].substringAfterLast("::")
+                Pair(sym, maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
+            }.toList()
+
+        private fun resolveRustKind(kw: String): String = when (kw) {
+            "fn" -> "function"
+            "trait" -> "interface"
+            "enum" -> "enum"
+            "type" -> "typealias"
+            "mod" -> "module"
+            else -> "class"
+        }
+
+        private fun buildRustNodeIdentifiers(fileId: String, relPath: String, name: String, scopeStack: List<ScopeEntry>): Pair<String, String> {
+            val prefix = scopeStack.joinToString("::") { it.name }
+            return if (prefix.isNotEmpty()) {
+                Pair("$fileId#$prefix::$name", "$relPath:$prefix::$name")
+            } else {
+                Pair("$fileId#$name", "$relPath:$name")
+            }
+        }
+
+        private fun buildRustNode(
+            nodeId: String,
+            qualifiedName: String,
+            name: String,
+            kind: String,
+            startLine: Int,
+            endLine: Int,
+            isTopLevel: Boolean,
+            lines: List<String>,
+            maskedLines: List<String>,
+            fileId: String,
+            relPath: String,
+            projectId: String,
+            moduleId: String,
+            sourceSet: String
+        ): GraphNode {
+            val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
+            val description = if (isTopLevel && kind in RUST_DOC_KINDS) extractDocDescription(lines, startLine, "rust") else null
+            val (cVec, cScore) = computeComplexityMetrics(
+                kind = kind,
+                startLine = startLine,
+                endLine = endLine,
+                maskedLines = maskedLines,
+                lines = lines,
+                language = "rust",
+                functionName = name
+            )
+            return GraphNode(
+                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                qualifiedName = qualifiedName, kind = kind,
+                signature = sigLine, startLine = startLine, endLine = endLine,
+                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                archLayer = arch, isTestDouble = isTd,
+                description = description, isTopLevel = isTopLevel,
+                cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                maxNestingDepth = cVec.maxNesting, complexityScore = cScore
+            )
+        }
+
+        private fun buildRustImportEdges(nodeId: String, projectId: String, imports: List<Pair<String, Int>>): List<GraphEdge> {
+            return imports.map { (impTarget, impLine) ->
+                GraphEdge(
+                    edgeId = "$nodeId:imp:$impTarget:$impLine",
+                    projectId = projectId,
+                    sourceNodeId = nodeId,
+                    targetNodeId = "sym:$impTarget",
+                    edgeType = "IMPORTS",
+                    lineNumber = impLine
+                )
+            }
+        }
+
+        private fun isRustTopLevel(indent: String, scopeStack: List<ScopeEntry>): Boolean =
+            indent.isEmpty() && scopeStack.isEmpty()
+
+        private fun recordRustScopeEntry(kw: String, name: String, startLine: Int, endLine: Int, scopeStack: MutableList<ScopeEntry>) {
+            if (kw in RUST_SCOPE_KEYWORDS) {
+                scopeStack.add(ScopeEntry(name, startLine, endLine))
+            }
+        }
+
+        private fun recordRustNodeAndEdges(
+            node: GraphNode,
+            isTopLevel: Boolean,
+            nodeId: String,
+            projectId: String,
+            imports: List<Pair<String, Int>>,
+            nodes: MutableList<GraphNode>,
+            edges: MutableList<GraphEdge>
+        ) {
+            nodes.add(node)
+            if (isTopLevel) {
+                edges.addAll(buildRustImportEdges(nodeId, projectId, imports))
+            }
+        }
+
+        private fun processRustDeclaration(
+            match: MatchResult,
+            maskedText: String,
+            lines: List<String>,
+            maskedLines: List<String>,
+            cleanLines: List<String>,
+            scopeStack: MutableList<ScopeEntry>,
+            fileId: String,
+            relPath: String,
+            projectId: String,
+            moduleId: String,
+            sourceSet: String,
+            imports: List<Pair<String, Int>>,
+            nodes: MutableList<GraphNode>,
+            edges: MutableList<GraphEdge>
+        ): Boolean {
+            val (indent, kw, name) = extractSwiftDeclHeader(match) ?: return false
+            val kind = resolveRustKind(kw)
+            val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
+            val endLine = findBlockEndLine(lines, startLine, cleanLines)
+
+            pruneScopeStack(scopeStack, startLine)
+            val (nodeId, qualifiedName) = buildRustNodeIdentifiers(fileId, relPath, name, scopeStack)
+            val isTopLevel = isRustTopLevel(indent, scopeStack)
+
+            val node = buildRustNode(
+                nodeId, qualifiedName, name, kind, startLine, endLine, isTopLevel,
+                lines, maskedLines, fileId, relPath, projectId, moduleId, sourceSet
+            )
+            recordRustNodeAndEdges(node, isTopLevel, nodeId, projectId, imports, nodes, edges)
+            recordRustScopeEntry(kw, name, startLine, endLine, scopeStack)
+
+            return isTopLevel && kind !in RUST_NON_COUNTABLE_TOP_LEVEL
+        }
+
+        private fun parseRustCallEdge(
+            callMatch: MatchResult,
+            node: GraphNode,
+            body: String,
+            seenCallees: MutableSet<String>,
+            projectId: String
+        ): GraphEdge? {
+            val receiver = callMatch.groups["receiver"]?.value?.trim()
+            val callee = callMatch.groups["callee"]?.value ?: return null
+            val targetSym = when {
+                callee == "new" && !receiver.isNullOrEmpty() -> receiver
+                !receiver.isNullOrEmpty() -> "$receiver::$callee"
+                else -> callee
+            }
+            val isSelfCall = targetSym == node.name || (callee == node.name && (receiver.isNullOrEmpty() || receiver == "self"))
+            if (isSelfCall || targetSym in CALL_STOPWORDS || !seenCallees.add(targetSym)) return null
+
+            val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+            return GraphEdge(
+                edgeId = "${node.nodeId}:call:$targetSym:$callLine",
+                projectId = projectId,
+                sourceNodeId = node.nodeId,
+                targetNodeId = "sym:$targetSym",
+                edgeType = "CALLS",
+                provenance = "INFERRED_CALL",
+                confidence = 0.85,
+                lineNumber = callLine
+            )
+        }
+
+        private fun extractRustCallEdges(
+            node: GraphNode,
+            allNodes: List<GraphNode>,
+            maskedLines: List<String>,
+            projectId: String
+        ): List<GraphEdge> {
+            val childRanges = buildChildRanges(allNodes, node)
+            val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
+            val seenCallees = mutableSetOf<String>()
+            val edges = mutableListOf<GraphEdge>()
+            for (callMatch in CALL_RE.findAll(body)) {
+                val edge = parseRustCallEdge(callMatch, node, body, seenCallees, projectId)
+                if (edge != null) edges.add(edge)
+            }
+            return edges
+        }
+
         private fun extractRust(
             projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
             precomputedMaskedText: String? = null
@@ -2340,107 +2526,20 @@ class PolyglotAstExtractor {
             val maskedLines = maskedText.lines()
             val cleanLines = cleanLinesFrom(lines, 0)
             val scopeStack = mutableListOf<ScopeEntry>()
-
-            val imports = RS_USE_RE.findAll(maskedText).map { match ->
-                val sym = match.groupValues[1].substringAfterLast("::")
-                Pair(sym, maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
-            }.toList()
+            val imports = extractRustImports(maskedText)
 
             var topLevelCount = 0
             for (match in RS_DECL_RE.findAll(maskedText)) {
-                val indent = match.groups["indent"]?.value ?: ""
-                val kw = match.groups["kw"]?.value ?: "struct"
-                val name = match.groups["name"]?.value ?: continue
-
-                val kind = when (kw) {
-                    "fn" -> "function"
-                    "trait" -> "interface"
-                    "enum" -> "enum"
-                    "type" -> "typealias"
-                    "mod" -> "module"
-                    else -> "class"
-                }
-
-                val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                val endLine = findBlockEndLine(lines, startLine, cleanLines)
-
-                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
-                    scopeStack.removeAt(scopeStack.size - 1)
-                }
-                val enclosingPrefix = scopeStack.joinToString("::") { it.name }
-                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
-                    Pair("$fileId#$enclosingPrefix::$name", "$relPath:$enclosingPrefix::$name")
-                } else {
-                    Pair("$fileId#$name", "$relPath:$name")
-                }
-
-                val isTopLevel = indent.isEmpty() && scopeStack.isEmpty()
-                if (isTopLevel && kind !in setOf("typealias", "module")) topLevelCount++
-                val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
-                val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-
-                val description = if (isTopLevel && kind in setOf("class", "interface", "enum", "function")) {
-                    extractDocDescription(lines, startLine, "rust")
-                } else null
-
-                val (cVec, cScore) = computeComplexityMetrics(
-                    kind = kind,
-                    startLine = startLine,
-                    endLine = endLine,
-                    maskedLines = maskedLines,
-                    lines = lines,
-                    language = "rust",
-                    functionName = name
-                )
-
-                nodes.add(
-                    GraphNode(
-                        nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = qualifiedName, kind = kind,
-                        signature = sigLine, startLine = startLine, endLine = endLine,
-                        moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel,
-                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
-                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
-                    )
-                )
-
-                if (isTopLevel) {
-                    for ((impTarget, impLine) in imports) {
-                        edges.add(GraphEdge(
-                            edgeId = "$nodeId:imp:$impTarget:$impLine", projectId = projectId,
-                            sourceNodeId = nodeId, targetNodeId = "sym:$impTarget", edgeType = "IMPORTS",
-                            lineNumber = impLine
-                        ))
-                    }
-                }
-
-                if (kw in setOf("struct", "enum", "trait", "fn", "mod")) {
-                    scopeStack.add(ScopeEntry(name, startLine, endLine))
+                if (processRustDeclaration(
+                    match, maskedText, lines, maskedLines, cleanLines, scopeStack,
+                    fileId, relPath, projectId, moduleId, sourceSet, imports, nodes, edges
+                )) {
+                    topLevelCount++
                 }
             }
 
             for (node in nodes) {
-                val childRanges = nodes
-                    .filter { it.nodeId != node.nodeId && it.startLine >= node.startLine && it.endLine <= node.endLine && (it.startLine > node.startLine || it.endLine < node.endLine) }
-                    .map { it.startLine..it.endLine }
-                val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
-                val seenCallees = mutableSetOf<String>()
-                for (callMatch in CALL_RE.findAll(body)) {
-                    val receiver = callMatch.groups["receiver"]?.value?.trim()
-                    val callee = callMatch.groups["callee"]?.value ?: continue
-                    val targetSym = if (callee == "new" && !receiver.isNullOrEmpty()) receiver else if (!receiver.isNullOrEmpty()) "$receiver::$callee" else callee
-                    val isSelfCall = targetSym == node.name || (callee == node.name && (receiver.isNullOrEmpty() || receiver == "self"))
-                    if (!isSelfCall && targetSym !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
-                        val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
-                        edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
-                            provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
-                        ))
-                    }
-                }
+                edges.addAll(extractRustCallEdges(node, nodes, maskedLines, projectId))
             }
             return Triple(nodes, edges, topLevelCount)
         }
