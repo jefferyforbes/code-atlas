@@ -970,6 +970,64 @@ class ComposeStabilityExtractor {
         return result
     }
 
+    private fun extractParamName(declPart: String, colonIdx: Int): String? {
+        val rawPrefix = declPart.substring(0, colonIdx).trim()
+        val tokens = rawPrefix.split(Regex("""\s+"""))
+        val candidate = tokens.lastOrNull()?.removePrefix("vararg")?.trim()
+        if (candidate.isNullOrEmpty()) return null
+        return candidate
+    }
+
+    private fun isParamUsedInBody(paramName: String, maskedBodySlice: String): Boolean {
+        if (maskedBodySlice.isBlank()) return true
+        return Regex("""\b${Regex.escape(paramName)}\b""").containsMatchIn(maskedBodySlice)
+    }
+
+    private fun parseSingleParameter(
+        nodeId: String,
+        idx: Int,
+        seg: String,
+        rawSeg: String,
+        maskedBodySlice: String,
+        pkg: String,
+        stabilityPatterns: List<Regex>,
+        localClassStability: Map<String, Pair<String, String>>,
+        workspaceNodes: List<GraphNode>
+    ): ComposeParamRecord? {
+        val eqIdx = findTopLevelEquals(seg)
+        val hasDefault = eqIdx >= 0
+        val declPart = if (hasDefault) seg.substring(0, eqIdx).trim() else seg
+        val rawDeclPart = if (hasDefault && eqIdx <= rawSeg.length) rawSeg.substring(0, eqIdx).trim() else rawSeg
+
+        val colonIdx = findTopLevelColon(declPart)
+        if (colonIdx < 0) return null
+
+        val paramName = extractParamName(declPart, colonIdx) ?: return null
+        val typeSig = rawDeclPart.substring(colonIdx + 1).trim().replace(Regex("""\s+"""), " ")
+        val isUsed = isParamUsedInBody(paramName, maskedBodySlice)
+
+        val (stability, reason) = inferTypeStability(
+            typeSig = typeSig,
+            pkg = pkg,
+            stabilityPatterns = stabilityPatterns,
+            localClassStability = localClassStability,
+            workspaceNodes = workspaceNodes
+        )
+        val prov = if (reason.startsWith("STABILITY_CONFIG_MATCH")) "STABILITY_CONFIG" else "STATIC_INFERRED"
+
+        return ComposeParamRecord(
+            nodeId = nodeId,
+            paramIndex = idx,
+            paramName = paramName,
+            typeSignature = typeSig,
+            stability = stability,
+            stabilityReason = reason,
+            hasDefault = hasDefault,
+            isUsedInBody = isUsed,
+            provenance = prov
+        )
+    }
+
     private fun parseParameters(
         nodeId: String,
         rawParamSlice: String,
@@ -990,51 +1048,20 @@ class ComposeStabilityExtractor {
             val rawSeg = rawSegments.getOrElse(idx) { seg }.trim()
             if (seg.isEmpty()) continue
 
-            val eqIdx = findTopLevelEquals(seg)
-            val hasDefault = eqIdx >= 0
-            val declPart = if (eqIdx >= 0) seg.substring(0, eqIdx).trim() else seg
-            val rawDeclPart = if (eqIdx >= 0 && eqIdx <= rawSeg.length) rawSeg.substring(0, eqIdx).trim() else rawSeg
-
-            val colonIdx = findTopLevelColon(declPart)
-            if (colonIdx < 0) continue
-
-            val paramName = declPart.substring(0, colonIdx)
-                .trim()
-                .split(Regex("""\s+"""))
-                .lastOrNull()
-                ?.removePrefix("vararg")
-                ?.trim()
-                ?: continue
-            val typeSig = rawDeclPart.substring(colonIdx + 1).trim().replace(Regex("""\s+"""), " ")
-
-            val isUsed = if (maskedBodySlice.isBlank()) {
-                true
-            } else {
-                Regex("""\b${Regex.escape(paramName)}\b""").containsMatchIn(maskedBodySlice)
-            }
-
-            val (stability, reason) = inferTypeStability(
-                typeSig = typeSig,
+            val param = parseSingleParameter(
+                nodeId = nodeId,
+                idx = idx,
+                seg = seg,
+                rawSeg = rawSeg,
+                maskedBodySlice = maskedBodySlice,
                 pkg = pkg,
                 stabilityPatterns = stabilityPatterns,
                 localClassStability = localClassStability,
                 workspaceNodes = workspaceNodes
             )
-            val prov = if (reason.startsWith("STABILITY_CONFIG_MATCH")) "STABILITY_CONFIG" else "STATIC_INFERRED"
-
-            params.add(
-                ComposeParamRecord(
-                    nodeId = nodeId,
-                    paramIndex = idx,
-                    paramName = paramName,
-                    typeSignature = typeSig,
-                    stability = stability,
-                    stabilityReason = reason,
-                    hasDefault = hasDefault,
-                    isUsedInBody = isUsed,
-                    provenance = prov
-                )
-            )
+            if (param != null) {
+                params.add(param)
+            }
         }
         return params
     }
