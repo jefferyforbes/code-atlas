@@ -5,6 +5,7 @@ import atlas.model.ComposeParamRecord
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -644,6 +645,97 @@ class ComposeStabilityExtractor {
         return Pair(updatedNodes, updatedParams)
     }
 
+    private fun formatDirtyParamsJson(dirtyList: List<String>): String {
+        if (dirtyList.isEmpty()) return "[]"
+        return dirtyList.joinToString(prefix = "[\"", postfix = "\"]", separator = "\",\"")
+    }
+
+    private fun extractJsonTarget(obj: JsonObject): String? {
+        val composable = obj["composable"]?.jsonPrimitive?.content
+        if (composable != null) return composable
+        val nodeId = obj["node_id"]?.jsonPrimitive?.content
+        if (nodeId != null) return nodeId
+        return obj["fqname"]?.jsonPrimitive?.content
+    }
+
+    private fun extractJsonCount(obj: JsonObject, primaryKey: String, secondaryKey: String): Int {
+        val primary = obj[primaryKey]?.jsonPrimitive?.content?.toIntOrNull()
+        if (primary != null) return primary.coerceAtLeast(0)
+        val secondary = obj[secondaryKey]?.jsonPrimitive?.content?.toIntOrNull()
+        if (secondary != null) return secondary.coerceAtLeast(0)
+        return 0
+    }
+
+    private fun parseJsonTraceRecord(
+        trimmed: String,
+        defaultSessionId: String,
+        json: Json
+    ): TraceRecord? {
+        return try {
+            val obj = json.parseToJsonElement(trimmed).jsonObject
+            val target = extractJsonTarget(obj) ?: return null
+            val session = obj["session_id"]?.jsonPrimitive?.content ?: defaultSessionId
+            val recomp = extractJsonCount(obj, "recomposition_count", "recompose")
+            val skip = extractJsonCount(obj, "skip_count", "skip")
+            val dirtyArr = obj["dirty_params"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+            val dirtyJson = formatDirtyParamsJson(dirtyArr)
+            val ts = obj["recorded_at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 1729190000L
+
+            TraceRecord(
+                fqNameOrNodeId = target,
+                sessionId = session,
+                recompositionCount = recomp,
+                skipCount = skip,
+                dirtyParamsJson = dirtyJson,
+                recordedAt = ts
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun parseLogcatTraceRecord(
+        trimmed: String,
+        defaultSessionId: String,
+        logcatRe: Regex
+    ): TraceRecord? {
+        val m = logcatRe.find(trimmed) ?: return null
+        val target = m.groupValues[1]
+        val recomp = m.groupValues[2].toIntOrNull() ?: 0
+        val skip = m.groupValues[3].toIntOrNull() ?: 0
+        val dirtyRaw = m.groupValues[4].trim()
+        val dirtyList = if (dirtyRaw.isEmpty()) emptyList() else dirtyRaw.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        val dirtyJson = formatDirtyParamsJson(dirtyList)
+
+        return TraceRecord(
+            fqNameOrNodeId = target,
+            sessionId = defaultSessionId,
+            recompositionCount = recomp,
+            skipCount = skip,
+            dirtyParamsJson = dirtyJson,
+            recordedAt = 1729190000L
+        )
+    }
+
+    private fun clipTelemetry(rawLogText: String): String {
+        if (rawLogText.length > MAX_TELEMETRY_BYTES) {
+            return rawLogText.substring(0, MAX_TELEMETRY_BYTES)
+        }
+        return rawLogText
+    }
+
+    private fun parseTelemetryLine(
+        trimmed: String,
+        defaultSessionId: String,
+        json: Json,
+        logcatRe: Regex
+    ): TraceRecord? {
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+            return parseJsonTraceRecord(trimmed, defaultSessionId, json)
+        }
+        return parseLogcatTraceRecord(trimmed, defaultSessionId, logcatRe)
+    }
+
     /**
      * Parses bounded `@TraceRecomposition` runtime telemetry (JSONL or Logcat lines).
      * Enforces `MAX_TELEMETRY_BYTES = 16 MB` and `MAX_TELEMETRY_LINES = 100,000`.
@@ -652,10 +744,7 @@ class ComposeStabilityExtractor {
         rawLogText: String,
         defaultSessionId: String = "default_session"
     ): List<TraceRecord> {
-        val clipped = if (rawLogText.length > MAX_TELEMETRY_BYTES) {
-            rawLogText.substring(0, MAX_TELEMETRY_BYTES)
-        } else rawLogText
-
+        val clipped = clipTelemetry(rawLogText)
         val records = mutableListOf<TraceRecord>()
         val json = Json { ignoreUnknownKeys = true; isLenient = true }
         val logcatRe = Regex("""TraceRecomposition\s*:\s*composable=([A-Za-z0-9_.#:/-]+)\s+recompose=(\d+)\s+skip=(\d+)(?:\s+dirty=\[([^\]]*)\])?""")
@@ -666,58 +755,9 @@ class ComposeStabilityExtractor {
             val trimmed = rawLine.trim()
             if (trimmed.isEmpty()) continue
 
-            if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-                try {
-                    val obj = json.parseToJsonElement(trimmed).jsonObject
-                    val target = obj["composable"]?.jsonPrimitive?.content
-                        ?: obj["node_id"]?.jsonPrimitive?.content
-                        ?: obj["fqname"]?.jsonPrimitive?.content
-                        ?: continue
-                    val session = obj["session_id"]?.jsonPrimitive?.content ?: defaultSessionId
-                    val recomp = obj["recomposition_count"]?.jsonPrimitive?.content?.toIntOrNull()
-                        ?: obj["recompose"]?.jsonPrimitive?.content?.toIntOrNull()
-                        ?: 0
-                    val skip = obj["skip_count"]?.jsonPrimitive?.content?.toIntOrNull()
-                        ?: obj["skip"]?.jsonPrimitive?.content?.toIntOrNull()
-                        ?: 0
-                    val dirtyArr = obj["dirty_params"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
-                    val dirtyJson = dirtyArr.joinToString(prefix = "[\"", postfix = "\"]", separator = "\",\"")
-                        .let { if (dirtyArr.isEmpty()) "[]" else it }
-                    val ts = obj["recorded_at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 1729190000L
-                    records.add(
-                        TraceRecord(
-                            fqNameOrNodeId = target,
-                            sessionId = session,
-                            recompositionCount = recomp.coerceAtLeast(0),
-                            skipCount = skip.coerceAtLeast(0),
-                            dirtyParamsJson = dirtyJson,
-                            recordedAt = ts
-                        )
-                    )
-                } catch (_: Throwable) {
-                    // Malformed JSONL line — skip safely without aborting
-                }
-                continue
-            }
-
-            val m = logcatRe.find(trimmed)
-            if (m != null) {
-                val target = m.groupValues[1]
-                val recomp = m.groupValues[2].toIntOrNull() ?: 0
-                val skip = m.groupValues[3].toIntOrNull() ?: 0
-                val dirtyRaw = m.groupValues[4].trim()
-                val dirtyList = if (dirtyRaw.isEmpty()) emptyList() else dirtyRaw.split(',').map { it.trim() }.filter { it.isNotEmpty() }
-                val dirtyJson = if (dirtyList.isEmpty()) "[]" else dirtyList.joinToString(prefix = "[\"", postfix = "\"]", separator = "\",\"")
-                records.add(
-                    TraceRecord(
-                        fqNameOrNodeId = target,
-                        sessionId = defaultSessionId,
-                        recompositionCount = recomp,
-                        skipCount = skip,
-                        dirtyParamsJson = dirtyJson,
-                        recordedAt = 1729190000L
-                    )
-                )
+            val record = parseTelemetryLine(trimmed, defaultSessionId, json, logcatRe)
+            if (record != null) {
+                records.add(record)
             }
         }
         return records

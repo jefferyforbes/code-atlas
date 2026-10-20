@@ -1,10 +1,10 @@
 {
   "project": "code-atlas",
-  "ratchet": 68,
-  "high_ratchet": 46,
+  "ratchet": 67,
+  "high_ratchet": 45,
   "threshold": 10,
   "max_cyclomatic": 15,
-  "total_violations": 68,
-  "high_severity_count": 46,
+  "total_violations": 67,
+  "high_severity_count": 45,
   "warning_count": 22
 }
