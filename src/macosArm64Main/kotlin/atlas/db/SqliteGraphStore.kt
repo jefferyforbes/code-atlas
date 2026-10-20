@@ -501,6 +501,103 @@ class SqliteGraphStore(val dbPath: String) {
         return result
     }
 
+    private fun resolveTargetSymbol(projectId: String, targetNodeId: String): String? {
+        if (targetNodeId.startsWith("sym:")) return targetNodeId
+        if (targetNodeId.startsWith("$projectId:endpoint#") ||
+            targetNodeId.startsWith("$projectId:url_ref#") ||
+            targetNodeId.startsWith("endpoint#") ||
+            targetNodeId.startsWith("url_ref#")
+        ) {
+            return targetNodeId
+        }
+        if (!targetNodeId.startsWith("$projectId:")) {
+            return "sym:$targetNodeId"
+        }
+        return null
+    }
+
+    private fun bindRawSymbolEdgeRow(
+        stmt: NativeSqliteStatement,
+        projectId: String,
+        normalizedFileId: String,
+        sourceNodeId: String,
+        targetSym: String,
+        edgeType: String,
+        confidence: Double,
+        provenance: String,
+        lineNumber: Int,
+        edgeId: String
+    ) {
+        stmt.reset()
+        stmt.clearBindings()
+        stmt.bindString(1, projectId)
+        stmt.bindString(2, normalizedFileId)
+        stmt.bindString(3, sourceNodeId)
+        stmt.bindString(4, targetSym)
+        stmt.bindString(5, edgeType)
+        stmt.bindDouble(6, confidence)
+        stmt.bindString(7, provenance)
+        stmt.bindInt(8, lineNumber)
+        stmt.bindString(9, edgeId)
+        stmt.step()
+    }
+
+    private fun bindIndexedMarker(
+        stmt: NativeSqliteStatement,
+        projectId: String,
+        normalizedFileId: String
+    ) {
+        bindRawSymbolEdgeRow(
+            stmt = stmt,
+            projectId = projectId,
+            normalizedFileId = normalizedFileId,
+            sourceNodeId = "",
+            targetSym = "",
+            edgeType = "INDEXED_MARKER",
+            confidence = 1.0,
+            provenance = "EXTRACTED_AST",
+            lineNumber = 0,
+            edgeId = ""
+        )
+    }
+
+    private fun replaceFileRawSymbolEdgesInBatch(
+        delStmt: NativeSqliteStatement,
+        insStmt: NativeSqliteStatement,
+        projectId: String,
+        fileId: String,
+        edges: List<GraphEdge>
+    ) {
+        val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
+        delStmt.reset()
+        delStmt.clearBindings()
+        delStmt.bindString(1, projectId)
+        delStmt.bindString(2, normalizedFileId)
+        delStmt.step()
+
+        var insertedCount = 0
+        for (edge in edges) {
+            if (edge.edgeType == "CONTAINS") continue
+            val targetSym = resolveTargetSymbol(projectId, edge.targetNodeId) ?: continue
+            bindRawSymbolEdgeRow(
+                stmt = insStmt,
+                projectId = projectId,
+                normalizedFileId = normalizedFileId,
+                sourceNodeId = edge.sourceNodeId,
+                targetSym = targetSym,
+                edgeType = edge.edgeType,
+                confidence = edge.confidence,
+                provenance = edge.provenance,
+                lineNumber = edge.lineNumber,
+                edgeId = edge.edgeId
+            )
+            insertedCount++
+        }
+        if (insertedCount == 0) {
+            bindIndexedMarker(insStmt, projectId, normalizedFileId)
+        }
+    }
+
     fun replaceBatchRawSymbolEdges(projectId: String, fileEdgesMap: Map<String, List<GraphEdge>>) {
         if (fileEdgesMap.isEmpty()) return
         withSavepoint("sp_batch_raw_edges") {
@@ -516,53 +613,7 @@ class SqliteGraphStore(val dbPath: String) {
                     """.trimIndent()
                 )
                 for ((fileId, edges) in fileEdgesMap) {
-                    val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
-                    delStmt.reset()
-                    delStmt.clearBindings()
-                    delStmt.bindString(1, projectId)
-                    delStmt.bindString(2, normalizedFileId)
-                    delStmt.step()
-
-                    var insertedCount = 0
-                    for (edge in edges) {
-                        if (edge.edgeType == "CONTAINS") continue
-                        val targetSym = when {
-                            edge.targetNodeId.startsWith("sym:") -> edge.targetNodeId
-                            edge.targetNodeId.startsWith("$projectId:endpoint#") ||
-                                edge.targetNodeId.startsWith("$projectId:url_ref#") ||
-                                edge.targetNodeId.startsWith("endpoint#") ||
-                                edge.targetNodeId.startsWith("url_ref#") -> edge.targetNodeId
-                            !edge.targetNodeId.startsWith("$projectId:") -> "sym:${edge.targetNodeId}"
-                            else -> continue
-                        }
-                        insStmt.reset()
-                        insStmt.clearBindings()
-                        insStmt.bindString(1, projectId)
-                        insStmt.bindString(2, normalizedFileId)
-                        insStmt.bindString(3, edge.sourceNodeId)
-                        insStmt.bindString(4, targetSym)
-                        insStmt.bindString(5, edge.edgeType)
-                        insStmt.bindDouble(6, edge.confidence)
-                        insStmt.bindString(7, edge.provenance)
-                        insStmt.bindInt(8, edge.lineNumber)
-                        insStmt.bindString(9, edge.edgeId)
-                        insStmt.step()
-                        insertedCount++
-                    }
-                    if (insertedCount == 0) {
-                        insStmt.reset()
-                        insStmt.clearBindings()
-                        insStmt.bindString(1, projectId)
-                        insStmt.bindString(2, normalizedFileId)
-                        insStmt.bindString(3, "")
-                        insStmt.bindString(4, "")
-                        insStmt.bindString(5, "INDEXED_MARKER")
-                        insStmt.bindDouble(6, 1.0)
-                        insStmt.bindString(7, "EXTRACTED_AST")
-                        insStmt.bindInt(8, 0)
-                        insStmt.bindString(9, "")
-                        insStmt.step()
-                    }
+                    replaceFileRawSymbolEdgesInBatch(delStmt, insStmt, projectId, fileId, edges)
                 }
             } finally {
                 scope.closeAll()
