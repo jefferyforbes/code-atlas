@@ -1540,69 +1540,67 @@ class AtlasCli {
             return 0
         }
 
-        private fun runComplexityAuditCommand(
-            server: AtlasMcpServer,
+        private fun buildComplexityAuditToolArgs(
             project: String,
-            paths: List<String>,
-            target: String,
+            filterPaths: List<String>,
             threshold: Int?,
-            maxCyclomatic: Int? = null,
-            ratchet: Int? = null,
-            highRatchet: Int? = null,
-            baseline: String? = null,
-            saveBaseline: Boolean = false,
-            saveBaselinePath: String? = null,
-            workspaceRoot: String = ".",
+            maxCyclomatic: Int?,
+            effectiveRatchet: Int?,
+            highRatchet: Int?,
+            effectiveBaselineFile: String?
+        ): JsonObject = buildJsonObject {
+            put("action", "audit_complexity")
+            put("project", project)
+            if (filterPaths.isNotEmpty()) {
+                putJsonArray("targets") { filterPaths.forEach { add(it) } }
+            }
+            if (threshold != null) put("threshold", threshold)
+            if (maxCyclomatic != null) put("max_cyclomatic", maxCyclomatic)
+            if (effectiveRatchet != null) put("ratchet", effectiveRatchet)
+            if (highRatchet != null) put("high_ratchet", highRatchet)
+            if (effectiveBaselineFile != null) put("baseline", effectiveBaselineFile)
+        }
+
+        private fun saveComplexityBaselineFile(
+            project: String,
+            saveBaselinePath: String?,
+            workspaceRoot: String,
+            total: Int,
+            high: Int,
+            thresh: Int,
+            maxCyc: Int,
+            warn: Int,
             isJson: Boolean
-        ): Int {
-            val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
-            val parsedBaselineInt = baseline?.toIntOrNull()
-            val effectiveRatchet = ratchet ?: parsedBaselineInt
-            val effectiveBaselineFile = if (parsedBaselineInt == null) baseline else null
-
-            val toolArgs = buildJsonObject {
-                put("action", "audit_complexity")
+        ) {
+            val targetPath = saveBaselinePath ?: if (workspaceRoot == ".") "complexity-baseline.json" else "$workspaceRoot/complexity-baseline.json"
+            val baselineObj = buildJsonObject {
                 put("project", project)
-                if (filterPaths.isNotEmpty()) {
-                    putJsonArray("targets") { filterPaths.forEach { add(it) } }
-                }
-                if (threshold != null) put("threshold", threshold)
-                if (maxCyclomatic != null) put("max_cyclomatic", maxCyclomatic)
-                if (effectiveRatchet != null) put("ratchet", effectiveRatchet)
-                if (highRatchet != null) put("high_ratchet", highRatchet)
-                if (effectiveBaselineFile != null) put("baseline", effectiveBaselineFile)
+                put("ratchet", total)
+                put("high_ratchet", high)
+                put("threshold", thresh)
+                put("max_cyclomatic", maxCyc)
+                put("total_violations", total)
+                put("high_severity_count", high)
+                put("warning_count", warn)
             }
-            val res = server.callTool("atlas_audit", toolArgs)
-            val data = loadSpilledData(res)
-            val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: true
-            val total = data["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
-            val high = data["high_severity_count"]?.jsonPrimitive?.intOrNull ?: 0
-            val warn = data["warning_count"]?.jsonPrimitive?.intOrNull ?: 0
-            val thresh = data["threshold"]?.jsonPrimitive?.intOrNull ?: (threshold ?: 10)
-            val maxCyc = data["max_cyclomatic"]?.jsonPrimitive?.intOrNull ?: (maxCyclomatic ?: 15)
-            val resolvedRatchet = data["ratchet"]?.jsonPrimitive?.intOrNull
-            val baselineDelta = data["baseline_delta"]?.jsonPrimitive?.intOrNull
-            val resolvedHighRatchet = data["high_ratchet"]?.jsonPrimitive?.intOrNull
-            val highDelta = data["high_delta"]?.jsonPrimitive?.intOrNull
-
-            if (saveBaseline) {
-                val targetPath = saveBaselinePath ?: if (workspaceRoot == ".") "complexity-baseline.json" else "$workspaceRoot/complexity-baseline.json"
-                val baselineObj = buildJsonObject {
-                    put("project", project)
-                    put("ratchet", total)
-                    put("high_ratchet", high)
-                    put("threshold", thresh)
-                    put("max_cyclomatic", maxCyc)
-                    put("total_violations", total)
-                    put("high_severity_count", high)
-                    put("warning_count", warn)
-                }
-                PlatformFiles.writeText(targetPath, jsonPretty.encodeToString(baselineObj) + "\n")
-                if (!isJson) {
-                    println("[Complexity Audit] Saved baseline to $targetPath ($total violations)")
-                }
+            PlatformFiles.writeText(targetPath, jsonPretty.encodeToString(baselineObj) + "\n")
+            if (!isJson) {
+                println("[Complexity Audit] Saved baseline to $targetPath ($total violations)")
             }
+        }
 
+        private fun formatComplexityAuditSummary(
+            project: String,
+            passed: Boolean,
+            thresh: Int,
+            total: Int,
+            high: Int,
+            warn: Int,
+            resolvedRatchet: Int?,
+            baselineDelta: Int?,
+            resolvedHighRatchet: Int?,
+            highDelta: Int?
+        ): String {
             val ratchetStr = if (resolvedRatchet != null) {
                 val deltaStr = when {
                     baselineDelta == null -> "0"
@@ -1621,11 +1619,74 @@ class AtlasCli {
                 " high_ratchet=$resolvedHighRatchet (delta=$hDeltaStr)"
             } else ""
 
-            val text = if (isJson) {
-                jsonPretty.encodeToString(data)
-            } else {
-                "[Complexity Audit] project=$project passed=$passed threshold=$thresh violations=$total$ratchetStr$highRatchetStr (HIGH=$high, WARNING=$warn)"
+            return "[Complexity Audit] project=$project passed=$passed threshold=$thresh violations=$total$ratchetStr$highRatchetStr (HIGH=$high, WARNING=$warn)"
+        }
+
+        private fun resolveAuditFilterPaths(paths: List<String>, target: String): List<String> =
+            if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
+
+        private fun renderComplexityAuditOutput(
+            data: JsonObject,
+            project: String,
+            passed: Boolean,
+            thresh: Int,
+            total: Int,
+            high: Int,
+            warn: Int,
+            isJson: Boolean
+        ): String {
+            if (isJson) return jsonPretty.encodeToString(data)
+            val resolvedRatchet = data["ratchet"]?.jsonPrimitive?.intOrNull
+            val baselineDelta = data["baseline_delta"]?.jsonPrimitive?.intOrNull
+            val resolvedHighRatchet = data["high_ratchet"]?.jsonPrimitive?.intOrNull
+            val highDelta = data["high_delta"]?.jsonPrimitive?.intOrNull
+            return formatComplexityAuditSummary(
+                project, passed, thresh, total, high, warn,
+                resolvedRatchet, baselineDelta, resolvedHighRatchet, highDelta
+            )
+        }
+
+        private fun runComplexityAuditCommand(
+            server: AtlasMcpServer,
+            project: String,
+            paths: List<String>,
+            target: String,
+            threshold: Int?,
+            maxCyclomatic: Int? = null,
+            ratchet: Int? = null,
+            highRatchet: Int? = null,
+            baseline: String? = null,
+            saveBaseline: Boolean = false,
+            saveBaselinePath: String? = null,
+            workspaceRoot: String = ".",
+            isJson: Boolean
+        ): Int {
+            val filterPaths = resolveAuditFilterPaths(paths, target)
+            val parsedBaselineInt = baseline?.toIntOrNull()
+            val effectiveRatchet = ratchet ?: parsedBaselineInt
+            val effectiveBaselineFile = if (parsedBaselineInt == null) baseline else null
+
+            val toolArgs = buildComplexityAuditToolArgs(
+                project, filterPaths, threshold, maxCyclomatic,
+                effectiveRatchet, highRatchet, effectiveBaselineFile
+            )
+            val res = server.callTool("atlas_audit", toolArgs)
+            val data = loadSpilledData(res)
+            val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: true
+            val total = data["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
+            val high = data["high_severity_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val warn = data["warning_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val thresh = data["threshold"]?.jsonPrimitive?.intOrNull ?: (threshold ?: 10)
+            val maxCyc = data["max_cyclomatic"]?.jsonPrimitive?.intOrNull ?: (maxCyclomatic ?: 15)
+
+            if (saveBaseline) {
+                saveComplexityBaselineFile(
+                    project, saveBaselinePath, workspaceRoot,
+                    total, high, thresh, maxCyc, warn, isJson
+                )
             }
+
+            val text = renderComplexityAuditOutput(data, project, passed, thresh, total, high, warn, isJson)
             println(truncateSummary(text, isJson))
             return if (saveBaseline || passed) 0 else 1
         }
