@@ -566,6 +566,78 @@ class FigmaSnapshotExtractor {
         return hasReactions || hasTransition
     }
 
+    private fun recordBoundVariableEdge(
+        fileKey: String,
+        nodeId: String,
+        varId: String,
+        slot: String,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        val edgeId = "$fileKey:binds_variable:$nodeId->$varId:$slot"
+        edges[edgeId] = FigmaEdge(edgeId, fileKey, nodeId, varId, "BINDS_VARIABLE", slot)
+    }
+
+    private fun processBoundElement(
+        element: JsonElement,
+        fileKey: String,
+        nodeId: String,
+        slot: String,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        when (element) {
+            is JsonArray -> {
+                for (item in element) {
+                    val varId = extractVariableId(item)
+                    if (varId != null) {
+                        recordBoundVariableEdge(fileKey, nodeId, varId, slot, edges)
+                    }
+                }
+            }
+            is JsonObject -> {
+                val varId = extractVariableId(element)
+                if (varId != null) {
+                    recordBoundVariableEdge(fileKey, nodeId, varId, slot, edges)
+                }
+            }
+            is JsonPrimitive -> {
+                val varId = element.asString()
+                if (!varId.isNullOrBlank()) {
+                    recordBoundVariableEdge(fileKey, nodeId, varId, slot, edges)
+                }
+            }
+        }
+    }
+
+    private fun processPaintBoundVariables(
+        paintBound: JsonObject,
+        slot: String,
+        fileKey: String,
+        nodeId: String,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        for ((propName, propVal) in paintBound) {
+            val varId = extractVariableId(propVal)
+            if (varId != null) {
+                val effectiveSlot = if (propName == "color") slot else "$slot.$propName"
+                recordBoundVariableEdge(fileKey, nodeId, varId, effectiveSlot, edges)
+            }
+        }
+    }
+
+    private fun extractPaintSlotVariableEdges(
+        nodeObj: JsonObject,
+        slot: String,
+        fileKey: String,
+        nodeId: String,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        val paints = nodeObj[slot]?.jsonArray ?: return
+        for (paint in paints.filterIsInstance<JsonObject>()) {
+            val paintBound = paint["boundVariables"]?.jsonObject ?: continue
+            processPaintBoundVariables(paintBound, slot, fileKey, nodeId, edges)
+        }
+    }
+
     private fun extractBoundVariableEdges(
         fileKey: String,
         nodeId: String,
@@ -575,47 +647,12 @@ class FigmaSnapshotExtractor {
         val boundVars = nodeObj["boundVariables"]?.jsonObject
         if (boundVars != null) {
             for ((slot, element) in boundVars) {
-                when (element) {
-                    is JsonArray -> {
-                        for (item in element) {
-                            val varId = extractVariableId(item)
-                            if (varId != null) {
-                                val edgeId = "$fileKey:binds_variable:$nodeId->$varId:$slot"
-                                edges[edgeId] = FigmaEdge(edgeId, fileKey, nodeId, varId, "BINDS_VARIABLE", slot)
-                            }
-                        }
-                    }
-                    is JsonObject -> {
-                        val varId = extractVariableId(element)
-                        if (varId != null) {
-                            val edgeId = "$fileKey:binds_variable:$nodeId->$varId:$slot"
-                            edges[edgeId] = FigmaEdge(edgeId, fileKey, nodeId, varId, "BINDS_VARIABLE", slot)
-                        }
-                    }
-                    is JsonPrimitive -> {
-                        val varId = element.asString()
-                        if (!varId.isNullOrBlank()) {
-                            val edgeId = "$fileKey:binds_variable:$nodeId->$varId:$slot"
-                            edges[edgeId] = FigmaEdge(edgeId, fileKey, nodeId, varId, "BINDS_VARIABLE", slot)
-                        }
-                    }
-                }
+                processBoundElement(element, fileKey, nodeId, slot, edges)
             }
         }
 
         for (slot in listOf("fills", "strokes")) {
-            val paints = nodeObj[slot]?.jsonArray ?: continue
-            for (paint in paints.filterIsInstance<JsonObject>()) {
-                val paintBound = paint["boundVariables"]?.jsonObject ?: continue
-                for ((propName, propVal) in paintBound) {
-                    val varId = extractVariableId(propVal)
-                    if (varId != null) {
-                        val effectiveSlot = if (propName == "color") slot else "$slot.$propName"
-                        val edgeId = "$fileKey:binds_variable:$nodeId->$varId:$effectiveSlot"
-                        edges[edgeId] = FigmaEdge(edgeId, fileKey, nodeId, varId, "BINDS_VARIABLE", effectiveSlot)
-                    }
-                }
-            }
+            extractPaintSlotVariableEdges(nodeObj, slot, fileKey, nodeId, edges)
         }
     }
 
