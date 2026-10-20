@@ -63,6 +63,9 @@ class PolyglotAstExtractor {
             """^(?<indent>[ \t]*)(?:template\s*<[^>]*>\s*)?(?:(?:inline|static|virtual|explicit|constexpr|extern|friend|const|unsigned|signed|typename)\s+)*(?:[A-Za-z_][A-Za-z0-9_:<>*,&\s]*?)\b(?<name>(?:[A-Za-z_][A-Za-z0-9_]*::)?[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?\{""",
             RegexOption.MULTILINE
         )
+        private val CPP_FUNC_STOPWORDS = setOf("main", "sizeof", "alignof", "decltype", "static_assert")
+        private val CPP_DOC_KINDS = setOf("class", "struct", "enum")
+        private val CPP_SCOPE_KINDS = setOf("class", "struct", "namespace")
 
         private val PY_IMP_RE = Regex("""^\s*(?:from\s+([a-zA-Z0-9_.]+)\s+import|import\s+([a-zA-Z0-9_.]+))""", RegexOption.MULTILINE)
         private val PY_DECL_RE = Regex("""^(?<indent>[ \t]*)(?<kw>class|def|async\s+def)\s+(?<name>[A-Za-z0-9_]+)""", RegexOption.MULTILINE)
@@ -2666,6 +2669,360 @@ class PolyglotAstExtractor {
             return Triple(nodes, edges, topLevelCount)
         }
 
+        private fun extractCppImports(sourceText: String, maskedLines: List<String>): List<Pair<String, Int>> =
+            CPP_INC_RE.findAll(sourceText).mapNotNull { match ->
+                val lineIdx = sourceText.substring(0, match.range.first).count { it == '\n' }
+                val maskedLine = if (lineIdx < maskedLines.size) maskedLines[lineIdx] else ""
+                if (maskedLine.trim().isEmpty()) {
+                    null
+                } else {
+                    val header = match.groupValues[1].substringAfterLast('/')
+                    Pair(header, lineIdx + 1)
+                }
+            }.toList()
+
+        private fun resolveCppDeclKind(kw: String): String = when {
+            kw == "namespace" -> "namespace"
+            kw == "struct" -> "struct"
+            kw.startsWith("enum") -> "enum"
+            else -> "class"
+        }
+
+        private fun buildCppTypeNodeIdentifiers(fileId: String, relPath: String, name: String, scopeStack: List<ScopeEntry>): Pair<String, String> {
+            val prefix = scopeStack.joinToString("::") { it.name }
+            return if (prefix.isNotEmpty()) {
+                Pair("$fileId#$prefix::$name", "$relPath:$prefix::$name")
+            } else {
+                Pair("$fileId#$name", "$relPath:$name")
+            }
+        }
+
+        private fun buildCppImportEdges(nodeId: String, projectId: String, imports: List<Pair<String, Int>>): List<GraphEdge> {
+            return imports.map { (impTarget, impLine) ->
+                GraphEdge(
+                    edgeId = "$nodeId:imp:$impTarget:$impLine",
+                    projectId = projectId,
+                    sourceNodeId = nodeId,
+                    targetNodeId = "sym:$impTarget",
+                    edgeType = "IMPORTS",
+                    lineNumber = impLine
+                )
+            }
+        }
+
+        private fun isInsideCppClassOrStruct(scopeStack: List<ScopeEntry>): Boolean {
+            for (entry in scopeStack) {
+                if (entry.kind == "class" || entry.kind == "struct") return true
+            }
+            return false
+        }
+
+        private fun isTopLevelCppType(indent: String, scopeStack: List<ScopeEntry>): Boolean {
+            if (indent.isNotEmpty()) return false
+            return !isInsideCppClassOrStruct(scopeStack)
+        }
+
+        private fun updateCppScopeStack(
+            kind: String, name: String, startLine: Int, endLine: Int, scopeStack: MutableList<ScopeEntry>
+        ) {
+            if (kind in CPP_SCOPE_KINDS) {
+                scopeStack.add(ScopeEntry(name, startLine, endLine, kind))
+            }
+        }
+
+        private fun isReportableTopLevelCppType(isTopLevel: Boolean, kind: String): Boolean {
+            if (!isTopLevel) return false
+            return kind != "namespace"
+        }
+
+        private fun resolveDeclarationSignature(lines: List<String>, line: Int, fallback: String): String {
+            if (line in 1..lines.size) {
+                return lines[line - 1].trim()
+            }
+            return fallback
+        }
+
+        private fun resolveCppTypeDoc(isTopLevel: Boolean, kind: String, lines: List<String>, startLine: Int): String? {
+            if (!isTopLevel) return null
+            if (kind !in CPP_DOC_KINDS) return null
+            return extractDocDescription(lines, startLine, "cpp")
+        }
+
+        private fun createCppTypeNode(
+            nodeId: String, qualifiedName: String, name: String, kind: String,
+            sigLine: String, startLine: Int, endLine: Int, fileId: String,
+            projectId: String, moduleId: String, sourceSet: String, relPath: String,
+            description: String?, isTopLevel: Boolean
+        ): GraphNode {
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
+            return GraphNode(
+                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                qualifiedName = qualifiedName, kind = kind,
+                signature = sigLine, startLine = startLine, endLine = endLine,
+                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                archLayer = arch, isTestDouble = isTd,
+                description = description, isTopLevel = isTopLevel
+            )
+        }
+
+        private fun processCppTypeDeclaration(
+            declMatch: MatchResult,
+            maskedText: String,
+            lines: List<String>,
+            cleanLines: List<String>,
+            scopeStack: MutableList<ScopeEntry>,
+            fileId: String,
+            relPath: String,
+            projectId: String,
+            moduleId: String,
+            sourceSet: String,
+            imports: List<Pair<String, Int>>,
+            seenNodeIds: MutableSet<String>,
+            nodes: MutableList<GraphNode>,
+            edges: MutableList<GraphEdge>
+        ): Boolean {
+            val header = extractSwiftDeclHeader(declMatch)
+            if (header == null) return false
+            val (indent, kw, name) = header
+            val kind = resolveCppDeclKind(kw)
+            val startLine = maskedText.substring(0, declMatch.range.first).count { it == '\n' } + 1
+            val endLine = findBlockEndLine(lines, startLine, cleanLines)
+
+            pruneScopeStack(scopeStack, startLine)
+            val (nodeId, qualifiedName) = buildCppTypeNodeIdentifiers(fileId, relPath, name, scopeStack)
+
+            val isTopLevel = isTopLevelCppType(indent, scopeStack)
+            val sigLine = resolveDeclarationSignature(lines, startLine, name)
+            if (!seenNodeIds.add(nodeId)) return false
+
+            val description = resolveCppTypeDoc(isTopLevel, kind, lines, startLine)
+            nodes.add(
+                createCppTypeNode(
+                    nodeId = nodeId, qualifiedName = qualifiedName, name = name, kind = kind,
+                    sigLine = sigLine, startLine = startLine, endLine = endLine, fileId = fileId,
+                    projectId = projectId, moduleId = moduleId, sourceSet = sourceSet, relPath = relPath,
+                    description = description, isTopLevel = isTopLevel
+                )
+            )
+
+            if (isTopLevel) {
+                edges.addAll(buildCppImportEdges(nodeId, projectId, imports))
+            }
+            updateCppScopeStack(kind, name, startLine, endLine, scopeStack)
+            return isReportableTopLevelCppType(isTopLevel, kind)
+        }
+
+        private fun isCppConstructor(nodes: List<GraphNode>, shortName: String, startLine: Int): Boolean {
+            for (node in nodes) {
+                if (node.name == shortName && (node.kind == "class" || node.kind == "struct")) {
+                    if (startLine >= node.startLine && startLine <= node.endLine) return true
+                }
+            }
+            return false
+        }
+
+        private fun resolveCppFunctionQualifiedName(rawName: String, enclosingClass: GraphNode?): String = when {
+            rawName.contains("::") -> rawName
+            enclosingClass != null -> "${enclosingClass.name}::$rawName"
+            else -> rawName
+        }
+
+        private fun isCppFunctionStopword(name: String): Boolean =
+            name in CALL_STOPWORDS || name in CPP_FUNC_STOPWORDS
+
+        private fun isSkippedCppFunction(rawName: String, nodes: List<GraphNode>, startLine: Int): Boolean {
+            val shortName = rawName.substringAfterLast("::")
+            if (isCppFunctionStopword(shortName)) return true
+            return isCppConstructor(nodes, shortName, startLine)
+        }
+
+        private fun findEnclosingCppClass(nodes: List<GraphNode>, startLine: Int): GraphNode? {
+            for (node in nodes) {
+                if ((node.kind == "class" || node.kind == "struct") && startLine > node.startLine && startLine < node.endLine) {
+                    return node
+                }
+            }
+            return null
+        }
+
+        private fun isTopLevelCppFunction(indent: String, enclosingClass: GraphNode?, rawName: String): Boolean {
+            if (indent.isNotEmpty()) return false
+            if (enclosingClass != null) return false
+            return !rawName.contains("::")
+        }
+
+        private fun resolveCppFunctionDoc(isTopLevel: Boolean, lines: List<String>, line: Int): String? {
+            if (!isTopLevel) return null
+            return extractDocDescription(lines, line, "cpp")
+        }
+
+        private fun createCppFunctionNode(
+            nodeId: String, relPath: String, qualifiedCppName: String, shortName: String,
+            sigLine: String, startLine: Int, endLine: Int, fileId: String,
+            projectId: String, moduleId: String, sourceSet: String,
+            description: String?, isTopLevel: Boolean,
+            maskedLines: List<String>, lines: List<String>
+        ): GraphNode {
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, shortName)
+            val (cVec, cScore) = computeComplexityMetrics(
+                kind = "function",
+                startLine = startLine,
+                endLine = endLine,
+                maskedLines = maskedLines,
+                lines = lines,
+                language = "cpp",
+                functionName = shortName
+            )
+            return GraphNode(
+                nodeId = nodeId, projectId = projectId, fileId = fileId, name = shortName,
+                qualifiedName = "$relPath:$qualifiedCppName", kind = "function",
+                signature = sigLine, startLine = startLine, endLine = endLine,
+                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                archLayer = arch, isTestDouble = isTd,
+                description = description, isTopLevel = isTopLevel,
+                cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                maxNestingDepth = cVec.maxNesting, complexityScore = cScore
+            )
+        }
+
+        private fun processCppFunctionDeclaration(
+            declMatch: MatchResult,
+            maskedText: String,
+            lines: List<String>,
+            maskedLines: List<String>,
+            cleanLines: List<String>,
+            fileId: String,
+            relPath: String,
+            projectId: String,
+            moduleId: String,
+            sourceSet: String,
+            imports: List<Pair<String, Int>>,
+            seenNodeIds: MutableSet<String>,
+            nodes: MutableList<GraphNode>,
+            edges: MutableList<GraphEdge>
+        ): Boolean {
+            val rawName = declMatch.groups["name"]?.value
+            if (rawName == null) return false
+            val startLine = maskedText.substring(0, declMatch.range.first).count { it == '\n' } + 1
+            if (isSkippedCppFunction(rawName, nodes, startLine)) return false
+
+            val shortName = rawName.substringAfterLast("::")
+            val endLine = findBlockEndLine(lines, startLine, cleanLines)
+            val enclosingClass = findEnclosingCppClass(nodes, startLine)
+            val qualifiedCppName = resolveCppFunctionQualifiedName(rawName, enclosingClass)
+            val indent = declMatch.groups["indent"]?.value.orEmpty()
+            val isTopLevel = isTopLevelCppFunction(indent, enclosingClass, rawName)
+            val nodeId = "$fileId#$qualifiedCppName"
+            if (!seenNodeIds.add(nodeId)) return false
+
+            val sigLine = resolveDeclarationSignature(lines, startLine, shortName)
+            val description = resolveCppFunctionDoc(isTopLevel, lines, startLine)
+            nodes.add(
+                createCppFunctionNode(
+                    nodeId = nodeId, relPath = relPath, qualifiedCppName = qualifiedCppName, shortName = shortName,
+                    sigLine = sigLine, startLine = startLine, endLine = endLine, fileId = fileId,
+                    projectId = projectId, moduleId = moduleId, sourceSet = sourceSet,
+                    description = description, isTopLevel = isTopLevel,
+                    maskedLines = maskedLines, lines = lines
+                )
+            )
+
+            if (isTopLevel) {
+                edges.addAll(buildCppImportEdges(nodeId, projectId, imports))
+            }
+            return isTopLevel
+        }
+
+        private fun parseCppCallEdge(
+            callMatch: MatchResult,
+            node: GraphNode,
+            body: String,
+            seenCallees: MutableSet<String>,
+            projectId: String
+        ): GraphEdge? {
+            val receiver = callMatch.groups["receiver"]?.value?.trim()
+            val callee = callMatch.groups["callee"]?.value ?: return null
+            val targetSym = if (!receiver.isNullOrEmpty()) "$receiver::$callee" else callee
+            val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
+            if (isSelfCall || callee in CALL_STOPWORDS || !seenCallees.add(targetSym)) return null
+
+            val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+            return GraphEdge(
+                edgeId = "${node.nodeId}:call:$targetSym:$callLine",
+                projectId = projectId,
+                sourceNodeId = node.nodeId,
+                targetNodeId = "sym:$targetSym",
+                edgeType = "CALLS",
+                provenance = "INFERRED_CALL",
+                confidence = 0.85,
+                lineNumber = callLine
+            )
+        }
+
+        private fun extractCppCallEdges(
+            node: GraphNode,
+            allNodes: List<GraphNode>,
+            maskedLines: List<String>,
+            projectId: String
+        ): List<GraphEdge> {
+            val childRanges = buildChildRanges(allNodes, node)
+            val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
+            val seenCallees = mutableSetOf<String>()
+            val edges = mutableListOf<GraphEdge>()
+            for (callMatch in CALL_RE.findAll(body)) {
+                val edge = parseCppCallEdge(callMatch, node, body, seenCallees, projectId)
+                if (edge != null) edges.add(edge)
+            }
+            return edges
+        }
+
+        private fun collectCppTypeDeclarations(
+            maskedText: String, lines: List<String>, cleanLines: List<String>,
+            fileId: String, relPath: String, projectId: String, moduleId: String, sourceSet: String,
+            imports: List<Pair<String, Int>>, seenNodeIds: MutableSet<String>,
+            nodes: MutableList<GraphNode>, edges: MutableList<GraphEdge>
+        ): Int {
+            val scopeStack = mutableListOf<ScopeEntry>()
+            var count = 0
+            for (declMatch in CPP_DECL_RE.findAll(maskedText)) {
+                if (processCppTypeDeclaration(
+                    declMatch, maskedText, lines, cleanLines, scopeStack,
+                    fileId, relPath, projectId, moduleId, sourceSet, imports, seenNodeIds, nodes, edges
+                )) {
+                    count++
+                }
+            }
+            return count
+        }
+
+        private fun collectCppFunctionDeclarations(
+            maskedText: String, lines: List<String>, maskedLines: List<String>, cleanLines: List<String>,
+            fileId: String, relPath: String, projectId: String, moduleId: String, sourceSet: String,
+            imports: List<Pair<String, Int>>, seenNodeIds: MutableSet<String>,
+            nodes: MutableList<GraphNode>, edges: MutableList<GraphEdge>
+        ): Int {
+            var count = 0
+            for (declMatch in CPP_FUNC_RE.findAll(maskedText)) {
+                if (processCppFunctionDeclaration(
+                    declMatch, maskedText, lines, maskedLines, cleanLines,
+                    fileId, relPath, projectId, moduleId, sourceSet, imports, seenNodeIds, nodes, edges
+                )) {
+                    count++
+                }
+            }
+            return count
+        }
+
+        private fun collectAllCppCallEdges(
+            nodes: List<GraphNode>, maskedLines: List<String>, projectId: String
+        ): List<GraphEdge> {
+            val edges = mutableListOf<GraphEdge>()
+            for (node in nodes) {
+                edges.addAll(extractCppCallEdges(node, nodes, maskedLines, projectId))
+            }
+            return edges
+        }
+
         private fun extractCpp(
             projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
             precomputedMaskedText: String? = null
@@ -2677,163 +3034,20 @@ class PolyglotAstExtractor {
             val maskedText = precomputedMaskedText ?: maskCommentsAndStrings(sourceText, "cpp")
             val maskedLines = maskedText.lines()
             val cleanLines = cleanLinesFrom(lines, 0)
-            val scopeStack = mutableListOf<ScopeEntry>()
-
-            val imports = CPP_INC_RE.findAll(sourceText).mapNotNull { match ->
-                val lineIdx = sourceText.substring(0, match.range.first).count { it == '\n' }
-                val maskedLine = if (lineIdx < maskedLines.size) maskedLines[lineIdx] else ""
-                if (maskedLine.trim().isEmpty()) {
-                    null
-                } else {
-                    val header = match.groupValues[1].substringAfterLast('/')
-                    Pair(header, lineIdx + 1)
-                }
-            }.toList()
-
-            var topLevelCount = 0
+            val imports = extractCppImports(sourceText, maskedLines)
             val seenNodeIds = mutableSetOf<String>()
-            for (match in CPP_DECL_RE.findAll(maskedText)) {
-                val indent = match.groups["indent"]?.value ?: ""
-                val kw = match.groups["kw"]?.value ?: "class"
-                val name = match.groups["name"]?.value ?: continue
 
-                val kind = when {
-                    kw == "namespace" -> "namespace"
-                    kw == "struct" -> "struct"
-                    kw.startsWith("enum") -> "enum"
-                    else -> "class"
-                }
+            val typeTopLevelCount = collectCppTypeDeclarations(
+                maskedText, lines, cleanLines, fileId, relPath,
+                projectId, moduleId, sourceSet, imports, seenNodeIds, nodes, edges
+            )
+            val funcTopLevelCount = collectCppFunctionDeclarations(
+                maskedText, lines, maskedLines, cleanLines, fileId, relPath,
+                projectId, moduleId, sourceSet, imports, seenNodeIds, nodes, edges
+            )
+            edges.addAll(collectAllCppCallEdges(nodes, maskedLines, projectId))
 
-                val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                val endLine = findBlockEndLine(lines, startLine, cleanLines)
-
-                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
-                    scopeStack.removeAt(scopeStack.size - 1)
-                }
-                val enclosingPrefix = scopeStack.joinToString("::") { it.name }
-                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
-                    Pair("$fileId#$enclosingPrefix::$name", "$relPath:$enclosingPrefix::$name")
-                } else {
-                    Pair("$fileId#$name", "$relPath:$name")
-                }
-
-                val isInsideClassOrStruct = scopeStack.any { it.kind in setOf("class", "struct") }
-                val isTopLevel = indent.isEmpty() && !isInsideClassOrStruct
-                if (isTopLevel && kind != "namespace") topLevelCount++
-                val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
-                val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-                if (!seenNodeIds.add(nodeId)) continue
-
-                val description = if (isTopLevel && kind in setOf("class", "struct", "enum")) {
-                    extractDocDescription(lines, startLine, "cpp")
-                } else null
-
-                nodes.add(
-                    GraphNode(
-                        nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = qualifiedName, kind = kind,
-                        signature = sigLine, startLine = startLine, endLine = endLine,
-                        moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel
-                    )
-                )
-
-                if (isTopLevel) {
-                    for ((impTarget, impLine) in imports) {
-                        edges.add(GraphEdge(
-                            edgeId = "$nodeId:imp:$impTarget:$impLine", projectId = projectId,
-                            sourceNodeId = nodeId, targetNodeId = "sym:$impTarget", edgeType = "IMPORTS",
-                            lineNumber = impLine
-                        ))
-                    }
-                }
-
-                if (kind in setOf("class", "struct", "namespace")) {
-                    scopeStack.add(ScopeEntry(name, startLine, endLine, kind))
-                }
-            }
-
-            for (match in CPP_FUNC_RE.findAll(maskedText)) {
-                val indent = match.groups["indent"]?.value ?: ""
-                val rawName = match.groups["name"]?.value ?: continue
-                val shortName = rawName.substringAfterLast("::")
-                if (shortName in CALL_STOPWORDS || shortName in setOf("main", "sizeof", "alignof", "decltype", "static_assert")) continue
-
-                val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                // Skip constructor if a class/struct with the same name already exists at or enclosing this line
-                if (nodes.any { it.name == shortName && it.kind in setOf("class", "struct") && startLine in it.startLine..it.endLine }) continue
-
-                val endLine = findBlockEndLine(lines, startLine, cleanLines)
-                val enclosingClass = nodes.firstOrNull { it.kind in setOf("class", "struct") && startLine > it.startLine && startLine < it.endLine }
-                val qualifiedCppName = if (rawName.contains("::")) rawName else if (enclosingClass != null) "${enclosingClass.name}::$rawName" else rawName
-                val isTopLevel = indent.isEmpty() && enclosingClass == null && !rawName.contains("::")
-                if (isTopLevel) topLevelCount++
-                val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else shortName
-                val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, shortName)
-                val nodeId = "$fileId#$qualifiedCppName"
-                if (!seenNodeIds.add(nodeId)) continue
-
-                val description = if (isTopLevel) {
-                    extractDocDescription(lines, startLine, "cpp")
-                } else null
-
-                val (cVec, cScore) = computeComplexityMetrics(
-                    kind = "function",
-                    startLine = startLine,
-                    endLine = endLine,
-                    maskedLines = maskedLines,
-                    lines = lines,
-                    language = "cpp",
-                    functionName = shortName
-                )
-
-                nodes.add(
-                    GraphNode(
-                        nodeId = nodeId, projectId = projectId, fileId = fileId, name = shortName,
-                        qualifiedName = "$relPath:$qualifiedCppName", kind = "function",
-                        signature = sigLine, startLine = startLine, endLine = endLine,
-                        moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel,
-                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
-                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
-                    )
-                )
-
-                if (isTopLevel) {
-                    for ((impTarget, impLine) in imports) {
-                        edges.add(GraphEdge(
-                            edgeId = "$nodeId:imp:$impTarget:$impLine", projectId = projectId,
-                            sourceNodeId = nodeId, targetNodeId = "sym:$impTarget", edgeType = "IMPORTS",
-                            lineNumber = impLine
-                        ))
-                    }
-                }
-            }
-
-            for (node in nodes) {
-                val childRanges = nodes
-                    .filter { it.nodeId != node.nodeId && it.startLine >= node.startLine && it.endLine <= node.endLine && (it.startLine > node.startLine || it.endLine < node.endLine) }
-                    .map { it.startLine..it.endLine }
-                val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
-                val seenCallees = mutableSetOf<String>()
-                for (callMatch in CALL_RE.findAll(body)) {
-                    val receiver = callMatch.groups["receiver"]?.value?.trim()
-                    val callee = callMatch.groups["callee"]?.value ?: continue
-                    val targetSym = if (!receiver.isNullOrEmpty()) "$receiver::$callee" else callee
-                    val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
-                    if (!isSelfCall && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
-                        val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
-                        edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
-                            provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
-                        ))
-                    }
-                }
-            }
-            return Triple(nodes, edges, topLevelCount)
+            return Triple(nodes, edges, typeTopLevelCount + funcTopLevelCount)
         }
 
         private fun findPythonHeaderEndLine(maskedLines: List<String>, startLine: Int, endLine: Int): Int {
