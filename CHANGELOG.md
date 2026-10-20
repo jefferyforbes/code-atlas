@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.0] - 2026-10-20
+
+### Added
+- **Agent Skill Graph Extraction (`REFERENCES_FILE`, `EXECUTES_SCRIPT`)**: `VaultPlanBridge` now resolves relative companion documentation links (e.g. `./references/playbook.md`, `../../knowledge/...`) from `SKILL.md` files and emits `REFERENCES_FILE` edges targeting file/note nodes in the graph. Script and binary invocations (`.py`, `.sh`, `.kexe`, `scripts/`, `bin/`) in inline backticks and fenced code blocks are extracted as `EXECUTES_SCRIPT` edges with line coordinates and confidence scores (#145).
+- **Relative Path Resolution for Skill Dependencies**: `DEPENDS_ON_SKILL` edges now resolve via full relative path normalization (e.g. `../plan/SKILL.md`), not just suffix matching, closing a structural gap in the agent skill dependency graph (#145).
+- **Unresolvable Reference Tracking**: Local file references that do not match any indexed graph node are still emitted as `EXTRACTED_LOCAL_FILE_REF` edges (confidence 0.8) targeting synthetic node IDs, providing a foundation for `SKILL-001` broken-reference auditing in Phase 2 (#145).
+
 ## [0.6.0] - 2026-10-19
 
 ### Added

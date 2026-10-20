@@ -241,7 +241,7 @@ class AtlasNativeTest {
 
     @Test
     fun testCliVersionFlag() {
-        assertEquals("0.6.1", AtlasCli.VERSION)
+        assertEquals("0.7.0", AtlasCli.VERSION)
         val exitCodeVersion = AtlasCli.run(arrayOf("--version"))
         assertEquals(0, exitCodeVersion)
 
@@ -480,7 +480,7 @@ class AtlasNativeTest {
             assertNotNull(initResp)
             assertFalse(initResp.contains("\n"), "initialize response must be strict single-line NDJSON")
             assertTrue(initResp.contains(""""protocolVersion":"2024-11-05""""))
-            assertTrue(initResp.contains(""""version":"0.6.1""""))
+            assertTrue(initResp.contains(""""version":"0.7.0""""))
 
             val listMsg = """{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"""
             val listResp = server.processJsonRpcMessage(listMsg)
