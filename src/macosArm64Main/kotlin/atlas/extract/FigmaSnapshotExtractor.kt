@@ -412,34 +412,60 @@ class FigmaSnapshotExtractor {
         )
     }
 
-    private fun extractBoundingBox(nodeObj: JsonObject): BoundingBox {
-        val bbox = nodeObj["absoluteBoundingBox"]?.jsonObject
-            ?: nodeObj["absoluteRenderBounds"]?.jsonObject
-        val canvasX = bbox?.get("x").asDouble()
-            ?: nodeObj["canvasX"].asDouble()
-            ?: nodeObj["x"].asDouble()
-            ?: 0.0
-        val canvasY = bbox?.get("y").asDouble()
-            ?: nodeObj["canvasY"].asDouble()
-            ?: nodeObj["y"].asDouble()
-            ?: 0.0
-        val width = bbox?.get("width").asDouble()
-            ?: nodeObj["size"]?.jsonObject?.get("x").asDouble()
-            ?: nodeObj["width"].asDouble()
-            ?: 0.0
-        val height = bbox?.get("height").asDouble()
-            ?: nodeObj["size"]?.jsonObject?.get("y").asDouble()
-            ?: nodeObj["height"].asDouble()
-            ?: 0.0
+    private fun extractDimension(
+        bbox: JsonObject?,
+        nodeObj: JsonObject,
+        bboxKey: String,
+        sizeKey: String,
+        fallbackKey: String
+    ): Double {
+        val bVal = bbox?.get(bboxKey).asDouble()
+        if (bVal != null) return bVal
+        val sizeVal = nodeObj["size"]?.jsonObject?.get(sizeKey).asDouble()
+        if (sizeVal != null) return sizeVal
+        val fbVal = nodeObj[fallbackKey].asDouble()
+        if (fbVal != null) return fbVal
+        return 0.0
+    }
 
-        val localX = nodeObj["localX"].asDouble()
-            ?: extractTransformCoord(nodeObj["relativeTransform"], 0, 2)
-            ?: nodeObj["x"].asDouble()
-            ?: 0.0
-        val localY = nodeObj["localY"].asDouble()
-            ?: extractTransformCoord(nodeObj["relativeTransform"], 1, 2)
-            ?: nodeObj["y"].asDouble()
-            ?: 0.0
+    private fun extractCanvasCoord(
+        bbox: JsonObject?,
+        nodeObj: JsonObject,
+        axis: String,
+        canvasAxis: String
+    ): Double {
+        val bVal = bbox?.get(axis).asDouble()
+        if (bVal != null) return bVal
+        val cVal = nodeObj[canvasAxis].asDouble()
+        if (cVal != null) return cVal
+        val fbVal = nodeObj[axis].asDouble()
+        if (fbVal != null) return fbVal
+        return 0.0
+    }
+
+    private fun extractLocalCoord(
+        nodeObj: JsonObject,
+        localKey: String,
+        axis: String,
+        transformRow: Int
+    ): Double {
+        val lVal = nodeObj[localKey].asDouble()
+        if (lVal != null) return lVal
+        val tVal = extractTransformCoord(nodeObj["relativeTransform"], transformRow, 2)
+        if (tVal != null) return tVal
+        val fbVal = nodeObj[axis].asDouble()
+        if (fbVal != null) return fbVal
+        return 0.0
+    }
+
+    private fun extractBoundingBox(nodeObj: JsonObject): BoundingBox {
+        val bbox = nodeObj["absoluteBoundingBox"]?.jsonObject ?: nodeObj["absoluteRenderBounds"]?.jsonObject
+        val canvasX = extractCanvasCoord(bbox, nodeObj, "x", "canvasX")
+        val canvasY = extractCanvasCoord(bbox, nodeObj, "y", "canvasY")
+        val width = extractDimension(bbox, nodeObj, "width", "x", "width")
+        val height = extractDimension(bbox, nodeObj, "height", "y", "height")
+        val localX = extractLocalCoord(nodeObj, "localX", "x", 0)
+        val localY = extractLocalCoord(nodeObj, "localY", "y", 1)
 
         return BoundingBox(canvasX, canvasY, width, height, localX, localY)
     }
