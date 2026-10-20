@@ -43,786 +43,688 @@ class AtlasCli {
         private val jsonCompact = Json { prettyPrint = false }
 
         fun run(argv: Array<String>): Int {
-            if (argv.contains("--version") || argv.contains("-v") || (argv.isNotEmpty() && argv[0] == "version") ||
-                (argv.size >= 2 && (argv[0] == "figma" || argv[0] == "compose") && (argv[1] == "version" || argv[1] == "--version" || argv[1] == "-v"))
-            ) {
-                val isJson = argv.contains("--json")
-                if (isJson) {
-                    println(jsonPretty.encodeToString(buildJsonObject {
-                        put("name", "atlas")
-                        put("version", VERSION)
-                    }))
-                } else {
-                    println("atlas $VERSION")
-                }
-                return 0
-            }
-
-            if (argv.isEmpty() || argv.contains("--help") || argv.contains("-h") ||
-                (argv.size == 1 && (argv[0] == "figma" || argv[0] == "compose" || argv[0] == "complexity" || argv[0] == "help"))
-            ) {
+            if (isVersionCheck(argv)) return printVersion(argv)
+            if (isHelpCheck(argv)) {
                 printHelp()
                 return 0
             }
 
-            var subsystem = ""
-            var command = ""
-            var project = "organisation"
-            var workspace = "."
-            var customDb: String? = null
-            var cacheProfile: String? = null
-            var target = ""
-            val paths = mutableListOf<String>()
-            var action = "search"
-            var secondaryTarget = ""
-            var depth = 2
-            var isJson = false
-            var includeSource = false
-            var fileKey: String? = null
-            var snapshotPath: String? = null
-            var tokensPath: String? = null
-            var isStdin = false
-            var boundsArg: String? = null
-            val seeds = mutableListOf<String>()
-            var stabilityConfigPath: String? = null
-            var compilerReportsDir: String? = null
-            var traceLogPath: String? = null
-            var strongSkipping = true
-            var limit = 10
-            var isComposeAuditFlag = false
-            var isComplexityFlag = false
-            var thresholdArg: Int? = null
-            var maxCyclomaticArg: Int? = null
-            var ratchetArg: Int? = null
-            var highRatchetArg: Int? = null
-            var baselineArg: String? = null
-            var saveBaseline = false
-            var saveBaselinePath: String? = null
-            var outcome: String? = null
-            var note: String? = null
-            var beforeSnippet: String? = null
-            var afterSnippet: String? = null
-            var ruleIdArg: String? = null
-            var targetNodeArg: String? = null
-            var testCmdArg: String? = null
-            var applyRemediation = false
-            var splitBoost003 = true
-            var makePrivateBoost003 = false
-            var descriptionMode: String? = null
-            var forceIndex = false
-            var hookTypeArg = "pre-commit"
-            var isDryRun = false
-            var forceFlag = false
-            var legacyToolsFlag = false
-
-            var idx = 0
-            while (idx < argv.size) {
-                val arg = argv[idx]
-                when {
-                    arg == "figma" -> subsystem = "figma"
-                    arg == "compose" -> subsystem = "compose"
-                    arg == "complexity" -> {
-                        subsystem = "complexity"
-                        isComplexityFlag = true
-                    }
-                    (subsystem == "figma" || arg == "figma") && (arg == "index" || arg == "query" || arg == "audit" || arg == "synthesize-scope" || arg == "shortest-path" || arg == "shortest_path" || arg == "version") -> {
-                        if (arg == "shortest-path" || arg == "shortest_path") {
-                            command = "query"
-                            action = "shortest_path"
-                        } else {
-                            command = arg
-                        }
-                    }
-                    (subsystem == "compose" || arg == "compose") && (arg == "index" || arg == "query" || arg == "audit" || arg == "doctor" || arg == "synthesize-scope" || arg == "version") -> {
-                        command = arg
-                    }
-                    (subsystem == "complexity" || arg == "complexity") && (arg == "query" || arg == "audit" || arg == "doctor") -> {
-                        command = arg
-                        isComplexityFlag = true
-                    }
-                    arg == "figma-shortest-path" -> {
-                        subsystem = "figma"
-                        command = "query"
-                        action = "shortest_path"
-                    }
-                    arg == "index" || arg == "query" || arg == "synthesize-scope" || arg == "audit" || arg == "doctor" || arg == "fix" || arg == "remedy" || arg == "remediate" || arg == "dead-code" || arg == "dead_code" || arg == "record-memory" || arg == "record_memory" || arg == "serve-mcp" || arg == "serve" || arg == "explore" || arg == "context" || arg == "callers" || arg == "callees" || arg == "impact" || arg == "status" || arg == "files" || arg == "search" || arg == "node" || arg == "version" || arg == "verify-remediation" || arg == "verify_remediation" || arg == "init" || arg == "migrate-tools" || arg == "migrate_tools" -> {
-                        command = when (arg) {
-                            "dead_code" -> "dead-code"
-                            "record_memory" -> "record-memory"
-                            "verify_remediation" -> "verify-remediation"
-                            "remedy", "remediate" -> "fix"
-                            "migrate_tools" -> "migrate-tools"
-                            "serve" -> "serve-mcp"
-                            else -> arg
-                        }
-                    }
-                    arg == "--mcp" -> {
-                        if (command == "serve" || command.isEmpty()) command = "serve-mcp"
-                    }
-                    arg == "--compose" -> isComposeAuditFlag = true
-                    arg == "--complexity" -> isComplexityFlag = true
-                    arg == "--legacy-tools" -> legacyToolsFlag = true
-                    (arg == "--threshold" || arg == "--max-cognitive") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> thresholdArg = argv[++idx].toIntOrNull()
-                    arg.startsWith("--threshold=") -> thresholdArg = arg.substringAfter('=').toIntOrNull()
-                    arg.startsWith("--max-cognitive=") -> thresholdArg = arg.substringAfter('=').toIntOrNull()
-                    arg == "--max-cyclomatic" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> maxCyclomaticArg = argv[++idx].toIntOrNull()
-                    arg.startsWith("--max-cyclomatic=") -> maxCyclomaticArg = arg.substringAfter('=').toIntOrNull()
-                    arg == "--ratchet" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> ratchetArg = argv[++idx].toIntOrNull()
-                    arg.startsWith("--ratchet=") -> ratchetArg = arg.substringAfter('=').toIntOrNull()
-                    (arg == "--high-ratchet" || arg == "--max-high-violations") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> highRatchetArg = argv[++idx].toIntOrNull()
-                    arg.startsWith("--high-ratchet=") -> highRatchetArg = arg.substringAfter('=').toIntOrNull()
-                    arg.startsWith("--max-high-violations=") -> highRatchetArg = arg.substringAfter('=').toIntOrNull()
-                    arg == "--baseline" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> baselineArg = argv[++idx]
-                    arg.startsWith("--baseline=") -> baselineArg = arg.substringAfter('=')
-                    arg == "--save-baseline" -> {
-                        saveBaseline = true
-                        if (idx + 1 < argv.size && !argv[idx + 1].startsWith("--")) {
-                            saveBaselinePath = argv[++idx]
-                        }
-                    }
-                    arg.startsWith("--save-baseline=") -> {
-                        saveBaseline = true
-                        saveBaselinePath = arg.substringAfter('=')
-                    }
-                    arg == "--outcome" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> outcome = argv[++idx]
-                    arg == "--note" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> note = argv[++idx]
-                    (arg == "--project" || arg == "--project-path" || arg == "--projectPath") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> {
-                        val p = argv[++idx]
-                        if (p.contains('/') || p == ".") {
-                            workspace = p
-                            val clean = p.trimEnd('/', '\\')
-                            project = if (clean.contains('/')) clean.substringAfterLast('/') else clean
-                        } else {
-                            project = p
-                        }
-                    }
-                    arg.startsWith("--project-path=") || arg.startsWith("--projectPath=") -> {
-                        val p = arg.substringAfter('=')
-                        if (p.contains('/') || p == ".") {
-                            workspace = p
-                            val clean = p.trimEnd('/', '\\')
-                            project = if (clean.contains('/')) clean.substringAfterLast('/') else clean
-                        } else {
-                            project = p
-                        }
-                    }
-                    arg.startsWith("--project=") -> project = arg.substringAfter('=')
-                    arg == "--workspace" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> workspace = argv[++idx]
-                    arg == "--db" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> customDb = argv[++idx]
-                    arg == "--cache-profile" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> cacheProfile = argv[++idx]
-                    (arg == "--target" || arg == "--from" || arg == "--symbol") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> target = argv[++idx]
-                    arg.startsWith("--target=") -> target = arg.substringAfter('=')
-                    arg.startsWith("--symbol=") -> target = arg.substringAfter('=')
-                    arg == "--url" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> {
-                        target = argv[++idx]
-                        action = "url"
-                        if (command.isEmpty()) command = "query"
-                    }
-                    arg.startsWith("--url=") -> {
-                        target = arg.substringAfter('=')
-                        action = "url"
-                        if (command.isEmpty()) command = "query"
-                    }
-                    arg == "--action" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> action = argv[++idx]
-                    arg.startsWith("--action=") -> action = arg.substringAfter('=')
-                    (arg == "--secondary-target" || arg == "--to") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> secondaryTarget = argv[++idx]
-                    arg == "--depth" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> depth = argv[++idx].toIntOrNull() ?: 2
-                    arg == "--limit" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> limit = argv[++idx].toIntOrNull() ?: 10
-                    arg == "--file" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> fileKey = argv[++idx]
-                    arg == "--snapshot" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> snapshotPath = argv[++idx]
-                    arg == "--tokens" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> tokensPath = argv[++idx]
-                    arg == "--stability-config" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> stabilityConfigPath = argv[++idx]
-                    arg == "--compiler-reports" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> compilerReportsDir = argv[++idx]
-                    arg == "--trace-log" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> traceLogPath = argv[++idx]
-                    arg == "--strong-skipping" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> {
-                        strongSkipping = argv[++idx].lowercase() != "false"
-                    }
-                    arg.startsWith("--strong-skipping=") -> {
-                        strongSkipping = arg.substringAfter('=').lowercase() != "false"
-                    }
-                    arg == "--no-strong-skipping" -> strongSkipping = false
-                    arg == "--stdin" -> isStdin = true
-                    arg == "--bounds" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> boundsArg = argv[++idx]
-                    arg == "--seeds" -> {
-                        idx++
-                        while (idx < argv.size && !argv[idx].startsWith("--")) {
-                            seeds.add(argv[idx])
-                            idx++
-                        }
-                        continue
-                    }
-                    arg == "--json" -> isJson = true
-                    arg == "--summary" -> isJson = false
-                    arg == "--include-source" -> includeSource = true
-                    arg == "--before" && idx + 1 < argv.size -> beforeSnippet = argv[++idx]
-                    arg.startsWith("--before=") -> beforeSnippet = arg.substringAfter('=')
-                    arg == "--after" && idx + 1 < argv.size -> afterSnippet = argv[++idx]
-                    arg.startsWith("--after=") -> afterSnippet = arg.substringAfter('=')
-                    arg == "--rule" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> ruleIdArg = argv[++idx]
-                    arg == "--target-node" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> targetNodeArg = argv[++idx]
-                    arg == "--test-cmd" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> testCmdArg = argv[++idx]
-                    arg == "--apply" -> applyRemediation = true
-                    arg == "--dry-run" -> {
-                        applyRemediation = false
-                        isDryRun = true
-                    }
-                    arg == "--split" -> splitBoost003 = true
-                    arg == "--no-split" -> splitBoost003 = false
-                    arg == "--make-private" -> makePrivateBoost003 = true
-                    arg == "--force" -> {
-                        forceIndex = true
-                        forceFlag = true
-                    }
-                    arg == "--hook-type" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> hookTypeArg = argv[++idx]
-                    arg.startsWith("--hook-type=") -> hookTypeArg = arg.substringAfter('=')
-                    (arg == "--description-mode" || arg == "--descriptions") && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> descriptionMode = argv[++idx]
-                    arg.startsWith("--description-mode=") -> descriptionMode = arg.substringAfter('=')
-                    arg.startsWith("--descriptions=") -> descriptionMode = arg.substringAfter('=')
-                    arg == "--no-description-check" || arg == "--no-descriptions" -> descriptionMode = "off"
-                    arg == "--path" && idx + 1 < argv.size && !argv[idx + 1].startsWith("--") -> paths.add(argv[++idx])
-                    arg == "--paths" -> {
-                        idx++
-                        while (idx < argv.size && !argv[idx].startsWith("--")) {
-                            paths.add(argv[idx])
-                            idx++
-                        }
-                        continue
-                    }
-                    !arg.startsWith("--") && command.isEmpty() && arg != "figma" && arg != "compose" -> command = arg
-                    !arg.startsWith("--") && target.isEmpty() && arg != "figma" && arg != "compose" -> target = arg
-                }
-                idx++
-            }
-
-            if (command.isEmpty()) {
+            val args = CliArgs.parse(argv) ?: run {
                 printHelp()
                 return 1
             }
 
-            val isMcpServe = command == "serve-mcp" || argv.contains("--mcp") || argv.contains("serve")
+            val isMcpServe = args.command == "serve-mcp" || argv.contains("--mcp") || argv.contains("serve")
             val server = AtlasMcpServer(
-                workspaceRoot = workspace,
-                customDbPath = customDb,
-                cacheProfile = cacheProfile,
+                workspaceRoot = args.workspace,
+                customDbPath = args.customDb,
+                cacheProfile = args.cacheProfile,
                 enableCodegraphTools = isMcpServe || (PlatformFiles.getenv("ATLAS_CODEGRAPH_COMPAT") == "1")
             )
 
-            try {
-                if (subsystem == "figma") {
-                    return runFigmaCommand(
-                        server = server,
-                        command = command,
-                        project = project,
-                        fileKeyArg = fileKey,
-                        snapshotPath = snapshotPath,
-                        tokensPath = tokensPath,
-                        isStdin = isStdin,
-                        action = action,
-                        target = target,
-                        secondaryTarget = secondaryTarget,
-                        depth = depth,
-                        boundsArg = boundsArg,
-                        seeds = seeds,
-                        isJson = isJson
-                    )
-                }
-
-                if ((command == "doctor" && isComplexityFlag) || (subsystem == "complexity" && command == "doctor")) {
-                    return runComplexityDoctorCommand(
-                        server = server,
-                        project = project,
-                        target = target,
-                        limit = limit,
-                        apply = applyRemediation,
-                        testCmd = testCmdArg,
-                        threshold = thresholdArg,
-                        isJson = isJson
-                    )
-                }
-
-                if ((command == "audit" && isComplexityFlag) || (subsystem == "complexity" && command == "audit")) {
-                    return runComplexityAuditCommand(
-                        server = server,
-                        project = project,
-                        paths = paths,
-                        target = target,
-                        threshold = thresholdArg,
-                        maxCyclomatic = maxCyclomaticArg,
-                        ratchet = ratchetArg,
-                        highRatchet = highRatchetArg,
-                        baseline = baselineArg,
-                        saveBaseline = saveBaseline,
-                        saveBaselinePath = saveBaselinePath,
-                        workspaceRoot = workspace,
-                        isJson = isJson
-                    )
-                }
-
-                if (command == "query" && (action == "complexity" || isComplexityFlag || subsystem == "complexity")) {
-                    return runComplexityQueryCommand(
-                        server = server,
-                        project = project,
-                        target = target,
-                        threshold = thresholdArg,
-                        limit = limit,
-                        isJson = isJson
-                    )
-                }
-
-                if (subsystem == "compose" || (command == "query" && action in setOf("summary", "cascade", "blame", "compose_summary", "compose_cascade", "compose_blame")) || (command == "audit" && isComposeAuditFlag) || (command == "doctor" && (subsystem == "compose" || isComposeAuditFlag))) {
-                    val effCmd = if (command == "audit" && isComposeAuditFlag) "audit" else command
-                    return runComposeCommand(
-                        server = server,
-                        command = effCmd,
-                        project = project,
-                        action = if (action == "search") "summary" else action,
-                        target = target,
-                        paths = paths,
-                        seeds = seeds,
-                        depth = depth,
-                        limit = limit,
-                        stabilityConfigPath = stabilityConfigPath,
-                        compilerReportsDir = compilerReportsDir,
-                        traceLogPath = traceLogPath,
-                        strongSkipping = strongSkipping,
-                        isJson = isJson,
-                        applyRemediation = applyRemediation,
-                        ruleIdArg = ruleIdArg,
-                        testCmdArg = testCmdArg
-                    )
-                }
-
-                when (command) {
-                    "migrate-tools" -> {
-                        return runMigrateToolsCommand(
-                            server = server,
-                            paths = paths,
-                            target = target,
-                            applyRemediation = applyRemediation,
-                            isJson = isJson
-                        )
-                    }
-                    "serve-mcp" -> {
-                        server.serveStdio()
-                        return 0
-                    }
-                    "explore" -> {
-                        val effectiveServer = server.resolveServerForProject(project, workspace)
-                        val queryText = if (target.isNotEmpty()) target else paths.joinToString(" ")
-                        val res = effectiveServer.codegraphEngine.explore(project, queryText, maxFiles = limit)
-                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
-                        println(text)
-                        return 0
-                    }
-                    "context" -> {
-                        val effectiveServer = server.resolveServerForProject(project, workspace)
-                        val targetsList = if (seeds.isNotEmpty()) seeds else (if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList()))
-                        val res = effectiveServer.architectContextEngine.synthesizeContext(
-                            projectId = project,
-                            seedTargets = targetsList,
-                            depth = depth
-                        )
-                        val text = if (isJson) jsonPretty.encodeToString(res) else res.inlineMarkdown
-                        println(text)
-                        return 0
-                    }
-                    "callers" -> {
-                        val effectiveServer = server.resolveServerForProject(project, workspace)
-                        val res = effectiveServer.codegraphEngine.callers(project, target, file = fileKey, limit = limit)
-                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
-                        println(text)
-                        return 0
-                    }
-                    "callees" -> {
-                        val effectiveServer = server.resolveServerForProject(project, workspace)
-                        val res = effectiveServer.codegraphEngine.callees(project, target, file = fileKey, limit = limit)
-                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
-                        println(text)
-                        return 0
-                    }
-                    "impact" -> {
-                        val effectiveServer = server.resolveServerForProject(project, workspace)
-                        val res = effectiveServer.codegraphEngine.impact(project, target, file = fileKey, depth = depth)
-                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
-                        println(text)
-                        return 0
-                    }
-                    "status" -> {
-                        val effectiveServer = server.resolveServerForProject(project, workspace)
-                        val res = effectiveServer.codegraphEngine.status(project)
-                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
-                        println(text)
-                        return 0
-                    }
-                    "files" -> {
-                        val effectiveServer = server.resolveServerForProject(project, workspace)
-                        val res = effectiveServer.codegraphEngine.files(project, path = paths.firstOrNull(), pattern = if (target.isNotEmpty()) target else null)
-                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
-                        println(text)
-                        return 0
-                    }
-                    "search" -> {
-                        val effectiveServer = server.resolveServerForProject(project, workspace)
-                        val queryText = if (target.isNotEmpty()) target else paths.joinToString(" ")
-                        val res = effectiveServer.codegraphEngine.search(project, queryText, limit = limit)
-                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
-                        println(text)
-                        return 0
-                    }
-                    "node" -> {
-                        val effectiveServer = server.resolveServerForProject(project, workspace)
-                        val res = effectiveServer.codegraphEngine.node(project, symbol = target.ifEmpty { null }, file = fileKey, includeCode = includeSource)
-                        val text = if (isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
-                        println(text)
-                        return 0
-                    }
-                    "index" -> {
-                        val effectiveServer = server.resolveServerForProject(project)
-                        val expandedPaths = paths.map {
-                            val home = PlatformFiles.userHome()
-                            if (it.startsWith("~")) it.replaceFirst("~", home) else it
-                        }
-                        val res = effectiveServer.indexWorkspace(project, subpaths = if (expandedPaths.isNotEmpty()) expandedPaths else null, force = forceIndex)
-                        val text = if (isJson) {
-                            jsonPretty.encodeToString(res)
-                        } else {
-                            val fTotal = res["files"]?.jsonPrimitive?.intOrNull ?: 0
-                            val fIdx = res["files_indexed"]?.jsonPrimitive?.intOrNull ?: 0
-                            val fSkip = res["files_skipped"]?.jsonPrimitive?.intOrNull ?: 0
-                            val nTotal = res["nodes"]?.jsonPrimitive?.intOrNull ?: 0
-                            val eTotal = res["edges"]?.jsonPrimitive?.intOrNull ?: 0
-                            "[Atlas] project=$project files=$fTotal (indexed=$fIdx, skipped=$fSkip) nodes=$nTotal edges=$eTotal"
-                        }
-                        println(truncateSummary(text, isJson))
-                        return 0
-                    }
-                    "synthesize-scope" -> {
-                        val seedList = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
-                        val toolArgs = buildJsonObject {
-                            put("action", "synthesize_3d_scope")
-                            put("project", project)
-                            putJsonArray("targets") { seedList.forEach { add(it) } }
-                        }
-                        val res = server.callTool("atlas_audit", toolArgs)
-                        val data = loadSpilledData(res)
-                        val text = if (isJson) {
-                            jsonPretty.encodeToString(data)
-                        } else {
-                            val fCount = (data["files"] ?: data["files_count"])?.jsonArray?.size ?: 0
-                            val mods = (data["modules"] ?: data["impacted_modules"])?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
-                            val arch = (data["architecture"] ?: data["impacted_layers"])?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
-                            val collisions = (data["colliding_plans"] ?: data["collidingPlans"])?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
-                            "[3D Scope] project=$project seeds=$seedList files=$fCount modules=$mods arch=$arch collisions=$collisions"
-                        }
-                        println(truncateSummary(text, isJson))
-                        return 0
-                    }
-                    "audit" -> {
-                        val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
-                        if (legacyToolsFlag) {
-                            val scanPaths = if (filterPaths.isNotEmpty()) filterPaths else listOf(server.workspaceRoot)
-                            val report = ToolMigrationEngine.scanAndMigrate(scanPaths, apply = false)
-                            if (isJson) {
-                                println(jsonPretty.encodeToString(report))
-                            } else {
-                                val passed = report.totalOccurrences == 0
-                                val sample = if (report.matches.isNotEmpty()) {
-                                    val s = report.matches.take(5).joinToString("; ") { "${it.legacyTool} in ${it.file}:${it.line}" }
-                                    " top=[$s]"
-                                } else ""
-                                val text = "[Audit Legacy Tools] passed=$passed occurrences=${report.totalOccurrences} files=${report.filesAffected}$sample"
-                                println(truncateSummary(text, false))
-                            }
-                            return if (report.totalOccurrences == 0) 0 else 1
-                        }
-                        if (action == "architect_context" || action == "architect-context") {
-                            val toolArgs = buildJsonObject {
-                                put("action", "architect_context")
-                                put("project", project)
-                                if (filterPaths.isNotEmpty()) {
-                                    putJsonArray("targets") { filterPaths.forEach { add(it) } }
-                                }
-                                put("depth", depth)
-                            }
-                            val res = server.callTool("atlas_audit", toolArgs)
-                            if (isJson) {
-                                println(jsonPretty.encodeToString(res))
-                            } else {
-                                val md = res["inlineMarkdown"]?.jsonPrimitive?.contentOrNull
-                                    ?: res["inline_markdown"]?.jsonPrimitive?.contentOrNull
-                                    ?: jsonPretty.encodeToString(res)
-                                println(md)
-                            }
-                            return 0
-                        }
-                        val toolArgs = buildJsonObject {
-                            put("action", "verify_architecture")
-                            put("project", project)
-                            if (filterPaths.isNotEmpty()) {
-                                putJsonArray("targets") { filterPaths.forEach { add(it) } }
-                            }
-                            if (!descriptionMode.isNullOrBlank()) {
-                                put("description_mode", descriptionMode)
-                            }
-                            if (!outcome.isNullOrBlank()) put("outcome", outcome)
-                            if (!note.isNullOrBlank()) put("note", note)
-                        }
-                        val res = server.callTool("atlas_audit", toolArgs)
-                        val data = loadSpilledData(res)
-                        val bViolations = (data["single_declaration_violations"] ?: data["singleDeclarationViolations"])?.jsonArray?.size ?: 0
-                        val lInversions = (data["layer_inversions"] ?: data["layerInversions"])?.jsonArray?.size ?: 0
-                        val pCollisions = (data["plan_3d_collisions"] ?: data["plan3dCollisions"])?.jsonArray?.size ?: 0
-                        val dSuggestions = (data["description_suggestions"] ?: data["descriptionSuggestions"])?.jsonArray?.size ?: 0
-                        val cViolations = (data["complexity_violations"] ?: data["complexityViolations"])?.jsonArray?.size ?: 0
-                        val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: (bViolations == 0 && lInversions == 0 && pCollisions == 0 && cViolations == 0)
-                        val text = if (isJson) {
-                            jsonPretty.encodeToString(data)
-                        } else {
-                            "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions complexity_violations=$cViolations description_suggestions=$dSuggestions"
-                        }
-                        println(truncateSummary(text, isJson))
-                        return if (passed) 0 else 1
-                    }
-                    "fix" -> {
-                        val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
-                        if (legacyToolsFlag || ruleIdArg == "LEGACY-TOOLS" || ruleIdArg == "MIGRATE-TOOLS") {
-                            val scanPaths = if (filterPaths.isNotEmpty()) filterPaths else listOf(server.workspaceRoot)
-                            val report = ToolMigrationEngine.scanAndMigrate(scanPaths, apply = applyRemediation)
-                            if (isJson) {
-                                println(jsonPretty.encodeToString(report))
-                            } else {
-                                val mode = if (applyRemediation) "applied" else "dry-run"
-                                val sample = if (report.matches.isNotEmpty()) {
-                                    val s = report.matches.take(5).joinToString("; ") { "${it.legacyTool} in ${it.file}:${it.line}" }
-                                    " top=[$s]"
-                                } else ""
-                                val text = "[Fix Legacy Tools] mode=$mode occurrences=${report.totalOccurrences} files=${report.filesAffected}$sample"
-                                println(truncateSummary(text, false))
-                            }
-                            return if (applyRemediation || report.totalOccurrences == 0) 0 else 1
-                        }
-                        val toolArgs = buildJsonObject {
-                            put("action", "remedy_architecture")
-                            put("project", project)
-                            if (filterPaths.isNotEmpty()) {
-                                putJsonArray("targets") { filterPaths.forEach { add(it) } }
-                            }
-                            if (!ruleIdArg.isNullOrBlank()) put("rule_id", ruleIdArg)
-                            put("dry_run", !applyRemediation)
-                            put("split", splitBoost003)
-                            put("make_private", makePrivateBoost003)
-                            if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg)
-                            put("limit", limit)
-                        }
-                        val res = server.callTool("atlas_audit", toolArgs)
-                        val data = loadSpilledData(res)
-                        val total = data["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
-                        val bCount = data["boost003_count"]?.jsonPrimitive?.intOrNull ?: 0
-                        val lCount = data["layer_inversion_count"]?.jsonPrimitive?.intOrNull ?: 0
-                        val vCount = data["verified_count"]?.jsonPrimitive?.intOrNull ?: 0
-                        val aCount = data["applied_count"]?.jsonPrimitive?.intOrNull ?: 0
-                        val dryRun = data["dry_run"]?.jsonPrimitive?.booleanOrNull ?: (!applyRemediation)
-                        val prescriptions = data["prescriptions"]?.jsonArray ?: emptyList()
-
-                        if (applyRemediation && aCount > 0) {
-                            val reindexPaths = mutableListOf<String>()
-                            if (filterPaths.isNotEmpty()) {
-                                reindexPaths.addAll(filterPaths)
-                            }
-                            for (p in prescriptions) {
-                                val f = p.jsonObject["file_path"]?.jsonPrimitive?.content ?: continue
-                                reindexPaths.add(f)
-                                val sfArray = p.jsonObject["spawned_files"]?.jsonArray ?: emptyList()
-                                for (sf in sfArray) {
-                                    val spRel = sf.jsonObject["rel_path"]?.jsonPrimitive?.content ?: continue
-                                    reindexPaths.add(spRel)
-                                }
-                            }
-                            server.indexWorkspace(project, subpaths = if (reindexPaths.isNotEmpty()) reindexPaths.distinct() else null, force = true)
-                        }
-
-                        val text = if (isJson) {
-                            jsonPretty.encodeToString(data)
-                        } else {
-                            val mode = if (dryRun) "dry-run" else "applied"
-                            val header = "[Remediation] project=$project mode=$mode violations=$total boost003=$bCount layer_inversions=$lCount verified=$vCount applied=$aCount"
-                            val details = if (prescriptions.isNotEmpty() && (filterPaths.isNotEmpty() || prescriptions.size <= 5)) {
-                                val lines = mutableListOf<String>()
-                                for (p in prescriptions.take(5)) {
-                                    val obj = p.jsonObject
-                                    val f = obj["file_path"]?.jsonPrimitive?.content ?: ""
-                                    val r = obj["rule_id"]?.jsonPrimitive?.content ?: ""
-                                    val s = obj["fix_strategy"]?.jsonPrimitive?.content ?: ""
-                                    val v = obj["verified"]?.jsonPrimitive?.booleanOrNull ?: false
-                                    val app = obj["applied"]?.jsonPrimitive?.booleanOrNull ?: false
-                                    lines.add("  - $r: $f [$s, verified=$v, applied=$app]")
-                                    val diff = obj["diff_preview"]?.jsonPrimitive?.contentOrNull
-                                    if (!diff.isNullOrBlank()) {
-                                        lines.add(diff.lines().take(20).joinToString("\n") { "    $it" })
-                                    }
-                                }
-                                "\n" + lines.joinToString("\n")
-                            } else ""
-                            header + details
-                        }
-                        println(truncateSummary(text, isJson))
-                        return if (applyRemediation) {
-                            if (aCount == prescriptions.size || total == 0) 0 else 1
-                        } else {
-                            if (vCount > 0 || total == 0) 0 else 1
-                        }
-                    }
-                    "doctor" -> {
-                        return runGeneralDoctorCommand(
-                            server = server,
-                            project = project,
-                            paths = paths,
-                            target = target,
-                            limit = limit,
-                            apply = applyRemediation,
-                            testCmd = testCmdArg,
-                            threshold = thresholdArg,
-                            split = splitBoost003,
-                            makePrivate = makePrivateBoost003,
-                            isJson = isJson
-                        )
-                    }
-                    "dead-code" -> {
-                        val filterPaths = if (paths.isNotEmpty()) paths else (if (target.isNotEmpty()) listOf(target) else emptyList())
-                        val toolArgs = buildJsonObject {
-                            put("action", "dead_code")
-                            put("project", project)
-                            if (filterPaths.isNotEmpty()) {
-                                putJsonArray("targets") { filterPaths.forEach { add(it) } }
-                            }
-                        }
-                        val res = server.callTool("atlas_audit", toolArgs)
-                        val data = loadSpilledData(res)
-                        val count = data["dead_code_count"]?.jsonPrimitive?.intOrNull ?: 0
-                        val names = data["dead_nodes"]?.jsonArray?.mapNotNull { it.jsonObject["name"]?.jsonPrimitive?.content } ?: emptyList()
-                        val text = if (isJson) {
-                            jsonPretty.encodeToString(data)
-                        } else {
-                            "[Dead Code] project=$project dead_symbols=$count top=[${names.take(5).joinToString(", ")}]"
-                        }
-                        println(truncateSummary(text, isJson))
-                        return 0
-                    }
-                    "record-memory" -> {
-                        val targetNode = if (target.isNotEmpty()) target else (if (paths.isNotEmpty()) paths.first() else "")
-                        val toolArgs = buildJsonObject {
-                            put("action", "record_memory")
-                            put("project", project)
-                            putJsonArray("targets") { if (targetNode.isNotEmpty()) add(targetNode) }
-                            if (!outcome.isNullOrBlank()) put("outcome", outcome)
-                            if (!note.isNullOrBlank()) put("note", note)
-                        }
-                        val res = server.callTool("atlas_audit", toolArgs)
-                        val text = if (isJson) {
-                            jsonPretty.encodeToString(res)
-                        } else {
-                            val annId = res["annotation_id"]?.jsonPrimitive?.content ?: "unknown"
-                            val nId = res["node_id"]?.jsonPrimitive?.content ?: targetNode
-                            val out = res["outcome"]?.jsonPrimitive?.content ?: (outcome ?: "useful")
-                            "[Atlas Memory] Recorded outcome=$out node=$nId id=$annId"
-                        }
-                        println(truncateSummary(text, isJson))
-                        return 0
-                    }
-                    "verify-remediation" -> {
-                        val filePath = if (paths.isNotEmpty()) paths.first() else (if (target.isNotEmpty()) target else (fileKey ?: ""))
-                        val toolArgs = buildJsonObject {
-                            put("action", "verify_remediation")
-                            put("project", project)
-                            put("file_path", filePath)
-                            put("before_snippet", beforeSnippet ?: "")
-                            put("after_snippet", afterSnippet ?: "")
-                            if (!ruleIdArg.isNullOrBlank()) put("rule_id", ruleIdArg)
-                            if (!targetNodeArg.isNullOrBlank()) put("target_node_id", targetNodeArg)
-                            if (!testCmdArg.isNullOrBlank()) put("test_command", testCmdArg)
-                            put("dry_run", !applyRemediation)
-                        }
-                        val res = server.callTool("atlas_audit", toolArgs)
-                        val data = loadSpilledData(res)
-                        val valid = data["valid"]?.jsonPrimitive?.booleanOrNull ?: false
-                        val phase = data["phase"]?.jsonPrimitive?.content ?: "UNKNOWN"
-                        val msg = data["message"]?.jsonPrimitive?.content ?: ""
-                        val text = if (isJson) {
-                            jsonPretty.encodeToString(data)
-                        } else {
-                            "[Remediation Verification] valid=$valid phase=$phase file=$filePath message=\"$msg\""
-                        }
-                        println(truncateSummary(text, isJson))
-                        return if (valid) 0 else 1
-                    }
-                    "query" -> {
-                        if (action == "explore") {
-                            val queryText = if (target.isNotEmpty()) target else paths.joinToString(" ")
-                            val toolArgs = buildJsonObject {
-                                put("action", "explore")
-                                put("project", project)
-                                put("target", queryText)
-                                put("limit", limit)
-                            }
-                            val res = server.callTool("atlas_query", toolArgs)
-                            if (isJson) {
-                                println(jsonPretty.encodeToString(res))
-                            } else {
-                                val text = res["text"]?.jsonPrimitive?.contentOrNull ?: jsonPretty.encodeToString(res)
-                                println(text)
-                            }
-                            return 0
-                        }
-                        val toolArgs = buildJsonObject {
-                            put("action", action)
-                            put("project", project)
-                            put("target", target)
-                            put("depth", depth)
-                            if (secondaryTarget.isNotEmpty()) put("secondary_target", secondaryTarget)
-                            if (includeSource) put("include_source", true)
-                            if (!outcome.isNullOrBlank()) put("outcome", outcome)
-                            if (!note.isNullOrBlank()) put("note", note)
-                        }
-                        val res = server.callTool("atlas_query", toolArgs)
-                        val data = if (isJson) loadSpilledData(res) else res
-                        if (isJson) {
-                            println(jsonPretty.encodeToString(data))
-                        } else {
-                            val compact = jsonCompact.encodeToString(data)
-                            println(truncateSummary(compact, false))
-                        }
-                        return 0
-                    }
-                    "init" -> {
-                        return runInitCommand(
-                            workspace = workspace,
-                            project = project,
-                            hookType = hookTypeArg,
-                            force = forceFlag,
-                            threshold = thresholdArg ?: 15,
-                            dryRun = isDryRun,
-                            isJson = isJson
-                        )
-                    }
-                    "version" -> {
-                        if (isJson) {
-                            println(jsonPretty.encodeToString(buildJsonObject {
-                                put("name", "atlas")
-                                put("version", VERSION)
-                            }))
-                        } else {
-                            println("atlas $VERSION")
-                        }
-                        return 0
-                    }
-                    else -> {
-                        println("Unknown command: $command")
-                        printHelp()
-                        return 1
-                    }
-                }
+            return try {
+                dispatchCommand(server, args)
             } finally {
                 server.close()
+            }
+        }
+
+        private fun isVersionCheck(argv: Array<String>): Boolean {
+            if (argv.contains("--version") || argv.contains("-v") || (argv.isNotEmpty() && argv[0] == "version")) return true
+            return argv.size >= 2 && (argv[0] == "figma" || argv[0] == "compose") && (argv[1] == "version" || argv[1] == "--version" || argv[1] == "-v")
+        }
+
+        private fun printVersion(argv: Array<String>): Int {
+            val isJson = argv.contains("--json")
+            if (isJson) {
+                println(jsonPretty.encodeToString(buildJsonObject {
+                    put("name", "atlas")
+                    put("version", VERSION)
+                }))
+            } else {
+                println("atlas $VERSION")
+            }
+            return 0
+        }
+
+        private fun isHelpCheck(argv: Array<String>): Boolean {
+            if (argv.isEmpty() || argv.contains("--help") || argv.contains("-h")) return true
+            return argv.size == 1 && (argv[0] == "figma" || argv[0] == "compose" || argv[0] == "complexity" || argv[0] == "help")
+        }
+
+        private fun isComplexityDoctor(args: CliArgs): Boolean {
+            if (args.command == "doctor" && args.isComplexityFlag) return true
+            return args.subsystem == "complexity" && args.command == "doctor"
+        }
+
+        private fun isComplexityAudit(args: CliArgs): Boolean {
+            if (args.command == "audit" && args.isComplexityFlag) return true
+            return args.subsystem == "complexity" && args.command == "audit"
+        }
+
+        private fun isComplexityQuery(args: CliArgs): Boolean {
+            if (args.command != "query") return false
+            return args.action == "complexity" || args.isComplexityFlag || args.subsystem == "complexity"
+        }
+
+        private fun dispatchCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val specialCode = dispatchSpecialCommand(server, args)
+            if (specialCode != null) return specialCode
+            return dispatchStandardCommand(server, args)
+        }
+
+        private fun dispatchSpecialCommand(server: AtlasMcpServer, args: CliArgs): Int? {
+            if (args.subsystem == "figma") return dispatchFigma(server, args)
+            if (args.isComplexityFlag || args.subsystem == "complexity") return dispatchComplexity(server, args)
+            if (isComposeDispatch(args)) return dispatchCompose(server, args)
+            return null
+        }
+
+        private fun dispatchFigma(server: AtlasMcpServer, args: CliArgs): Int {
+            return runFigmaCommand(
+                server = server,
+                command = args.command,
+                project = args.project,
+                fileKeyArg = args.fileKey,
+                snapshotPath = args.snapshotPath,
+                tokensPath = args.tokensPath,
+                isStdin = args.isStdin,
+                action = args.action,
+                target = args.target,
+                secondaryTarget = args.secondaryTarget,
+                depth = args.depth,
+                boundsArg = args.boundsArg,
+                seeds = args.seeds,
+                isJson = args.isJson
+            )
+        }
+
+        private fun dispatchComplexity(server: AtlasMcpServer, args: CliArgs): Int {
+            if (isComplexityDoctor(args)) {
+                return runComplexityDoctorCommand(
+                    server = server,
+                    project = args.project,
+                    target = args.target,
+                    limit = args.limit,
+                    apply = args.applyRemediation,
+                    testCmd = args.testCmdArg,
+                    threshold = args.thresholdArg,
+                    isJson = args.isJson
+                )
+            }
+            if (isComplexityAudit(args)) {
+                return runComplexityAuditCommand(
+                    server = server,
+                    project = args.project,
+                    paths = args.paths,
+                    target = args.target,
+                    threshold = args.thresholdArg,
+                    maxCyclomatic = args.maxCyclomaticArg,
+                    ratchet = args.ratchetArg,
+                    highRatchet = args.highRatchetArg,
+                    baseline = args.baselineArg,
+                    saveBaseline = args.saveBaseline,
+                    saveBaselinePath = args.saveBaselinePath,
+                    workspaceRoot = args.workspace,
+                    isJson = args.isJson
+                )
+            }
+            return runComplexityQueryCommand(
+                server = server,
+                project = args.project,
+                target = args.target,
+                threshold = args.thresholdArg,
+                limit = args.limit,
+                isJson = args.isJson
+            )
+        }
+
+        private fun dispatchCompose(server: AtlasMcpServer, args: CliArgs): Int {
+            val effCmd = if (args.command == "audit" && args.isComposeAuditFlag) "audit" else args.command
+            return runComposeCommand(
+                server = server,
+                command = effCmd,
+                project = args.project,
+                action = if (args.action == "search") "summary" else args.action,
+                target = args.target,
+                paths = args.paths,
+                seeds = args.seeds,
+                depth = args.depth,
+                limit = args.limit,
+                stabilityConfigPath = args.stabilityConfigPath,
+                compilerReportsDir = args.compilerReportsDir,
+                traceLogPath = args.traceLogPath,
+                strongSkipping = args.strongSkipping,
+                isJson = args.isJson,
+                applyRemediation = args.applyRemediation,
+                ruleIdArg = args.ruleIdArg,
+                testCmdArg = args.testCmdArg
+            )
+        }
+
+        private fun isComposeDispatch(args: CliArgs): Boolean {
+            return args.subsystem == "compose" ||
+                (args.command == "query" && args.action in setOf("summary", "cascade", "blame", "compose_summary", "compose_cascade", "compose_blame")) ||
+                (args.command == "audit" && args.isComposeAuditFlag) ||
+                (args.command == "doctor" && (args.subsystem == "compose" || args.isComposeAuditFlag))
+        }
+
+        private val CODEGRAPH_INSPECTION_COMMANDS = setOf(
+            "explore", "callers", "callees", "impact", "status", "files", "search", "node", "context", "index", "synthesize-scope"
+        )
+        private val CODEGRAPH_REMEDIATION_COMMANDS = setOf(
+            "audit", "fix", "doctor", "dead-code", "record-memory", "verify-remediation", "query"
+        )
+
+        private fun dispatchStandardCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            if (args.command in CODEGRAPH_INSPECTION_COMMANDS) {
+                return dispatchInspectionCommand(server, args)
+            }
+            if (args.command in CODEGRAPH_REMEDIATION_COMMANDS) {
+                return dispatchRemediationCommand(server, args)
+            }
+            return dispatchLifecycleCommand(server, args)
+        }
+
+        private fun dispatchInspectionCommand(server: AtlasMcpServer, args: CliArgs): Int = when (args.command) {
+            "explore", "callers", "callees", "impact", "status", "files", "search", "node" -> runCodegraphCommand(server, args)
+            "context" -> runContextCommand(server, args)
+            "index" -> runIndexCommand(server, args)
+            "synthesize-scope" -> runSynthesizeScopeCommand(server, args)
+            else -> 1
+        }
+
+        private fun dispatchRemediationCommand(server: AtlasMcpServer, args: CliArgs): Int = when (args.command) {
+            "audit" -> runAuditCommand(server, args)
+            "fix" -> runFixCommand(server, args)
+            "doctor" -> runGeneralDoctorCommand(
+                server = server,
+                project = args.project,
+                paths = args.paths,
+                target = args.target,
+                limit = args.limit,
+                apply = args.applyRemediation,
+                testCmd = args.testCmdArg,
+                threshold = args.thresholdArg,
+                split = args.splitBoost003,
+                makePrivate = args.makePrivateBoost003,
+                isJson = args.isJson
+            )
+            "dead-code" -> runDeadCodeCommand(server, args)
+            "record-memory" -> runRecordMemoryCommand(server, args)
+            "verify-remediation" -> runVerifyRemediationCommand(server, args)
+            "query" -> runQueryCommand(server, args)
+            else -> 1
+        }
+
+        private fun dispatchLifecycleCommand(server: AtlasMcpServer, args: CliArgs): Int = when (args.command) {
+            "migrate-tools" -> runMigrateToolsCommand(server, args.paths, args.target, args.applyRemediation, args.isJson)
+            "serve-mcp" -> { server.serveStdio(); 0 }
+            "init" -> runInitCommand(
+                workspace = args.workspace,
+                project = args.project,
+                hookType = args.hookTypeArg,
+                force = args.forceFlag,
+                threshold = args.thresholdArg ?: 15,
+                dryRun = args.isDryRun,
+                isJson = args.isJson
+            )
+            "version" -> printVersion(if (args.isJson) arrayOf("--json") else emptyArray())
+            else -> {
+                println("Unknown command: ${args.command}")
+                printHelp()
+                1
+            }
+        }
+
+        private fun runCodegraphCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val effectiveServer = server.resolveServerForProject(args.project, args.workspace)
+            val res = queryCodegraphEngine(effectiveServer, args)
+            val text = if (args.isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+            println(text)
+            return 0
+        }
+
+        private fun queryCodegraphEngine(effectiveServer: AtlasMcpServer, args: CliArgs): JsonObject = when (args.command) {
+            "explore" -> effectiveServer.codegraphEngine.explore(args.project, getQueryText(args), maxFiles = args.limit)
+            "callers" -> effectiveServer.codegraphEngine.callers(args.project, args.target, file = args.fileKey, limit = args.limit)
+            "callees" -> effectiveServer.codegraphEngine.callees(args.project, args.target, file = args.fileKey, limit = args.limit)
+            "impact" -> effectiveServer.codegraphEngine.impact(args.project, args.target, file = args.fileKey, depth = args.depth)
+            "status" -> effectiveServer.codegraphEngine.status(args.project)
+            "files" -> effectiveServer.codegraphEngine.files(args.project, path = args.paths.firstOrNull(), pattern = args.target.ifEmpty { null })
+            "search" -> effectiveServer.codegraphEngine.search(args.project, getQueryText(args), limit = args.limit)
+            "node" -> effectiveServer.codegraphEngine.node(args.project, symbol = args.target.ifEmpty { null }, file = args.fileKey, includeCode = args.includeSource)
+            else -> JsonObject(emptyMap())
+        }
+
+        private fun getQueryText(args: CliArgs): String =
+            if (args.target.isNotEmpty()) args.target else args.paths.joinToString(" ")
+
+        private fun runContextCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val effectiveServer = server.resolveServerForProject(args.project, args.workspace)
+            val targetsList = if (args.seeds.isNotEmpty()) args.seeds else (if (args.paths.isNotEmpty()) args.paths else (if (args.target.isNotEmpty()) listOf(args.target) else emptyList()))
+            val res = effectiveServer.architectContextEngine.synthesizeContext(
+                projectId = args.project,
+                seedTargets = targetsList,
+                depth = args.depth
+            )
+            val text = if (args.isJson) jsonPretty.encodeToString(res) else res.inlineMarkdown
+            println(text)
+            return 0
+        }
+
+        private fun runIndexCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val effectiveServer = server.resolveServerForProject(args.project)
+            val expandedPaths = args.paths.map { resolveUserHome(it) }
+            val res = effectiveServer.indexWorkspace(args.project, subpaths = if (expandedPaths.isNotEmpty()) expandedPaths else null, force = args.forceIndex)
+            val text = if (args.isJson) jsonPretty.encodeToString(res) else formatIndexSummary(args.project, res)
+            println(truncateSummary(text, args.isJson))
+            return 0
+        }
+
+        private fun resolveUserHome(path: String): String =
+            if (path.startsWith("~")) path.replaceFirst("~", PlatformFiles.userHome()) else path
+
+        private fun formatIndexSummary(project: String, res: JsonObject): String {
+            val fTotal = res["files"]?.jsonPrimitive?.intOrNull ?: 0
+            val fIdx = res["files_indexed"]?.jsonPrimitive?.intOrNull ?: 0
+            val fSkip = res["files_skipped"]?.jsonPrimitive?.intOrNull ?: 0
+            val nTotal = res["nodes"]?.jsonPrimitive?.intOrNull ?: 0
+            val eTotal = res["edges"]?.jsonPrimitive?.intOrNull ?: 0
+            return "[Atlas] project=$project files=$fTotal (indexed=$fIdx, skipped=$fSkip) nodes=$nTotal edges=$eTotal"
+        }
+
+        private fun runSynthesizeScopeCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val seedList = if (args.paths.isNotEmpty()) args.paths else (if (args.target.isNotEmpty()) listOf(args.target) else emptyList())
+            val toolArgs = buildJsonObject {
+                put("action", "synthesize_3d_scope")
+                put("project", args.project)
+                putJsonArray("targets") { seedList.forEach { add(it) } }
+            }
+            val res = server.callTool("atlas_audit", toolArgs)
+            val data = loadSpilledData(res)
+            val text = formatSynthesizeScopeOutput(data, args.project, seedList, args.isJson)
+            println(truncateSummary(text, args.isJson))
+            return 0
+        }
+
+        private fun formatSynthesizeScopeOutput(data: JsonObject, project: String, seedList: List<String>, isJson: Boolean): String {
+            if (isJson) return jsonPretty.encodeToString(data)
+            val fCount = (data["files"] ?: data["files_count"])?.jsonArray?.size ?: 0
+            val mods = extractAuditStringList(data, "modules", "impacted_modules")
+            val arch = extractAuditStringList(data, "architecture", "impacted_layers")
+            val collisions = extractAuditStringList(data, "colliding_plans", "collidingPlans")
+            return "[3D Scope] project=$project seeds=$seedList files=$fCount modules=$mods arch=$arch collisions=$collisions"
+        }
+
+        private fun extractAuditStringList(data: JsonObject, key1: String, key2: String): List<String> {
+            val element = data[key1] ?: data[key2]
+            return element?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+        }
+
+        private fun runAuditCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val filterPaths = if (args.paths.isNotEmpty()) args.paths else (if (args.target.isNotEmpty()) listOf(args.target) else emptyList())
+            if (args.legacyToolsFlag) {
+                return runAuditLegacyTools(server, filterPaths, args.isJson)
+            }
+            if (args.action == "architect_context" || args.action == "architect-context") {
+                return runAuditArchitectContext(server, args.project, filterPaths, args.depth, args.isJson)
+            }
+            return runAuditArchitecture(server, args.project, filterPaths, args.descriptionMode, args.outcome, args.note, args.isJson)
+        }
+
+        private fun runAuditLegacyTools(server: AtlasMcpServer, filterPaths: List<String>, isJson: Boolean): Int {
+            val scanPaths = if (filterPaths.isNotEmpty()) filterPaths else listOf(server.workspaceRoot)
+            val report = ToolMigrationEngine.scanAndMigrate(scanPaths, apply = false)
+            if (isJson) {
+                println(jsonPretty.encodeToString(report))
+            } else {
+                val passed = report.totalOccurrences == 0
+                val sample = if (report.matches.isNotEmpty()) {
+                    val s = report.matches.take(5).joinToString("; ") { "${it.legacyTool} in ${it.file}:${it.line}" }
+                    " top=[$s]"
+                } else ""
+                val text = "[Audit Legacy Tools] passed=$passed occurrences=${report.totalOccurrences} files=${report.filesAffected}$sample"
+                println(truncateSummary(text, false))
+            }
+            return if (report.totalOccurrences == 0) 0 else 1
+        }
+
+        private fun runAuditArchitectContext(server: AtlasMcpServer, project: String, filterPaths: List<String>, depth: Int, isJson: Boolean): Int {
+            val toolArgs = buildJsonObject {
+                put("action", "architect_context")
+                put("project", project)
+                if (filterPaths.isNotEmpty()) {
+                    putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                }
+                put("depth", depth)
+            }
+            val res = server.callTool("atlas_audit", toolArgs)
+            if (isJson) {
+                println(jsonPretty.encodeToString(res))
+            } else {
+                val md = res["inlineMarkdown"]?.jsonPrimitive?.contentOrNull
+                    ?: res["inline_markdown"]?.jsonPrimitive?.contentOrNull
+                    ?: jsonPretty.encodeToString(res)
+                println(md)
+            }
+            return 0
+        }
+
+        private fun extractAuditArraySize(data: JsonObject, key1: String, key2: String): Int {
+            val arr = data[key1]?.jsonArray ?: data[key2]?.jsonArray
+            return arr?.size ?: 0
+        }
+
+        private fun isArchitectureAuditPassed(data: JsonObject, bViolations: Int, lInversions: Int, pCollisions: Int, cViolations: Int): Boolean {
+            val explicit = data["passed"]?.jsonPrimitive?.booleanOrNull
+            if (explicit != null) return explicit
+            return bViolations == 0 && lInversions == 0 && pCollisions == 0 && cViolations == 0
+        }
+
+        private fun runAuditArchitecture(
+            server: AtlasMcpServer,
+            project: String,
+            filterPaths: List<String>,
+            descriptionMode: String?,
+            outcome: String?,
+            note: String?,
+            isJson: Boolean
+        ): Int {
+            val toolArgs = buildJsonObject {
+                put("action", "verify_architecture")
+                put("project", project)
+                if (filterPaths.isNotEmpty()) {
+                    putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                }
+                if (!descriptionMode.isNullOrBlank()) {
+                    put("description_mode", descriptionMode)
+                }
+                if (!outcome.isNullOrBlank()) put("outcome", outcome)
+                if (!note.isNullOrBlank()) put("note", note)
+            }
+            val res = server.callTool("atlas_audit", toolArgs)
+            val data = loadSpilledData(res)
+            val bViolations = extractAuditArraySize(data, "single_declaration_violations", "singleDeclarationViolations")
+            val lInversions = extractAuditArraySize(data, "layer_inversions", "layerInversions")
+            val pCollisions = extractAuditArraySize(data, "plan_3d_collisions", "plan3dCollisions")
+            val dSuggestions = extractAuditArraySize(data, "description_suggestions", "descriptionSuggestions")
+            val cViolations = extractAuditArraySize(data, "complexity_violations", "complexityViolations")
+            val passed = isArchitectureAuditPassed(data, bViolations, lInversions, pCollisions, cViolations)
+            val text = if (isJson) {
+                jsonPretty.encodeToString(data)
+            } else {
+                "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions complexity_violations=$cViolations description_suggestions=$dSuggestions"
+            }
+            println(truncateSummary(text, isJson))
+            return if (passed) 0 else 1
+        }
+
+        private fun runFixCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val filterPaths = if (args.paths.isNotEmpty()) args.paths else (if (args.target.isNotEmpty()) listOf(args.target) else emptyList())
+            if (args.legacyToolsFlag || args.ruleIdArg == "LEGACY-TOOLS" || args.ruleIdArg == "MIGRATE-TOOLS") {
+                return runFixLegacyTools(server, filterPaths, args.applyRemediation, args.isJson)
+            }
+            return runFixArchitecture(server, args, filterPaths)
+        }
+
+        private fun runFixLegacyTools(server: AtlasMcpServer, filterPaths: List<String>, applyRemediation: Boolean, isJson: Boolean): Int {
+            val scanPaths = if (filterPaths.isNotEmpty()) filterPaths else listOf(server.workspaceRoot)
+            val report = ToolMigrationEngine.scanAndMigrate(scanPaths, apply = applyRemediation)
+            renderFixLegacyToolsOutput(report, applyRemediation, isJson)
+            return if (applyRemediation || report.totalOccurrences == 0) 0 else 1
+        }
+
+        private fun renderFixLegacyToolsOutput(report: ToolMigrationEngine.MigrationReport, applyRemediation: Boolean, isJson: Boolean) {
+            if (isJson) {
+                println(jsonPretty.encodeToString(report))
+                return
+            }
+            val mode = if (applyRemediation) "applied" else "dry-run"
+            val sample = formatLegacyToolSample(report.matches)
+            val text = "[Fix Legacy Tools] mode=$mode occurrences=${report.totalOccurrences} files=${report.filesAffected}$sample"
+            println(truncateSummary(text, false))
+        }
+
+        private fun formatLegacyToolSample(matches: List<ToolMigrationEngine.MigrationMatch>): String {
+            if (matches.isEmpty()) return ""
+            val s = matches.take(5).joinToString("; ") { "${it.legacyTool} in ${it.file}:${it.line}" }
+            return " top=[$s]"
+        }
+
+        private fun extractIntField(data: JsonObject, key: String): Int =
+            data[key]?.jsonPrimitive?.intOrNull ?: 0
+
+        private fun isRemediationSuccess(apply: Boolean, aCount: Int, vCount: Int, total: Int, prescriptionCount: Int): Boolean {
+            if (total == 0) return true
+            return if (apply) aCount == prescriptionCount else vCount > 0
+        }
+
+        private fun runFixArchitecture(server: AtlasMcpServer, args: CliArgs, filterPaths: List<String>): Int {
+            val toolArgs = buildFixArchitectureArgs(args, filterPaths)
+            val res = server.callTool("atlas_audit", toolArgs)
+            val data = loadSpilledData(res)
+            val total = extractIntField(data, "total_violations")
+            val bCount = extractIntField(data, "boost003_count")
+            val lCount = extractIntField(data, "layer_inversion_count")
+            val vCount = extractIntField(data, "verified_count")
+            val aCount = extractIntField(data, "applied_count")
+            val dryRun = data["dry_run"]?.jsonPrimitive?.booleanOrNull ?: (!args.applyRemediation)
+            val prescriptions = data["prescriptions"]?.jsonArray ?: emptyList()
+
+            if (args.applyRemediation && aCount > 0) {
+                reindexFixPrescriptions(server, args.project, filterPaths, prescriptions)
+            }
+
+            val text = formatFixArchitectureText(data, args.project, dryRun, total, bCount, lCount, vCount, aCount, filterPaths, prescriptions, args.isJson)
+            println(truncateSummary(text, args.isJson))
+            return if (isRemediationSuccess(args.applyRemediation, aCount, vCount, total, prescriptions.size)) 0 else 1
+        }
+
+        private fun buildFixArchitectureArgs(args: CliArgs, filterPaths: List<String>): JsonObject = buildJsonObject {
+            put("action", "remedy_architecture")
+            put("project", args.project)
+            if (filterPaths.isNotEmpty()) {
+                putJsonArray("targets") { filterPaths.forEach { add(it) } }
+            }
+            if (!args.ruleIdArg.isNullOrBlank()) put("rule_id", args.ruleIdArg)
+            put("dry_run", !args.applyRemediation)
+            put("split", args.splitBoost003)
+            put("make_private", args.makePrivateBoost003)
+            if (!args.testCmdArg.isNullOrBlank()) put("test_command", args.testCmdArg)
+            put("limit", args.limit)
+        }
+
+        private fun formatFixArchitectureText(
+            data: JsonObject,
+            project: String,
+            dryRun: Boolean,
+            total: Int,
+            bCount: Int,
+            lCount: Int,
+            vCount: Int,
+            aCount: Int,
+            filterPaths: List<String>,
+            prescriptions: List<JsonElement>,
+            isJson: Boolean
+        ): String {
+            if (isJson) return jsonPretty.encodeToString(data)
+            val mode = if (dryRun) "dry-run" else "applied"
+            val header = "[Remediation] project=$project mode=$mode violations=$total boost003=$bCount layer_inversions=$lCount verified=$vCount applied=$aCount"
+            val details = formatFixPrescriptionsDetails(filterPaths, prescriptions)
+            return header + details
+        }
+
+        private fun reindexFixPrescriptions(server: AtlasMcpServer, project: String, filterPaths: List<String>, prescriptions: List<JsonElement>) {
+            val reindexPaths = mutableListOf<String>()
+            if (filterPaths.isNotEmpty()) {
+                reindexPaths.addAll(filterPaths)
+            }
+            for (p in prescriptions) {
+                val f = p.jsonObject["file_path"]?.jsonPrimitive?.content ?: continue
+                reindexPaths.add(f)
+                val sfArray = p.jsonObject["spawned_files"]?.jsonArray ?: emptyList()
+                for (sf in sfArray) {
+                    val spRel = sf.jsonObject["rel_path"]?.jsonPrimitive?.content ?: continue
+                    reindexPaths.add(spRel)
+                }
+            }
+            server.indexWorkspace(project, subpaths = if (reindexPaths.isNotEmpty()) reindexPaths.distinct() else null, force = true)
+        }
+
+        private fun formatSinglePrescriptionLine(p: JsonElement): String {
+            val obj = p.jsonObject
+            val f = obj["file_path"]?.jsonPrimitive?.content ?: ""
+            val r = obj["rule_id"]?.jsonPrimitive?.content ?: ""
+            val s = obj["fix_strategy"]?.jsonPrimitive?.content ?: ""
+            val v = obj["verified"]?.jsonPrimitive?.booleanOrNull ?: false
+            val app = obj["applied"]?.jsonPrimitive?.booleanOrNull ?: false
+            val line = "  - $r: $f [$s, verified=$v, applied=$app]"
+            val diff = obj["diff_preview"]?.jsonPrimitive?.contentOrNull
+            if (diff.isNullOrBlank()) return line
+            val preview = diff.lines().take(20).joinToString("\n") { "    $it" }
+            return "$line\n$preview"
+        }
+
+        private fun formatFixPrescriptionsDetails(filterPaths: List<String>, prescriptions: List<JsonElement>): String {
+            if (prescriptions.isEmpty() || (filterPaths.isEmpty() && prescriptions.size > 5)) return ""
+            val lines = prescriptions.take(5).map { formatSinglePrescriptionLine(it) }
+            return "\n" + lines.joinToString("\n")
+        }
+
+        private fun runDeadCodeCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val filterPaths = if (args.paths.isNotEmpty()) args.paths else (if (args.target.isNotEmpty()) listOf(args.target) else emptyList())
+            val toolArgs = buildJsonObject {
+                put("action", "dead_code")
+                put("project", args.project)
+                if (filterPaths.isNotEmpty()) {
+                    putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                }
+            }
+            val res = server.callTool("atlas_audit", toolArgs)
+            val data = loadSpilledData(res)
+            val count = data["dead_code_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val names = data["dead_nodes"]?.jsonArray?.mapNotNull { it.jsonObject["name"]?.jsonPrimitive?.content } ?: emptyList()
+            val text = if (args.isJson) {
+                jsonPretty.encodeToString(data)
+            } else {
+                "[Dead Code] project=${args.project} dead_symbols=$count top=[${names.take(5).joinToString(", ")}]"
+            }
+            println(truncateSummary(text, args.isJson))
+            return 0
+        }
+
+        private fun runRecordMemoryCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val targetNode = args.target.ifEmpty { args.paths.firstOrNull() ?: "" }
+            val toolArgs = buildRecordMemoryArgs(args, targetNode)
+            val res = server.callTool("atlas_audit", toolArgs)
+            val text = formatRecordMemoryOutput(res, args.outcome, targetNode, args.isJson)
+            println(truncateSummary(text, args.isJson))
+            return 0
+        }
+
+        private fun buildRecordMemoryArgs(args: CliArgs, targetNode: String): JsonObject = buildJsonObject {
+            put("action", "record_memory")
+            put("project", args.project)
+            putJsonArray("targets") { if (targetNode.isNotEmpty()) add(targetNode) }
+            if (!args.outcome.isNullOrBlank()) put("outcome", args.outcome)
+            if (!args.note.isNullOrBlank()) put("note", args.note)
+        }
+
+        private fun formatRecordMemoryOutput(res: JsonObject, outcome: String?, targetNode: String, isJson: Boolean): String {
+            if (isJson) return jsonPretty.encodeToString(res)
+            val annId = res["annotation_id"]?.jsonPrimitive?.content ?: "unknown"
+            val nId = res["node_id"]?.jsonPrimitive?.content ?: targetNode
+            val out = res["outcome"]?.jsonPrimitive?.content ?: (outcome ?: "useful")
+            return "[Atlas Memory] Recorded outcome=$out node=$nId id=$annId"
+        }
+
+        private fun runVerifyRemediationCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val filePath = resolveVerifyFilePath(args)
+            val toolArgs = buildVerifyRemediationArgs(args, filePath)
+            val res = server.callTool("atlas_audit", toolArgs)
+            val data = loadSpilledData(res)
+            val valid = data["valid"]?.jsonPrimitive?.booleanOrNull ?: false
+            val text = formatVerifyRemediationOutput(data, filePath, valid, args.isJson)
+            println(truncateSummary(text, args.isJson))
+            return if (valid) 0 else 1
+        }
+
+        private fun resolveVerifyFilePath(args: CliArgs): String {
+            if (args.paths.isNotEmpty()) return args.paths.first()
+            if (args.target.isNotEmpty()) return args.target
+            return args.fileKey ?: ""
+        }
+
+        private fun buildVerifyRemediationArgs(args: CliArgs, filePath: String): JsonObject = buildJsonObject {
+            put("action", "verify_remediation")
+            put("project", args.project)
+            put("file_path", filePath)
+            put("before_snippet", args.beforeSnippet ?: "")
+            put("after_snippet", args.afterSnippet ?: "")
+            if (!args.ruleIdArg.isNullOrBlank()) put("rule_id", args.ruleIdArg)
+            if (!args.targetNodeArg.isNullOrBlank()) put("target_node_id", args.targetNodeArg)
+            if (!args.testCmdArg.isNullOrBlank()) put("test_command", args.testCmdArg)
+            put("dry_run", !args.applyRemediation)
+        }
+
+        private fun formatVerifyRemediationOutput(data: JsonObject, filePath: String, valid: Boolean, isJson: Boolean): String {
+            if (isJson) return jsonPretty.encodeToString(data)
+            val phase = data["phase"]?.jsonPrimitive?.content ?: "UNKNOWN"
+            val msg = data["message"]?.jsonPrimitive?.content ?: ""
+            return "[Remediation Verification] valid=$valid phase=$phase file=$filePath message=\"$msg\""
+        }
+
+        private fun runQueryCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            if (args.action == "explore") {
+                return runExploreQuery(server, args)
+            }
+            return runStandardQuery(server, args)
+        }
+
+        private fun runExploreQuery(server: AtlasMcpServer, args: CliArgs): Int {
+            val queryText = if (args.target.isNotEmpty()) args.target else args.paths.joinToString(" ")
+            val toolArgs = buildJsonObject {
+                put("action", "explore")
+                put("project", args.project)
+                put("target", queryText)
+                put("limit", args.limit)
+            }
+            val res = server.callTool("atlas_query", toolArgs)
+            if (args.isJson) {
+                println(jsonPretty.encodeToString(res))
+            } else {
+                val text = res["text"]?.jsonPrimitive?.contentOrNull ?: jsonPretty.encodeToString(res)
+                println(text)
+            }
+            return 0
+        }
+
+        private fun runStandardQuery(server: AtlasMcpServer, args: CliArgs): Int {
+            val toolArgs = buildStandardQueryArgs(args)
+            val res = server.callTool("atlas_query", toolArgs)
+            val data = if (args.isJson) loadSpilledData(res) else res
+            printStandardQueryResult(data, args.isJson)
+            return 0
+        }
+
+        private fun buildStandardQueryArgs(args: CliArgs): JsonObject = buildJsonObject {
+            put("action", args.action)
+            put("project", args.project)
+            put("target", args.target)
+            put("depth", args.depth)
+            if (args.secondaryTarget.isNotEmpty()) put("secondary_target", args.secondaryTarget)
+            if (args.includeSource) put("include_source", true)
+            if (!args.outcome.isNullOrBlank()) put("outcome", args.outcome)
+            if (!args.note.isNullOrBlank()) put("note", args.note)
+        }
+
+        private fun printStandardQueryResult(data: JsonObject, isJson: Boolean) {
+            if (isJson) {
+                println(jsonPretty.encodeToString(data))
+            } else {
+                val compact = jsonCompact.encodeToString(data)
+                println(truncateSummary(compact, false))
             }
         }
 
