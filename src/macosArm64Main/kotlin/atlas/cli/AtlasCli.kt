@@ -1060,6 +1060,312 @@ class AtlasCli {
             }
         }
 
+        private fun renderComposeIndexOutput(res: JsonObject, project: String, isJson: Boolean) {
+            if (isJson) {
+                println(jsonPretty.encodeToString(res))
+                return
+            }
+            val cTotal = res["compose_nodes"]?.jsonPrimitive?.intOrNull ?: 0
+            val cSkip = res["skippable_composables"]?.jsonPrimitive?.intOrNull ?: 0
+            val compUp = res["compiler_upgraded"]?.jsonPrimitive?.intOrNull ?: 0
+            val trCnt = res["trace_records_ingested"]?.jsonPrimitive?.intOrNull ?: 0
+            val text = "[Atlas Compose] project=$project composables=$cTotal skippable=$cSkip compiler_upgraded=$compUp traces=$trCnt"
+            println(truncateSummary(text, false))
+        }
+
+        private fun runComposeIndexSubcommand(
+            server: AtlasMcpServer,
+            project: String,
+            paths: List<String>,
+            stabilityConfigPath: String?,
+            compilerReportsDir: String?,
+            traceLogPath: String?,
+            isJson: Boolean
+        ): Int {
+            val res = server.indexComposeArtifacts(
+                projectId = project,
+                subpaths = if (paths.isNotEmpty()) paths else null,
+                stabilityConfigPath = stabilityConfigPath,
+                compilerReportsDir = compilerReportsDir,
+                traceLogPath = traceLogPath
+            )
+            renderComposeIndexOutput(res, project, isJson)
+            return 0
+        }
+
+        private fun buildComposeQueryArgs(
+            mappedAction: String,
+            project: String,
+            target: String,
+            depth: Int,
+            strongSkipping: Boolean
+        ): JsonObject = buildJsonObject {
+            put("action", mappedAction)
+            put("project", project)
+            if (target.isNotEmpty()) put("target", target)
+            val effDepth = if (depth <= 2) 5 else depth
+            put("depth", effDepth)
+            put("strong_skipping", strongSkipping)
+        }
+
+        private fun renderComposeQueryOutput(
+            data: JsonObject,
+            mappedAction: String,
+            project: String,
+            isJson: Boolean
+        ) {
+            if (isJson) {
+                println(jsonPretty.encodeToString(data))
+                return
+            }
+            val total = data["total_composables"]?.jsonPrimitive?.intOrNull ?: 0
+            val skipCnt = data["skippable_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val skipPct = data["skippable_pct"]?.jsonPrimitive?.doubleOrNull ?: 100.0
+            val unstable = data["unstable_param_total"]?.jsonPrimitive?.intOrNull ?: 0
+            val cascadeSize = data["cascade"]?.jsonArray?.size ?: 0
+            val blameSize = data["blame"]?.jsonArray?.size ?: 0
+            val actionTag = mappedAction.removePrefix("compose_")
+            val text = "[Compose Query: $actionTag] project=$project composables=$total skippable=$skipCnt ($skipPct%) unstable_params=$unstable cascade=$cascadeSize blame=$blameSize"
+            println(truncateSummary(text, false))
+        }
+
+        private fun runComposeQuerySubcommand(
+            server: AtlasMcpServer,
+            project: String,
+            action: String,
+            target: String,
+            depth: Int,
+            strongSkipping: Boolean,
+            isJson: Boolean
+        ): Int {
+            val mappedAction = when (action.lowercase()) {
+                "cascade", "compose_cascade" -> "compose_cascade"
+                "blame", "compose_blame" -> "compose_blame"
+                else -> "compose_summary"
+            }
+            val toolArgs = buildComposeQueryArgs(mappedAction, project, target, depth, strongSkipping)
+            val res = server.callTool("atlas_query", toolArgs)
+            val data = loadSpilledData(res)
+            renderComposeQueryOutput(data, mappedAction, project, isJson)
+            return 0
+        }
+
+        private fun buildComposeAuditArgs(
+            project: String,
+            paths: List<String>,
+            stabilityConfigPath: String?,
+            compilerReportsDir: String?,
+            traceLogPath: String?,
+            strongSkipping: Boolean
+        ): JsonObject = buildJsonObject {
+            put("action", "audit_compose")
+            put("project", project)
+            put("strong_skipping", strongSkipping)
+            if (paths.isNotEmpty()) putJsonArray("targets") { paths.forEach { add(it) } }
+            if (!stabilityConfigPath.isNullOrBlank()) put("stability_config_path", stabilityConfigPath)
+            if (!compilerReportsDir.isNullOrBlank()) put("compiler_reports_dir", compilerReportsDir)
+            if (!traceLogPath.isNullOrBlank()) put("trace_log_path", traceLogPath)
+        }
+
+        private fun renderComposeAuditOutput(
+            data: JsonObject,
+            project: String,
+            strongSkipping: Boolean,
+            isJson: Boolean
+        ): Boolean {
+            val score = data["overall_score"]?.jsonPrimitive?.doubleOrNull ?: 100.0
+            val passed = score >= 80.0
+            val status = data["status"]?.jsonPrimitive?.content ?: (if (passed) "PASS" else "FAIL")
+            val vCount = data["violations"]?.jsonArray?.size ?: 0
+            val totalComp = data["total_composables"]?.jsonPrimitive?.intOrNull ?: 0
+            if (isJson) {
+                println(jsonPretty.encodeToString(data))
+            } else {
+                val text = "[Compose Audit] project=$project status=$status score=$score/100 composables=$totalComp violations=$vCount strong_skipping=$strongSkipping"
+                println(truncateSummary(text, false))
+            }
+            return passed
+        }
+
+        private fun runComposeAuditSubcommand(
+            server: AtlasMcpServer,
+            project: String,
+            paths: List<String>,
+            stabilityConfigPath: String?,
+            compilerReportsDir: String?,
+            traceLogPath: String?,
+            strongSkipping: Boolean,
+            isJson: Boolean
+        ): Int {
+            val toolArgs = buildComposeAuditArgs(project, paths, stabilityConfigPath, compilerReportsDir, traceLogPath, strongSkipping)
+            val res = server.callTool("atlas_audit", toolArgs)
+            val data = loadSpilledData(res)
+            val passed = renderComposeAuditOutput(data, project, strongSkipping, isJson)
+            return if (passed) 0 else 1
+        }
+
+        private fun executeComposeRemediation(
+            server: AtlasMcpServer,
+            project: String,
+            rx: JsonObject,
+            testCmdArg: String?
+        ): Pair<Boolean, JsonObject>? {
+            val rxFilePath = rx["file_path"]?.jsonPrimitive?.content ?: return null
+            val rxBefore = rx["before_snippet"]?.jsonPrimitive?.content ?: return null
+            val rxAfter = rx["after_snippet"]?.jsonPrimitive?.content ?: return null
+            val rxRuleId = rx["rule_id"]?.jsonPrimitive?.content ?: "COMPOSE-REMEDIATION"
+            val rxNodeId = rx["target_node_id"]?.jsonPrimitive?.content
+            val rxWriteSiteSafe = rx["write_site_safe"]?.jsonPrimitive?.booleanOrNull
+
+            val vResult = server.remediationVerifier.verifyAndApply(
+                projectSlug = project,
+                relPath = rxFilePath,
+                beforeSnippet = rxBefore,
+                afterSnippet = rxAfter,
+                ruleId = rxRuleId,
+                targetNodeId = rxNodeId,
+                writeSiteSafe = rxWriteSiteSafe ?: true,
+                dryRun = false,
+                testCommand = testCmdArg
+            )
+            val json = buildJsonObject {
+                put("rule_id", rxRuleId)
+                put("file_path", rxFilePath)
+                if (rxNodeId != null) put("target_node_id", rxNodeId)
+                put("valid", vResult.valid)
+                put("phase", vResult.phase)
+                put("message", vResult.message)
+            }
+            return Pair(vResult.valid, json)
+        }
+
+        private fun renderComposeRemediations(
+            data: JsonObject,
+            results: List<JsonObject>,
+            allPassed: Boolean,
+            project: String,
+            isJson: Boolean
+        ) {
+            if (isJson) {
+                val resObj = buildJsonObject {
+                    data.forEach { (k, v) -> put(k, v) }
+                    putJsonArray("applied_remediations") {
+                        results.forEach { add(it) }
+                    }
+                    put("all_passed", allPassed)
+                }
+                println(jsonPretty.encodeToString(resObj))
+            } else {
+                val attempted = results.size
+                val succeeded = results.count { it["valid"]?.jsonPrimitive?.booleanOrNull == true }
+                val failed = attempted - succeeded
+                val text = "[Compose Doctor: Apply] project=$project attempted=$attempted succeeded=$succeeded failed=$failed"
+                println(truncateSummary(text, false))
+                if (failed > 0) {
+                    results.filter { it["valid"]?.jsonPrimitive?.booleanOrNull != true }.take(3).forEach { f ->
+                        println("  - Failed: ${f["rule_id"]?.jsonPrimitive?.content} in ${f["file_path"]?.jsonPrimitive?.content}: ${f["message"]?.jsonPrimitive?.content}")
+                    }
+                }
+            }
+        }
+
+        private fun applyComposeDoctorRemediations(
+            server: AtlasMcpServer,
+            project: String,
+            data: JsonObject,
+            ruleIdArg: String?,
+            testCmdArg: String?,
+            isJson: Boolean
+        ): Int {
+            val prescriptionsArray = data["prescriptions"]?.jsonArray ?: emptyList()
+            val filteredPrescriptions = if (!ruleIdArg.isNullOrBlank()) {
+                prescriptionsArray.filter { it.jsonObject["rule_id"]?.jsonPrimitive?.content == ruleIdArg }
+            } else {
+                prescriptionsArray
+            }
+
+            val results = mutableListOf<JsonObject>()
+            var allPassed = true
+
+            for (rxJson in filteredPrescriptions) {
+                val outcome = executeComposeRemediation(server, project, rxJson.jsonObject, testCmdArg) ?: continue
+                if (!outcome.first) allPassed = false
+                results.add(outcome.second)
+            }
+
+            renderComposeRemediations(data, results, allPassed, project, isJson)
+            return if (allPassed) 0 else 1
+        }
+
+        private fun runComposeDoctorSubcommand(
+            server: AtlasMcpServer,
+            project: String,
+            target: String,
+            limit: Int,
+            applyRemediation: Boolean,
+            ruleIdArg: String?,
+            testCmdArg: String?,
+            isJson: Boolean
+        ): Int {
+            val toolArgs = buildJsonObject {
+                put("action", "compose_doctor")
+                put("project", project)
+                put("limit", limit)
+                if (target.isNotEmpty()) putJsonArray("targets") { add(target) }
+            }
+            val res = server.callTool("atlas_audit", toolArgs)
+            val data = loadSpilledData(res)
+
+            if (applyRemediation) {
+                return applyComposeDoctorRemediations(server, project, data, ruleIdArg, testCmdArg, isJson)
+            }
+
+            if (isJson) {
+                println(jsonPretty.encodeToString(data))
+            } else {
+                val mode = data["scoring_mode"]?.jsonPrimitive?.content ?: "ESTIMATED"
+                val pCount = data["total_prescriptions"]?.jsonPrimitive?.intOrNull ?: 0
+                val topRule = data["prescriptions"]?.jsonArray?.firstOrNull()?.jsonObject?.get("rule_id")?.jsonPrimitive?.content ?: "NONE"
+                val text = "[Compose Doctor] project=$project mode=$mode prescriptions=$pCount top_rule=$topRule"
+                println(truncateSummary(text, false))
+            }
+            return 0
+        }
+
+        private fun runComposeScopeSubcommand(
+            server: AtlasMcpServer,
+            project: String,
+            seeds: List<String>,
+            paths: List<String>,
+            target: String,
+            isJson: Boolean
+        ): Int {
+            val seedList = when {
+                seeds.isNotEmpty() -> seeds
+                paths.isNotEmpty() -> paths
+                target.isNotEmpty() -> listOf(target)
+                else -> emptyList()
+            }
+            val toolArgs = buildJsonObject {
+                put("action", "synthesize_compose_scope")
+                put("project", project)
+                putJsonArray("targets") { seedList.forEach { add(it) } }
+            }
+            val res = server.callTool("atlas_audit", toolArgs)
+            val data = loadSpilledData(res)
+            if (isJson) {
+                println(jsonPretty.encodeToString(data))
+            } else {
+                val fCnt = data["target_files"]?.jsonArray?.size ?: 0
+                val sModels = data["shared_stable_models"]?.jsonArray?.size ?: 0
+                val cLocals = data["composition_locals"]?.jsonArray?.size ?: 0
+                val safe = data["safe_for_parallel_dispatch"]?.jsonPrimitive?.booleanOrNull ?: true
+                val text = "[Compose 3D Scope] project=$project files=$fCnt shared_models=$sModels locals=$cLocals parallel_safe=$safe"
+                println(truncateSummary(text, false))
+            }
+            return 0
+        }
+
         private fun runComposeCommand(
             server: AtlasMcpServer,
             command: String,
@@ -1080,193 +1386,21 @@ class AtlasCli {
             testCmdArg: String? = null
         ): Int {
             when (command) {
-                "index" -> {
-                    val res = server.indexComposeArtifacts(
-                        projectId = project,
-                        subpaths = if (paths.isNotEmpty()) paths else null,
-                        stabilityConfigPath = stabilityConfigPath,
-                        compilerReportsDir = compilerReportsDir,
-                        traceLogPath = traceLogPath
-                    )
-                    if (isJson) {
-                        println(jsonPretty.encodeToString(res))
-                    } else {
-                        val cTotal = res["compose_nodes"]?.jsonPrimitive?.intOrNull ?: 0
-                        val cSkip = res["skippable_composables"]?.jsonPrimitive?.intOrNull ?: 0
-                        val compUp = res["compiler_upgraded"]?.jsonPrimitive?.intOrNull ?: 0
-                        val trCnt = res["trace_records_ingested"]?.jsonPrimitive?.intOrNull ?: 0
-                        val text = "[Atlas Compose] project=$project composables=$cTotal skippable=$cSkip compiler_upgraded=$compUp traces=$trCnt"
-                        println(truncateSummary(text, false))
-                    }
-                    return 0
-                }
-                "query" -> {
-                    val mappedAction = when (action.lowercase()) {
-                        "cascade", "compose_cascade" -> "compose_cascade"
-                        "blame", "compose_blame" -> "compose_blame"
-                        else -> "compose_summary"
-                    }
-                    val toolArgs = buildJsonObject {
-                        put("action", mappedAction)
-                        put("project", project)
-                        if (target.isNotEmpty()) put("target", target)
-                        put("depth", if (depth <= 2) 5 else depth)
-                        put("strong_skipping", strongSkipping)
-                    }
-                    val res = server.callTool("atlas_query", toolArgs)
-                    val data = loadSpilledData(res)
-                    if (isJson) {
-                        println(jsonPretty.encodeToString(data))
-                    } else {
-                        val total = data["total_composables"]?.jsonPrimitive?.intOrNull ?: 0
-                        val skipCnt = data["skippable_count"]?.jsonPrimitive?.intOrNull ?: 0
-                        val skipPct = data["skippable_pct"]?.jsonPrimitive?.doubleOrNull ?: 100.0
-                        val unstable = data["unstable_param_total"]?.jsonPrimitive?.intOrNull ?: 0
-                        val cascadeSize = data["cascade"]?.jsonArray?.size ?: 0
-                        val blameSize = data["blame"]?.jsonArray?.size ?: 0
-                        val text = "[Compose Query: ${mappedAction.removePrefix("compose_")}] project=$project composables=$total skippable=$skipCnt ($skipPct%) unstable_params=$unstable cascade=$cascadeSize blame=$blameSize"
-                        println(truncateSummary(text, false))
-                    }
-                    return 0
-                }
-                "audit" -> {
-                    val toolArgs = buildJsonObject {
-                        put("action", "audit_compose")
-                        put("project", project)
-                        put("strong_skipping", strongSkipping)
-                        if (paths.isNotEmpty()) putJsonArray("targets") { paths.forEach { add(it) } }
-                        if (!stabilityConfigPath.isNullOrBlank()) put("stability_config_path", stabilityConfigPath)
-                        if (!compilerReportsDir.isNullOrBlank()) put("compiler_reports_dir", compilerReportsDir)
-                        if (!traceLogPath.isNullOrBlank()) put("trace_log_path", traceLogPath)
-                    }
-                    val res = server.callTool("atlas_audit", toolArgs)
-                    val data = loadSpilledData(res)
-                    val score = data["overall_score"]?.jsonPrimitive?.doubleOrNull ?: 100.0
-                    val status = data["status"]?.jsonPrimitive?.content ?: (if (score >= 80.0) "PASS" else "FAIL")
-                    val vCount = data["violations"]?.jsonArray?.size ?: 0
-                    val totalComp = data["total_composables"]?.jsonPrimitive?.intOrNull ?: 0
-                    if (isJson) {
-                        println(jsonPretty.encodeToString(data))
-                    } else {
-                        val text = "[Compose Audit] project=$project status=$status score=$score/100 composables=$totalComp violations=$vCount strong_skipping=$strongSkipping"
-                        println(truncateSummary(text, false))
-                    }
-                    return if (score >= 80.0) 0 else 1
-                }
-                "doctor" -> {
-                    val toolArgs = buildJsonObject {
-                        put("action", "compose_doctor")
-                        put("project", project)
-                        put("limit", limit)
-                        if (target.isNotEmpty()) putJsonArray("targets") { add(target) }
-                    }
-                    val res = server.callTool("atlas_audit", toolArgs)
-                    val data = loadSpilledData(res)
-
-                    if (applyRemediation) {
-                        val prescriptionsArray = data["prescriptions"]?.jsonArray ?: emptyList()
-                        val filteredPrescriptions = if (!ruleIdArg.isNullOrBlank()) {
-                            prescriptionsArray.filter { it.jsonObject["rule_id"]?.jsonPrimitive?.content == ruleIdArg }
-                        } else {
-                            prescriptionsArray
-                        }
-
-                        val results = mutableListOf<JsonObject>()
-                        var allPassed = true
-
-                        for (rxJson in filteredPrescriptions) {
-                            val rx = rxJson.jsonObject
-                            val rxFilePath = rx["file_path"]?.jsonPrimitive?.content ?: continue
-                            val rxBefore = rx["before_snippet"]?.jsonPrimitive?.content ?: continue
-                            val rxAfter = rx["after_snippet"]?.jsonPrimitive?.content ?: continue
-                            val rxRuleId = rx["rule_id"]?.jsonPrimitive?.content ?: "COMPOSE-REMEDIATION"
-                            val rxNodeId = rx["target_node_id"]?.jsonPrimitive?.content
-
-                            val rxWriteSiteSafe = rx["write_site_safe"]?.jsonPrimitive?.booleanOrNull
-
-                            val vResult = server.remediationVerifier.verifyAndApply(
-                                projectSlug = project,
-                                relPath = rxFilePath,
-                                beforeSnippet = rxBefore,
-                                afterSnippet = rxAfter,
-                                ruleId = rxRuleId,
-                                targetNodeId = rxNodeId,
-                                writeSiteSafe = rxWriteSiteSafe ?: true,
-                                dryRun = false,
-                                testCommand = testCmdArg
-                            )
-                            if (!vResult.valid) allPassed = false
-                            results.add(buildJsonObject {
-                                put("rule_id", rxRuleId)
-                                put("file_path", rxFilePath)
-                                if (rxNodeId != null) put("target_node_id", rxNodeId)
-                                put("valid", vResult.valid)
-                                put("phase", vResult.phase)
-                                put("message", vResult.message)
-                            })
-                        }
-
-                        if (isJson) {
-                            val resObj = buildJsonObject {
-                                data.forEach { (k, v) -> put(k, v) }
-                                putJsonArray("applied_remediations") {
-                                    results.forEach { add(it) }
-                                }
-                                put("all_passed", allPassed)
-                            }
-                            println(jsonPretty.encodeToString(resObj))
-                        } else {
-                            val attempted = results.size
-                            val succeeded = results.count { it["valid"]?.jsonPrimitive?.booleanOrNull == true }
-                            val failed = attempted - succeeded
-                            val text = "[Compose Doctor: Apply] project=$project attempted=$attempted succeeded=$succeeded failed=$failed"
-                            println(truncateSummary(text, false))
-                            if (failed > 0) {
-                                results.filter { it["valid"]?.jsonPrimitive?.booleanOrNull != true }.take(3).forEach { f ->
-                                    println("  - Failed: ${f["rule_id"]?.jsonPrimitive?.content} in ${f["file_path"]?.jsonPrimitive?.content}: ${f["message"]?.jsonPrimitive?.content}")
-                                }
-                            }
-                        }
-                        return if (allPassed) 0 else 1
-                    }
-
-                    if (isJson) {
-                        println(jsonPretty.encodeToString(data))
-                    } else {
-                        val mode = data["scoring_mode"]?.jsonPrimitive?.content ?: "ESTIMATED"
-                        val pCount = data["total_prescriptions"]?.jsonPrimitive?.intOrNull ?: 0
-                        val topRule = data["prescriptions"]?.jsonArray?.firstOrNull()?.jsonObject?.get("rule_id")?.jsonPrimitive?.content ?: "NONE"
-                        val text = "[Compose Doctor] project=$project mode=$mode prescriptions=$pCount top_rule=$topRule"
-                        println(truncateSummary(text, false))
-                    }
-                    return 0
-                }
-                "synthesize-scope" -> {
-                    val seedList = when {
-                        seeds.isNotEmpty() -> seeds
-                        paths.isNotEmpty() -> paths
-                        target.isNotEmpty() -> listOf(target)
-                        else -> emptyList()
-                    }
-                    val toolArgs = buildJsonObject {
-                        put("action", "synthesize_compose_scope")
-                        put("project", project)
-                        putJsonArray("targets") { seedList.forEach { add(it) } }
-                    }
-                    val res = server.callTool("atlas_audit", toolArgs)
-                    val data = loadSpilledData(res)
-                    if (isJson) {
-                        println(jsonPretty.encodeToString(data))
-                    } else {
-                        val fCnt = data["target_files"]?.jsonArray?.size ?: 0
-                        val sModels = data["shared_stable_models"]?.jsonArray?.size ?: 0
-                        val cLocals = data["composition_locals"]?.jsonArray?.size ?: 0
-                        val safe = data["safe_for_parallel_dispatch"]?.jsonPrimitive?.booleanOrNull ?: true
-                        val text = "[Compose 3D Scope] project=$project files=$fCnt shared_models=$sModels locals=$cLocals parallel_safe=$safe"
-                        println(truncateSummary(text, false))
-                    }
-                    return 0
-                }
+                "index" -> return runComposeIndexSubcommand(
+                    server, project, paths, stabilityConfigPath, compilerReportsDir, traceLogPath, isJson
+                )
+                "query" -> return runComposeQuerySubcommand(
+                    server, project, action, target, depth, strongSkipping, isJson
+                )
+                "audit" -> return runComposeAuditSubcommand(
+                    server, project, paths, stabilityConfigPath, compilerReportsDir, traceLogPath, strongSkipping, isJson
+                )
+                "doctor" -> return runComposeDoctorSubcommand(
+                    server, project, target, limit, applyRemediation, ruleIdArg, testCmdArg, isJson
+                )
+                "synthesize-scope" -> return runComposeScopeSubcommand(
+                    server, project, seeds, paths, target, isJson
+                )
                 "version" -> {
                     if (isJson) {
                         println(jsonPretty.encodeToString(buildJsonObject {
