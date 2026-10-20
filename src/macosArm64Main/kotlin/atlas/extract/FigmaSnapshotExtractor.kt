@@ -792,14 +792,8 @@ class FigmaSnapshotExtractor {
         }
     }
 
-    private fun parseFigmaVariablesFormat(
-        fileKey: String,
-        rootObj: JsonObject,
-        variables: MutableMap<String, FigmaVariable>,
-        edges: MutableMap<String, FigmaEdge>
-    ) {
+    private fun resolveFigmaCollectionsMap(rootObj: JsonObject): Map<String, String> {
         val collectionsMap = mutableMapOf<String, String>()
-
         val collectionsArray = rootObj["collections"]?.jsonArray
             ?: rootObj["variableCollections"]?.jsonArray
             ?: rootObj["meta"]?.jsonObject?.get("variableCollections")?.jsonArray
@@ -817,58 +811,82 @@ class FigmaSnapshotExtractor {
                 collectionsMap[colId] = colName
             }
         }
+        return collectionsMap
+    }
 
+    private fun extractFigmaVariableItems(rootObj: JsonObject): List<JsonObject> {
         val varsElement = rootObj["variables"]
             ?: rootObj["meta"]?.jsonObject?.get("variables")
-            ?: return
-
-        val varItems = when (varsElement) {
+            ?: return emptyList()
+        return when (varsElement) {
             is JsonArray -> varsElement.filterIsInstance<JsonObject>()
             is JsonObject -> varsElement.values.filterIsInstance<JsonObject>()
             else -> emptyList()
         }
+    }
 
-        for (varObj in varItems) {
-            val varId = varObj["id"].asString()
-                ?: varObj["variableId"].asString()
-                ?: continue
-            val name = varObj["name"].asString() ?: varId
-            val colId = varObj["variableCollectionId"].asString()
-            val colName = if (colId != null) collectionsMap[colId] ?: "Default" else "Default"
-            val resolvedType = varObj["resolvedType"].asString()?.uppercase() ?: "COLOR"
-
-            val valuesByMode = varObj["valuesByMode"]?.jsonObject ?: JsonObject(emptyMap())
-            var isAlias = false
-            var aliasedVariableId: String? = null
-
-            for ((_, modeVal) in valuesByMode) {
-                if (modeVal is JsonObject && modeVal["type"].asString() == "VARIABLE_ALIAS") {
-                    val targetId = modeVal["id"].asString()
-                    if (!targetId.isNullOrBlank()) {
-                        isAlias = true
-                        aliasedVariableId = targetId
-                        val edgeId = "$fileKey:alias:$varId->$targetId"
-                        edges[edgeId] = FigmaEdge(edgeId, fileKey, varId, targetId, "VARIABLE_ALIAS_OF", "alias")
-                    }
+    private fun extractVariableAliasTarget(valuesByMode: JsonObject): String? {
+        for ((_, modeVal) in valuesByMode) {
+            if (modeVal is JsonObject && modeVal["type"].asString() == "VARIABLE_ALIAS") {
+                val targetId = modeVal["id"].asString()
+                if (!targetId.isNullOrBlank()) {
+                    return targetId
                 }
             }
+        }
+        return null
+    }
 
-            val codeSyntax = varObj["codeSyntax"]?.jsonObject
-            val codeCompose = codeSyntax?.get("COMPOSE").asString()
-            val codeWeb = codeSyntax?.get("WEB").asString()
+    private fun processFigmaVariableItem(
+        varObj: JsonObject,
+        fileKey: String,
+        collectionsMap: Map<String, String>,
+        variables: MutableMap<String, FigmaVariable>,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        val varId = varObj["id"].asString()
+            ?: varObj["variableId"].asString()
+            ?: return
+        val name = varObj["name"].asString() ?: varId
+        val colId = varObj["variableCollectionId"].asString()
+        val colName = if (colId != null) collectionsMap[colId] ?: "Default" else "Default"
+        val resolvedType = varObj["resolvedType"].asString()?.uppercase() ?: "COLOR"
 
-            variables[varId] = FigmaVariable(
-                variableId = varId,
-                fileKey = fileKey,
-                collectionName = colName,
-                name = name,
-                resolvedType = resolvedType,
-                isAlias = isAlias,
-                aliasedVariableId = aliasedVariableId,
-                modesJson = valuesByMode.toString(),
-                codeSyntaxCompose = codeCompose,
-                codeSyntaxWeb = codeWeb
-            )
+        val valuesByMode = varObj["valuesByMode"]?.jsonObject ?: JsonObject(emptyMap())
+        val targetAlias = extractVariableAliasTarget(valuesByMode)
+        if (targetAlias != null) {
+            val edgeId = "$fileKey:alias:$varId->$targetAlias"
+            edges[edgeId] = FigmaEdge(edgeId, fileKey, varId, targetAlias, "VARIABLE_ALIAS_OF", "alias")
+        }
+
+        val codeSyntax = varObj["codeSyntax"]?.jsonObject
+        val codeCompose = codeSyntax?.get("COMPOSE").asString()
+        val codeWeb = codeSyntax?.get("WEB").asString()
+
+        variables[varId] = FigmaVariable(
+            variableId = varId,
+            fileKey = fileKey,
+            collectionName = colName,
+            name = name,
+            resolvedType = resolvedType,
+            isAlias = targetAlias != null,
+            aliasedVariableId = targetAlias,
+            modesJson = valuesByMode.toString(),
+            codeSyntaxCompose = codeCompose,
+            codeSyntaxWeb = codeWeb
+        )
+    }
+
+    private fun parseFigmaVariablesFormat(
+        fileKey: String,
+        rootObj: JsonObject,
+        variables: MutableMap<String, FigmaVariable>,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        val collectionsMap = resolveFigmaCollectionsMap(rootObj)
+        val varItems = extractFigmaVariableItems(rootObj)
+        for (varObj in varItems) {
+            processFigmaVariableItem(varObj, fileKey, collectionsMap, variables, edges)
         }
     }
 
