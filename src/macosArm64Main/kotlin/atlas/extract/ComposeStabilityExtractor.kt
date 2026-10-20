@@ -1087,6 +1087,60 @@ class ComposeStabilityExtractor {
         return params
     }
 
+    private fun matchStabilityConfig(
+        outerType: String,
+        shortOuter: String,
+        pkg: String,
+        patterns: List<Regex>
+    ): String? {
+        val fqCandidates = listOfNotNull(
+            outerType,
+            if (!outerType.contains('.') && pkg.isNotEmpty()) "$pkg.$outerType" else null,
+            if (shortOuter in setOf("List", "Set", "Map", "Collection")) "kotlin.collections.$shortOuter" else null
+        )
+        for (cand in fqCandidates) {
+            val matchedRegex = patterns.firstOrNull { it.matches(cand) }
+            if (matchedRegex != null) {
+                return matchedRegex.pattern
+            }
+        }
+        return null
+    }
+
+    private fun inferImmutableCollectionStability(
+        outerType: String,
+        shortOuter: String,
+        genericArgs: List<String>,
+        pkg: String,
+        stabilityPatterns: List<Regex>,
+        localClassStability: Map<String, Pair<String, String>>,
+        workspaceNodes: List<GraphNode>
+    ): Pair<String, String>? {
+        if (!IMMUTABLE_COLLECTION_PREFIXES.any { outerType == it || shortOuter == it }) {
+            return null
+        }
+        for (arg in genericArgs) {
+            val (argStab, argReason) = inferTypeStability(arg, pkg, stabilityPatterns, localClassStability, workspaceNodes)
+            if (argStab != "STABLE") {
+                return argStab to "GENERIC_ARG_$argReason"
+            }
+        }
+        return "STABLE" to "KOTLINX_IMMUTABLE_COLLECTION"
+    }
+
+    private fun inferCollectionOrMutableStability(
+        outerType: String,
+        shortOuter: String
+    ): Pair<String, String>? {
+        if (outerType in STANDARD_COLLECTION_PREFIXES || shortOuter in STANDARD_COLLECTION_PREFIXES) {
+            return "UNSTABLE" to "STANDARD_COLLECTION_INTERFACE:$shortOuter"
+        }
+        if (outerType in MUTABLE_TYPE_PREFIXES || shortOuter in MUTABLE_TYPE_PREFIXES) {
+            return "UNSTABLE" to "MUTABLE_COLLECTION_OR_STREAM:$shortOuter"
+        }
+        return null
+    }
+
     fun inferTypeStability(
         typeSig: String,
         pkg: String,
@@ -1096,69 +1150,38 @@ class ComposeStabilityExtractor {
     ): Pair<String, String> {
         val clean = typeSig.trim().removeSuffix("?").trim()
         if (clean.isEmpty()) return "STABLE" to "PRIMITIVE_OR_STRING"
-
-        // 1. Function types or @Composable lambdas: `(T) -> R`, `() -> Unit`
-        if (clean.contains("->")) {
-            return "STABLE" to "FUNCTION_TYPE"
-        }
+        if (clean.contains("->")) return "STABLE" to "FUNCTION_TYPE"
 
         val outerType = clean.substringBefore('<').trim()
         val shortOuter = outerType.substringAfterLast('.')
-        val genericArgs = if (clean.contains('<') && clean.endsWith('>')) {
-            splitTopLevelComma(clean.substringAfter('<').substringBeforeLast('>'))
-        } else emptyList()
-
-        // 2. Primitives & core Compose stable value types
         if (shortOuter in PRIMITIVE_STABLE_TYPES) {
             return "STABLE" to "PRIMITIVE_OR_STRING"
         }
 
-        // 3. Explicit stability_config.conf match
-        val fqCandidates = listOfNotNull(
-            outerType,
-            if (!outerType.contains('.') && pkg.isNotEmpty()) "$pkg.$outerType" else null,
-            if (shortOuter in setOf("List", "Set", "Map", "Collection")) "kotlin.collections.$shortOuter" else null
+        val configPattern = matchStabilityConfig(outerType, shortOuter, pkg, stabilityPatterns)
+        if (configPattern != null) {
+            return "STABLE" to "STABILITY_CONFIG_MATCH:$configPattern"
+        }
+
+        val genericArgs = if (clean.contains('<') && clean.endsWith('>')) {
+            splitTopLevelComma(clean.substringAfter('<').substringBeforeLast('>'))
+        } else emptyList()
+
+        val immutableHit = inferImmutableCollectionStability(
+            outerType, shortOuter, genericArgs, pkg, stabilityPatterns, localClassStability, workspaceNodes
         )
-        for (cand in fqCandidates) {
-            val matchedRegex = stabilityPatterns.firstOrNull { it.matches(cand) }
-            if (matchedRegex != null) {
-                return "STABLE" to "STABILITY_CONFIG_MATCH:${matchedRegex.pattern}"
-            }
-        }
+        if (immutableHit != null) return immutableHit
 
-        // 4. kotlinx.collections.immutable
-        if (IMMUTABLE_COLLECTION_PREFIXES.any { outerType == it || shortOuter == it }) {
-            for (arg in genericArgs) {
-                val (argStab, argReason) = inferTypeStability(arg, pkg, stabilityPatterns, localClassStability, workspaceNodes)
-                if (argStab != "STABLE") {
-                    return argStab to "GENERIC_ARG_$argReason"
-                }
-            }
-            return "STABLE" to "KOTLINX_IMMUTABLE_COLLECTION"
-        }
+        val collectionHit = inferCollectionOrMutableStability(outerType, shortOuter)
+        if (collectionHit != null) return collectionHit
 
-        // 5. Standard Kotlin collection interfaces (List, Set, Map) without stability_config override
-        if (outerType in STANDARD_COLLECTION_PREFIXES || shortOuter in STANDARD_COLLECTION_PREFIXES) {
-            return "UNSTABLE" to "STANDARD_COLLECTION_INTERFACE:$shortOuter"
-        }
-
-        // 6. Explicitly mutable types / streams / Android Context
-        if (outerType in MUTABLE_TYPE_PREFIXES || shortOuter in MUTABLE_TYPE_PREFIXES) {
-            return "UNSTABLE" to "MUTABLE_COLLECTION_OR_STREAM:$shortOuter"
-        }
-
-        // 7. Local or workspace-indexed class/interface
         val localHit = localClassStability[shortOuter] ?: localClassStability[outerType]
-        if (localHit != null) {
-            return localHit
-        }
+        if (localHit != null) return localHit
 
-        // 8. State<T> wrapper
         if (shortOuter == "State") {
             return "STABLE" to "COMPOSE_STATE_WRAPPER"
         }
 
-        // 9. Unknown external module type -> RUNTIME stability
         return "RUNTIME" to "EXTERNAL_MODULE_TYPE:$outerType"
     }
 
