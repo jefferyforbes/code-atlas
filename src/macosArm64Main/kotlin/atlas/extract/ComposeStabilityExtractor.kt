@@ -1302,24 +1302,37 @@ class ComposeStabilityExtractor {
         return Triple(returnsUnit, -1, -1)
     }
 
-    private fun splitTopLevelComma(slice: String): List<String> {
-        val out = mutableListOf<String>()
+    private class NestingDepthTracker {
         var angle = 0
         var paren = 0
         var bracket = 0
-        var start = 0
-        for (i in slice.indices) {
-            when (slice[i]) {
+
+        val isTopLevel: Boolean get() = angle == 0 && paren == 0 && bracket == 0
+        val isTopLevelNoBracket: Boolean get() = angle == 0 && paren == 0
+
+        fun onChar(c: Char) {
+            when (c) {
                 '<' -> angle++
                 '>' -> if (angle > 0) angle--
                 '(' -> paren++
                 ')' -> if (paren > 0) paren--
                 '[' -> bracket++
                 ']' -> if (bracket > 0) bracket--
-                ',' -> if (angle == 0 && paren == 0 && bracket == 0) {
-                    out.add(slice.substring(start, i))
-                    start = i + 1
-                }
+            }
+        }
+    }
+
+    private fun splitTopLevelComma(slice: String): List<String> {
+        val out = mutableListOf<String>()
+        val tracker = NestingDepthTracker()
+        var start = 0
+        for (i in slice.indices) {
+            val c = slice[i]
+            if (c == ',' && tracker.isTopLevel) {
+                out.add(slice.substring(start, i))
+                start = i + 1
+            } else {
+                tracker.onChar(c)
             }
         }
         if (start <= slice.length) {
@@ -1328,35 +1341,19 @@ class ComposeStabilityExtractor {
         return out
     }
 
-    private fun findTopLevelEquals(seg: String): Int {
-        var angle = 0
-        var paren = 0
+    private fun findTopLevelChar(seg: String, target: Char): Int {
+        val tracker = NestingDepthTracker()
         for (i in seg.indices) {
-            when (seg[i]) {
-                '<' -> angle++
-                '>' -> if (angle > 0) angle--
-                '(' -> paren++
-                ')' -> if (paren > 0) paren--
-                '=' -> if (angle == 0 && paren == 0) return i
-            }
+            val c = seg[i]
+            if (c == target && tracker.isTopLevelNoBracket) return i
+            tracker.onChar(c)
         }
         return -1
     }
 
-    private fun findTopLevelColon(seg: String): Int {
-        var angle = 0
-        var paren = 0
-        for (i in seg.indices) {
-            when (seg[i]) {
-                '<' -> angle++
-                '>' -> if (angle > 0) angle--
-                '(' -> paren++
-                ')' -> if (paren > 0) paren--
-                ':' -> if (angle == 0 && paren == 0) return i
-            }
-        }
-        return -1
-    }
+    private fun findTopLevelEquals(seg: String): Int = findTopLevelChar(seg, '=')
+
+    private fun findTopLevelColon(seg: String): Int = findTopLevelChar(seg, ':')
 
     private fun containsEffectInBlock(maskedBody: String, openBrace: Int, effectRe: Regex): Boolean {
         val closeBrace = findBalancedCloseBrace(maskedBody, openBrace)
