@@ -2337,6 +2337,81 @@ class SqliteGraphStore(val dbPath: String) {
         }
     }
 
+    private fun sanitizeFiniteDouble(value: Double): Double =
+        if (value.isNaN() || value.isInfinite()) 0.0 else value
+
+    private fun bindFigmaNodeRow(stmt: NativeSqliteStatement, node: FigmaNode, fileKey: String) {
+        val effectiveFileKey = if (node.fileKey.isNotBlank()) node.fileKey else fileKey
+        stmt.reset()
+        stmt.clearBindings()
+        stmt.bindString(1, node.nodeId)
+        stmt.bindString(2, effectiveFileKey)
+        stmt.bindString(3, node.pageName)
+        bindNullableString(stmt, 4, node.sectionId)
+        bindNullableString(stmt, 5, node.parentId)
+        stmt.bindString(6, node.name)
+        stmt.bindString(7, node.nodeType)
+        stmt.bindString(8, node.layoutMode)
+        stmt.bindString(9, node.sizingHorizontal)
+        stmt.bindString(10, node.sizingVertical)
+        stmt.bindString(11, node.textAutoResize)
+        stmt.bindDouble(12, sanitizeFiniteDouble(node.paddingLeft))
+        stmt.bindDouble(13, sanitizeFiniteDouble(node.paddingRight))
+        stmt.bindDouble(14, sanitizeFiniteDouble(node.paddingTop))
+        stmt.bindDouble(15, sanitizeFiniteDouble(node.paddingBottom))
+        stmt.bindDouble(16, sanitizeFiniteDouble(node.itemSpacing))
+        stmt.bindDouble(17, sanitizeFiniteDouble(node.localX))
+        stmt.bindDouble(18, sanitizeFiniteDouble(node.localY))
+        stmt.bindDouble(19, sanitizeFiniteDouble(node.canvasX))
+        stmt.bindDouble(20, sanitizeFiniteDouble(node.canvasY))
+        stmt.bindDouble(21, sanitizeFiniteDouble(node.width))
+        stmt.bindDouble(22, sanitizeFiniteDouble(node.height))
+        stmt.bindInt(23, if (node.isInteractive) 1 else 0)
+        stmt.bindInt(24, if (node.hasEmoji) 1 else 0)
+        stmt.bindInt(25, if (node.unboundFill) 1 else 0)
+        stmt.bindInt(26, if (node.unboundStroke) 1 else 0)
+        val safeContrast = node.wcagContrast?.takeUnless { it.isNaN() || it.isInfinite() }
+        if (safeContrast != null) stmt.bindDouble(27, safeContrast) else stmt.bindNull(27)
+        stmt.bindString(28, node.semioticLayer)
+    }
+
+    private fun bindFigmaSpatialRow(
+        spatialStmt: NativeSqliteStatement,
+        rowidPk: Long,
+        node: FigmaNode
+    ) {
+        val cX = sanitizeFiniteDouble(node.canvasX)
+        val cY = sanitizeFiniteDouble(node.canvasY)
+        val w = sanitizeFiniteDouble(node.width)
+        val h = sanitizeFiniteDouble(node.height)
+        val minX = minOf(cX, cX + w)
+        val maxX = maxOf(cX, cX + w)
+        val minY = minOf(cY, cY + h)
+        val maxY = maxOf(cY, cY + h)
+
+        spatialStmt.reset()
+        spatialStmt.clearBindings()
+        spatialStmt.bindLong(1, rowidPk)
+        spatialStmt.bindDouble(2, minX)
+        spatialStmt.bindDouble(3, maxX)
+        spatialStmt.bindDouble(4, minY)
+        spatialStmt.bindDouble(5, maxY)
+        spatialStmt.step()
+    }
+
+    private fun insertSingleFigmaNode(
+        nodeStmt: NativeSqliteStatement,
+        spatialStmt: NativeSqliteStatement,
+        fileKey: String,
+        node: FigmaNode
+    ) {
+        bindFigmaNodeRow(nodeStmt, node, fileKey)
+        if (nodeStmt.step()) {
+            val rowidPk = nodeStmt.columnLong(0)
+            bindFigmaSpatialRow(spatialStmt, rowidPk, node)
+        }
+    }
+
     fun insertFigmaNodes(fileKey: String, nodes: List<FigmaNode>) {
         if (nodes.isEmpty()) return
 
@@ -2392,67 +2467,7 @@ class SqliteGraphStore(val dbPath: String) {
                 )
 
                 for (node in nodes) {
-                    val effectiveFileKey = if (node.fileKey.isNotBlank()) node.fileKey else fileKey
-                    nodeStmt.reset()
-                    nodeStmt.clearBindings()
-                    nodeStmt.bindString(1, node.nodeId)
-                    nodeStmt.bindString(2, effectiveFileKey)
-                    nodeStmt.bindString(3, node.pageName)
-                    if (node.sectionId != null) nodeStmt.bindString(4, node.sectionId) else nodeStmt.bindNull(4)
-                    if (node.parentId != null) nodeStmt.bindString(5, node.parentId) else nodeStmt.bindNull(5)
-                    nodeStmt.bindString(6, node.name)
-                    nodeStmt.bindString(7, node.nodeType)
-                    nodeStmt.bindString(8, node.layoutMode)
-                    nodeStmt.bindString(9, node.sizingHorizontal)
-                    nodeStmt.bindString(10, node.sizingVertical)
-                    nodeStmt.bindString(11, node.textAutoResize)
-                    val pL = if (node.paddingLeft.isNaN() || node.paddingLeft.isInfinite()) 0.0 else node.paddingLeft
-                    val pR = if (node.paddingRight.isNaN() || node.paddingRight.isInfinite()) 0.0 else node.paddingRight
-                    val pT = if (node.paddingTop.isNaN() || node.paddingTop.isInfinite()) 0.0 else node.paddingTop
-                    val pB = if (node.paddingBottom.isNaN() || node.paddingBottom.isInfinite()) 0.0 else node.paddingBottom
-                    val sp = if (node.itemSpacing.isNaN() || node.itemSpacing.isInfinite()) 0.0 else node.itemSpacing
-                    val lX = if (node.localX.isNaN() || node.localX.isInfinite()) 0.0 else node.localX
-                    val lY = if (node.localY.isNaN() || node.localY.isInfinite()) 0.0 else node.localY
-                    val cX = if (node.canvasX.isNaN() || node.canvasX.isInfinite()) 0.0 else node.canvasX
-                    val cY = if (node.canvasY.isNaN() || node.canvasY.isInfinite()) 0.0 else node.canvasY
-                    val w = if (node.width.isNaN() || node.width.isInfinite()) 0.0 else node.width
-                    val h = if (node.height.isNaN() || node.height.isInfinite()) 0.0 else node.height
-                    val safeContrast = node.wcagContrast?.takeUnless { it.isNaN() || it.isInfinite() }
-
-                    nodeStmt.bindDouble(12, pL)
-                    nodeStmt.bindDouble(13, pR)
-                    nodeStmt.bindDouble(14, pT)
-                    nodeStmt.bindDouble(15, pB)
-                    nodeStmt.bindDouble(16, sp)
-                    nodeStmt.bindDouble(17, lX)
-                    nodeStmt.bindDouble(18, lY)
-                    nodeStmt.bindDouble(19, cX)
-                    nodeStmt.bindDouble(20, cY)
-                    nodeStmt.bindDouble(21, w)
-                    nodeStmt.bindDouble(22, h)
-                    nodeStmt.bindInt(23, if (node.isInteractive) 1 else 0)
-                    nodeStmt.bindInt(24, if (node.hasEmoji) 1 else 0)
-                    nodeStmt.bindInt(25, if (node.unboundFill) 1 else 0)
-                    nodeStmt.bindInt(26, if (node.unboundStroke) 1 else 0)
-                    if (safeContrast != null) nodeStmt.bindDouble(27, safeContrast) else nodeStmt.bindNull(27)
-                    nodeStmt.bindString(28, node.semioticLayer)
-
-                    if (nodeStmt.step()) {
-                        val rowidPk = nodeStmt.columnLong(0)
-                        val minX = minOf(cX, cX + w)
-                        val maxX = maxOf(cX, cX + w)
-                        val minY = minOf(cY, cY + h)
-                        val maxY = maxOf(cY, cY + h)
-
-                        spatialStmt.reset()
-                        spatialStmt.clearBindings()
-                        spatialStmt.bindLong(1, rowidPk)
-                        spatialStmt.bindDouble(2, minX)
-                        spatialStmt.bindDouble(3, maxX)
-                        spatialStmt.bindDouble(4, minY)
-                        spatialStmt.bindDouble(5, maxY)
-                        spatialStmt.step()
-                    }
+                    insertSingleFigmaNode(nodeStmt, spatialStmt, fileKey, node)
                 }
             } finally {
                 scope.closeAll()
