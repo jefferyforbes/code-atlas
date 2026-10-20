@@ -2409,6 +2409,27 @@ class SqliteGraphStore(val dbPath: String) {
         }
     }
 
+    private fun bindNullableString(stmt: NativeSqliteStatement, index: Int, value: String?) {
+        if (value != null) stmt.bindString(index, value) else stmt.bindNull(index)
+    }
+
+    private fun bindFigmaVariableRow(stmt: NativeSqliteStatement, v: FigmaVariable, fileKey: String) {
+        val effectiveFileKey = if (v.fileKey.isNotBlank()) v.fileKey else fileKey
+        stmt.reset()
+        stmt.clearBindings()
+        stmt.bindString(1, v.variableId)
+        stmt.bindString(2, effectiveFileKey)
+        stmt.bindString(3, v.collectionName)
+        stmt.bindString(4, v.name)
+        stmt.bindString(5, v.resolvedType)
+        stmt.bindInt(6, if (v.isAlias) 1 else 0)
+        bindNullableString(stmt, 7, v.aliasedVariableId)
+        stmt.bindString(8, v.modesJson)
+        bindNullableString(stmt, 9, v.codeSyntaxCompose)
+        bindNullableString(stmt, 10, v.codeSyntaxWeb)
+        stmt.step()
+    }
+
     fun insertFigmaVariables(fileKey: String, variables: List<FigmaVariable>) {
         if (variables.isEmpty()) return
 
@@ -2423,20 +2444,7 @@ class SqliteGraphStore(val dbPath: String) {
             )
             try {
                 for (v in variables) {
-                    val effectiveFileKey = if (v.fileKey.isNotBlank()) v.fileKey else fileKey
-                    stmt.reset()
-                    stmt.clearBindings()
-                    stmt.bindString(1, v.variableId)
-                    stmt.bindString(2, effectiveFileKey)
-                    stmt.bindString(3, v.collectionName)
-                    stmt.bindString(4, v.name)
-                    stmt.bindString(5, v.resolvedType)
-                    stmt.bindInt(6, if (v.isAlias) 1 else 0)
-                    if (v.aliasedVariableId != null) stmt.bindString(7, v.aliasedVariableId) else stmt.bindNull(7)
-                    stmt.bindString(8, v.modesJson)
-                    if (v.codeSyntaxCompose != null) stmt.bindString(9, v.codeSyntaxCompose) else stmt.bindNull(9)
-                    if (v.codeSyntaxWeb != null) stmt.bindString(10, v.codeSyntaxWeb) else stmt.bindNull(10)
-                    stmt.step()
+                    bindFigmaVariableRow(stmt, v, fileKey)
                 }
             } finally {
                 stmt.close()
