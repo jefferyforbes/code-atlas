@@ -476,6 +476,133 @@ class ComplexityDoctorEngine(
         )
     }
 
+    private data class ElvisNullCheck(
+        val spanEnd: Int,
+        val retExpr: String
+    )
+
+    private fun findNextNonBlankLineIdx(lines: List<String>, fromIdx: Int, endIdx: Int): Int {
+        for (j in fromIdx..endIdx) {
+            if (lines[j].isNotBlank()) return j
+        }
+        return -1
+    }
+
+    private fun matchElvisNullCheck(
+        lines: List<String>,
+        nextIdx: Int,
+        endIdx: Int,
+        varName: String
+    ): ElvisNullCheck? {
+        val singleLineIf = Regex("""^\s*if\s*\(\s*${Regex.escape(varName)}\s*==\s*null\s*\)\s*(?:\{\s*return(?:\s+([^;}\n]+))?;?\s*\}|return(?:\s+([^;}\n]+))?;?)\s*$""")
+        val sm = singleLineIf.find(lines[nextIdx])
+        if (sm != null) {
+            val expr = (sm.groupValues.getOrNull(1)?.ifEmpty { null }
+                ?: sm.groupValues.getOrNull(2))?.trim() ?: ""
+            return ElvisNullCheck(spanEnd = nextIdx, retExpr = expr)
+        }
+
+        val multiLineIfStart = Regex("""^\s*if\s*\(\s*${Regex.escape(varName)}\s*==\s*null\s*\)\s*\{$""")
+        if (multiLineIfStart.find(lines[nextIdx]) != null && nextIdx + 2 <= endIdx) {
+            val retRegex = Regex("""^\s*return(?:\s+([^;}\n]+))?;?\s*$""")
+            val rm = retRegex.find(lines[nextIdx + 1])
+            if (rm != null && lines[nextIdx + 2].trim() == "}") {
+                val expr = rm.groupValues.getOrNull(1)?.trim() ?: ""
+                return ElvisNullCheck(spanEnd = nextIdx + 2, retExpr = expr)
+            }
+        }
+        return null
+    }
+
+    private fun evaluateElvisPrescription(
+        filePath: String,
+        sourceText: String,
+        node: GraphNode,
+        inDegree: Int,
+        lang: String,
+        projectId: String,
+        lineIdx: Int,
+        beforeSnippet: String,
+        afterSnippet: String
+    ): ComplexityDoctorReport.Prescription? {
+        if (countOccurrences(sourceText, beforeSnippet) != 1) return null
+
+        val candidateText = sourceText.replace(beforeSnippet, afterSnippet)
+        val maskedCandidate = PolyglotAstExtractor.maskCommentsAndStrings(candidateText, lang)
+        if (!hasBalancedDelimiters(maskedCandidate)) return null
+
+        val modExtracted = try {
+            PolyglotAstExtractor.extractFile(projectId, filePath, candidateText)
+        } catch (_: Exception) {
+            return null
+        }
+
+        val modNode = modExtracted.first
+            .filter { it.kind in setOf("function", "method", "composable") && it.name == node.name }
+            .minByOrNull { kotlin.math.abs(it.startLine - node.startLine) }
+            ?: return null
+        val cogBefore = node.cognitiveComplexity
+        val cogAfter = modNode.cognitiveComplexity
+        val diff = cogBefore - cogAfter
+        val reductionPct = if (cogBefore > 0) (diff.toDouble() / cogBefore.toDouble()) * 100.0 else 0.0
+        val roundedPct = (reductionPct * 10.0).roundToInt() / 10.0
+
+        if (diff < 1) return null
+
+        val inDeg = inDegree.coerceAtLeast(node.inDegree).toDouble()
+        val riskIndex = cogBefore.toDouble() * (1.0 + ln(1.0 + inDeg))
+        val priorityScore = (riskIndex * (roundedPct / 100.0) * 10.0).roundToInt() / 10.0
+
+        return ComplexityDoctorReport.Prescription(
+            rank = 0,
+            priorityScore = priorityScore,
+            ruleId = "COMPLEXITY-ELVIS-GUARD",
+            fixStrategy = "ELVIS_GUARD",
+            writeSiteSafe = true,
+            targetNodeId = node.nodeId,
+            filePath = filePath,
+            line = lineIdx + 1,
+            cognitiveBefore = cogBefore,
+            cognitiveAfter = cogAfter,
+            reductionPercent = roundedPct,
+            rationale = "Replacing explicit null check with Elvis return operator flattens decision branching, reducing cognitive complexity from $cogBefore to $cogAfter ($roundedPct% reduction).",
+            beforeSnippet = beforeSnippet,
+            afterSnippet = afterSnippet
+        )
+    }
+
+    private fun trySynthesizeElvisGuardAtLine(
+        lines: List<String>,
+        declLineIdx: Int,
+        endIdx: Int,
+        declRegex: Regex,
+        filePath: String,
+        sourceText: String,
+        node: GraphNode,
+        inDegree: Int,
+        lang: String,
+        projectId: String
+    ): ComplexityDoctorReport.Prescription? {
+        val dMatch = declRegex.find(lines[declLineIdx]) ?: return null
+        val indent = dMatch.groupValues[1]
+        val varName = dMatch.groupValues[2]
+        val initExpr = dMatch.groupValues[3].trim()
+
+        val nextIdx = findNextNonBlankLineIdx(lines, declLineIdx + 1, endIdx)
+        if (nextIdx < 0) return null
+
+        val nullCheck = matchElvisNullCheck(lines, nextIdx, endIdx, varName) ?: return null
+        val retExpr = nullCheck.retExpr
+        val elvisRet = if (retExpr.isNotEmpty()) " ?: return $retExpr" else " ?: return"
+        val beforeSnippet = lines.subList(declLineIdx, nullCheck.spanEnd + 1).joinToString("\n")
+        val afterSnippet = "${indent}val $varName = $initExpr$elvisRet"
+
+        return evaluateElvisPrescription(
+            filePath, sourceText, node, inDegree, lang, projectId,
+            declLineIdx, beforeSnippet, afterSnippet
+        )
+    }
+
     private fun synthesizeElvisGuard(
         filePath: String,
         sourceText: String,
@@ -492,94 +619,11 @@ class ComplexityDoctorEngine(
         val declRegex = Regex("""^(\s*)(?:val|var)\s+([A-Za-z0-9_]+)\s*=\s*(.+)$""")
 
         for (i in startIdx until endIdx) {
-            val dMatch = declRegex.find(lines[i]) ?: continue
-            val indent = dMatch.groupValues[1]
-            val varName = dMatch.groupValues[2]
-            val initExpr = dMatch.groupValues[3].trim()
-
-            // Find next non-blank line
-            var nextIdx = -1
-            for (j in (i + 1)..endIdx) {
-                if (lines[j].isNotBlank()) {
-                    nextIdx = j
-                    break
-                }
-            }
-            if (nextIdx < 0) continue
-
-            val singleLineIf = Regex("""^\s*if\s*\(\s*${Regex.escape(varName)}\s*==\s*null\s*\)\s*(?:\{\s*return(?:\s+([^;}\n]+))?;?\s*\}|return(?:\s+([^;}\n]+))?;?)\s*$""")
-            val sm = singleLineIf.find(lines[nextIdx])
-
-            var spanEnd = nextIdx
-            var retExpr = ""
-
-            if (sm != null) {
-                retExpr = (sm.groupValues.getOrNull(1)?.ifEmpty { null }
-                    ?: sm.groupValues.getOrNull(2))?.trim() ?: ""
-            } else {
-                val multiLineIfStart = Regex("""^\s*if\s*\(\s*${Regex.escape(varName)}\s*==\s*null\s*\)\s*\{$""")
-                if (multiLineIfStart.find(lines[nextIdx]) != null && nextIdx + 2 <= endIdx) {
-                    val retRegex = Regex("""^\s*return(?:\s+([^;}\n]+))?;?\s*$""")
-                    val rm = retRegex.find(lines[nextIdx + 1])
-                    if (rm != null && lines[nextIdx + 2].trim() == "}") {
-                        retExpr = rm.groupValues.getOrNull(1)?.trim() ?: ""
-                        spanEnd = nextIdx + 2
-                    } else {
-                        continue
-                    }
-                } else {
-                    continue
-                }
-            }
-
-            val elvisRet = if (retExpr.isNotEmpty()) " ?: return $retExpr" else " ?: return"
-            val beforeSnippet = lines.subList(i, spanEnd + 1).joinToString("\n")
-            val afterSnippet = "${indent}val $varName = $initExpr$elvisRet"
-
-            if (countOccurrences(sourceText, beforeSnippet) != 1) continue
-
-            val candidateText = sourceText.replace(beforeSnippet, afterSnippet)
-            val maskedCandidate = PolyglotAstExtractor.maskCommentsAndStrings(candidateText, lang)
-            if (!hasBalancedDelimiters(maskedCandidate)) continue
-
-            val modExtracted = try {
-                PolyglotAstExtractor.extractFile(projectId, filePath, candidateText)
-            } catch (_: Exception) {
-                continue
-            }
-
-            val modNode = modExtracted.first
-                .filter { it.kind in setOf("function", "method", "composable") && it.name == node.name }
-                .minByOrNull { kotlin.math.abs(it.startLine - node.startLine) }
-                ?: continue
-            val cogBefore = node.cognitiveComplexity
-            val cogAfter = modNode.cognitiveComplexity
-            val diff = cogBefore - cogAfter
-            val reductionPct = if (cogBefore > 0) (diff.toDouble() / cogBefore.toDouble()) * 100.0 else 0.0
-            val roundedPct = (reductionPct * 10.0).roundToInt() / 10.0
-
-            if (diff < 1) continue
-
-            val inDeg = inDegree.coerceAtLeast(node.inDegree).toDouble()
-            val riskIndex = cogBefore.toDouble() * (1.0 + ln(1.0 + inDeg))
-            val priorityScore = (riskIndex * (roundedPct / 100.0) * 10.0).roundToInt() / 10.0
-
-            return ComplexityDoctorReport.Prescription(
-                rank = 0,
-                priorityScore = priorityScore,
-                ruleId = "COMPLEXITY-ELVIS-GUARD",
-                fixStrategy = "ELVIS_GUARD",
-                writeSiteSafe = true,
-                targetNodeId = node.nodeId,
-                filePath = filePath,
-                line = i + 1,
-                cognitiveBefore = cogBefore,
-                cognitiveAfter = cogAfter,
-                reductionPercent = roundedPct,
-                rationale = "Replacing explicit null check with Elvis return operator flattens decision branching, reducing cognitive complexity from $cogBefore to $cogAfter ($roundedPct% reduction).",
-                beforeSnippet = beforeSnippet,
-                afterSnippet = afterSnippet
+            val prescription = trySynthesizeElvisGuardAtLine(
+                lines, i, endIdx, declRegex,
+                filePath, sourceText, node, inDegree, lang, projectId
             )
+            if (prescription != null) return prescription
         }
 
         return null
