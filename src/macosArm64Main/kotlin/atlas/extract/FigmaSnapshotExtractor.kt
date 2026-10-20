@@ -486,51 +486,84 @@ class FigmaSnapshotExtractor {
         return INTERACTIVE_KEYWORDS.any { low.contains(it) }
     }
 
+    private fun extractActionDestinationId(action: JsonObject): String? {
+        val dest = action["destinationId"].asString()
+        if (dest != null) return dest
+        return action["destinationNodeId"].asString()
+    }
+
+    private fun recordTriggerEdge(
+        fileKey: String,
+        nodeId: String,
+        targetId: String,
+        triggerType: String,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        val edgeId = "$fileKey:triggers_action:$nodeId->$targetId:$triggerType"
+        edges[edgeId] = FigmaEdge(edgeId, fileKey, nodeId, targetId, "TRIGGERS_ACTION", triggerType)
+    }
+
+    private fun processReactionAction(
+        action: JsonObject,
+        fileKey: String,
+        nodeId: String,
+        triggerType: String,
+        edges: MutableMap<String, FigmaEdge>
+    ): Boolean {
+        var recorded = false
+        val destId = extractActionDestinationId(action)
+        if (!destId.isNullOrBlank()) {
+            recordTriggerEdge(fileKey, nodeId, destId, triggerType, edges)
+            recorded = true
+        }
+
+        val subActions = action["actions"]?.jsonArray?.filterIsInstance<JsonObject>()
+        if (subActions != null) {
+            for (subAction in subActions) {
+                val subDestId = extractActionDestinationId(subAction)
+                if (!subDestId.isNullOrBlank()) {
+                    recordTriggerEdge(fileKey, nodeId, subDestId, triggerType, edges)
+                    recorded = true
+                }
+            }
+        }
+        return recorded
+    }
+
+    private fun processReactionsArray(
+        reactions: List<JsonObject>,
+        fileKey: String,
+        nodeId: String,
+        edges: MutableMap<String, FigmaEdge>
+    ): Boolean {
+        var hasReaction = false
+        for (reaction in reactions) {
+            val trigger = reaction["trigger"]?.jsonObject
+            val triggerType = trigger?.get("type").asString() ?: "ON_CLICK"
+            val action = reaction["action"]?.jsonObject
+            if (action != null && processReactionAction(action, fileKey, nodeId, triggerType, edges)) {
+                hasReaction = true
+            }
+        }
+        return hasReaction
+    }
+
     private fun extractReactions(
         fileKey: String,
         nodeId: String,
         nodeObj: JsonObject,
         edges: MutableMap<String, FigmaEdge>
     ): Boolean {
-        var hasReaction = false
-        val reactions = nodeObj["reactions"]?.jsonArray
-        if (reactions != null) {
-            for (reaction in reactions.filterIsInstance<JsonObject>()) {
-                val trigger = reaction["trigger"]?.jsonObject
-                val triggerType = trigger?.get("type").asString() ?: "ON_CLICK"
-                val action = reaction["action"]?.jsonObject
-                if (action != null) {
-                    val destId = action["destinationId"].asString()
-                        ?: action["destinationNodeId"].asString()
-                    if (!destId.isNullOrBlank()) {
-                        hasReaction = true
-                        val edgeId = "$fileKey:triggers_action:$nodeId->$destId:$triggerType"
-                        edges[edgeId] = FigmaEdge(edgeId, fileKey, nodeId, destId, "TRIGGERS_ACTION", triggerType)
-                    }
-                    val actionsList = action["actions"]?.jsonArray
-                    if (actionsList != null) {
-                        for (subAction in actionsList.filterIsInstance<JsonObject>()) {
-                            val subDestId = subAction["destinationId"].asString()
-                                ?: subAction["destinationNodeId"].asString()
-                            if (!subDestId.isNullOrBlank()) {
-                                hasReaction = true
-                                val edgeId = "$fileKey:triggers_action:$nodeId->$subDestId:$triggerType"
-                                edges[edgeId] = FigmaEdge(edgeId, fileKey, nodeId, subDestId, "TRIGGERS_ACTION", triggerType)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        val reactions = nodeObj["reactions"]?.jsonArray?.filterIsInstance<JsonObject>()
+        val hasReactions = if (reactions != null) processReactionsArray(reactions, fileKey, nodeId, edges) else false
 
         val transitionId = nodeObj["transitionNodeID"].asString()
-        if (!transitionId.isNullOrBlank()) {
-            hasReaction = true
-            val edgeId = "$fileKey:triggers_action:$nodeId->$transitionId:NAVIGATE"
-            edges[edgeId] = FigmaEdge(edgeId, fileKey, nodeId, transitionId, "TRIGGERS_ACTION", "NAVIGATE")
-        }
+        val hasTransition = if (!transitionId.isNullOrBlank()) {
+            recordTriggerEdge(fileKey, nodeId, transitionId, "NAVIGATE", edges)
+            true
+        } else false
 
-        return hasReaction
+        return hasReactions || hasTransition
     }
 
     private fun extractBoundVariableEdges(
