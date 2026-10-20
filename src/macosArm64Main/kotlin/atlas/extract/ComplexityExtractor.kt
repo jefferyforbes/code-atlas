@@ -40,7 +40,7 @@ object ComplexityExtractor {
 
         val lang = language.lowercase()
         return if (lang == "python" || lang == "py") {
-            calculatePython(maskedLines, rawLines)
+            calculatePython(maskedLines, rawLines, functionName)
         } else {
             calculateBraceLanguage(maskedLines, rawLines, lang, isComposable, functionName)
         }
@@ -127,7 +127,7 @@ object ComplexityExtractor {
             cognitive = state.cognitive,
             maxNesting = state.maxNesting,
             sloc = computeSloc(effectiveLines, language),
-            paramCount = extractParamCount(effectiveLines),
+            paramCount = extractParamCount(effectiveLines, functionName, language),
             returnCount = state.returnCount
         )
     }
@@ -336,7 +336,8 @@ object ComplexityExtractor {
 
     private fun calculatePython(
         maskedLines: List<String>,
-        rawLines: List<String>
+        rawLines: List<String>,
+        functionName: String? = null
     ): ComplexityVector {
         val state = PythonRunState()
         val indentStack = mutableListOf<Pair<Int, Boolean>>() // (indentation, isControl)
@@ -351,7 +352,7 @@ object ComplexityExtractor {
             cognitive = state.cognitive,
             maxNesting = state.maxNesting,
             sloc = computeSloc(effectiveLines, "python"),
-            paramCount = extractParamCount(effectiveLines),
+            paramCount = extractParamCount(effectiveLines, functionName, "python"),
             returnCount = state.returnCount
         )
     }
@@ -488,61 +489,409 @@ object ComplexityExtractor {
         }
     }
 
-    private fun extractParamCount(lines: List<String>): Int {
-        val paramContent = extractParamContent(lines) ?: return 0
-        if (paramContent.isEmpty()) return 0
-        return countTopLevelCommas(paramContent) + 1
+    fun extractParamCount(
+        lines: List<String>,
+        functionName: String? = null,
+        language: String = "kotlin"
+    ): Int {
+        val paramContent = extractParamContent(lines, functionName, language) ?: return 0
+        if (paramContent.trim().isEmpty()) return 0
+        return countParameters(paramContent, language)
     }
 
-    private fun extractParamContent(lines: List<String>): String? {
+    fun extractParamContent(
+        lines: List<String>,
+        functionName: String? = null,
+        language: String = "kotlin"
+    ): String? {
         if (lines.isEmpty()) return null
-        val header = collectHeaderSnippet(lines)
-        val openParen = header.indexOf('(')
-        val closeParen = header.lastIndexOf(')')
-        if (openParen == -1 || closeParen <= openParen) return null
+        val header = collectHeaderSnippet(lines, functionName, language)
+        if (header.isEmpty()) return null
+        val openParen = findParameterListOpenParen(header, functionName, language)
+        if (openParen < 0) return null
+        val closeParen = findMatchingClosingParen(header, openParen)
+        if (closeParen <= openParen) return null
         return header.substring(openParen + 1, closeParen).trim()
     }
 
-    private fun collectHeaderSnippet(lines: List<String>): String {
+    private fun skipTripleQuote(s: String, startIndex: Int): Int {
+        var i = startIndex + 3
+        while (i + 2 < s.length) {
+            if (s[i] == '\\') {
+                i += 2
+            } else if (s[i] == '"' && s[i + 1] == '"' && s[i + 2] == '"') {
+                return i + 3
+            } else {
+                i++
+            }
+        }
+        return s.length
+    }
+
+    private fun skipQuotedLiteral(s: String, startIndex: Int): Int {
+        if (s.startsWith("\"\"\"", startIndex)) {
+            return skipTripleQuote(s, startIndex)
+        }
+        val quote = s[startIndex]
+        var i = startIndex + 1
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '\\' && i + 1 < s.length) {
+                i += 2
+            } else if (c == quote) {
+                return i + 1
+            } else {
+                i++
+            }
+        }
+        return s.length
+    }
+
+    private fun findCommentPrefixIndex(line: String, prefix: String): Int {
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            if (c == '"' || c == '\'') {
+                i = skipQuotedLiteral(line, i)
+                continue
+            }
+            if (line.startsWith(prefix, i)) {
+                return i
+            }
+            i++
+        }
+        return -1
+    }
+
+    private fun stripBlockComments(line: String): String {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            if (c == '"' || c == '\'') {
+                val end = skipQuotedLiteral(line, i)
+                sb.append(line, i, end)
+                i = end
+                continue
+            }
+            if (line.startsWith("/*", i)) {
+                val end = line.indexOf("*/", i + 2)
+                if (end >= 0) {
+                    sb.append(' ')
+                    i = end + 2
+                    continue
+                } else {
+                    break
+                }
+            }
+            sb.append(c)
+            i++
+        }
+        return sb.toString()
+    }
+
+    private fun stripComments(line: String, language: String): String {
+        val lang = language.lowercase()
+        val isPy = lang == "python" || lang == "py"
+        val lineCommentPrefix = if (isPy) "#" else "//"
+        val idx = findCommentPrefixIndex(line, lineCommentPrefix)
+        val withoutLineComment = if (idx >= 0) line.substring(0, idx) else line
+        val blockClean = if (!isPy && withoutLineComment.contains("/*")) {
+            stripBlockComments(withoutLineComment)
+        } else {
+            withoutLineComment
+        }
+        return blockClean.trim()
+    }
+
+    private fun stripStringLiterals(s: String): String {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '"' || c == '\'') {
+                val end = skipQuotedLiteral(s, i)
+                i = end
+                continue
+            }
+            sb.append(c)
+            i++
+        }
+        return sb.toString()
+    }
+
+    private fun findDeclStartLine(lines: List<String>, functionName: String?, language: String): Int {
+        if (functionName.isNullOrBlank()) return 0
+        val fnRegex = Regex("""(?:\b|\.)${Regex.escape(functionName)}\b""")
+        for (i in lines.indices) {
+            val clean = stripComments(lines[i], language)
+            val codeOnly = stripStringLiterals(clean)
+            if (fnRegex.containsMatchIn(codeOnly)) return i
+        }
+        return 0
+    }
+
+    private fun updateLineParens(line: String, currentDepth: Int): Pair<Int, Boolean> {
+        var depth = currentDepth
+        var sawOpen = false
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            if (c == '"' || c == '\'') {
+                i = skipQuotedLiteral(line, i)
+                continue
+            }
+            if (c == '(') {
+                depth++
+                sawOpen = true
+            } else if (c == ')') {
+                depth = maxOf(0, depth - 1)
+            }
+            i++
+        }
+        return Pair(depth, sawOpen)
+    }
+
+    private fun isHeaderTerminator(clean: String, isPy: Boolean): Boolean {
+        if (clean.contains('{') || clean.contains(';') || clean.contains('=')) return true
+        return isPy && clean.endsWith(":")
+    }
+
+    private fun shouldStopHeader(clean: String, foundOpen: Boolean, depth: Int, isPy: Boolean): Boolean {
+        if (!foundOpen || depth != 0) return false
+        return clean.contains(')') || isHeaderTerminator(clean, isPy)
+    }
+
+    private fun collectHeaderSnippet(
+        lines: List<String>,
+        functionName: String?,
+        language: String
+    ): String {
+        val startIdx = findDeclStartLine(lines, functionName, language)
         val headerSb = StringBuilder()
         var parenDepth = 0
         var foundOpen = false
-        for (line in lines) {
-            headerSb.append(line).append(' ')
-            val (depth, opened) = scanLineParens(line, parenDepth, foundOpen)
-            parenDepth = depth
-            foundOpen = opened
-            if (foundOpen && parenDepth <= 0) break
-            if (headerSb.length > 500) break
+        val isPy = language.equals("python", ignoreCase = true) || language.equals("py", ignoreCase = true)
+        val maxLines = minOf(lines.size, startIdx + 30)
+
+        for (i in startIdx until maxLines) {
+            val clean = stripComments(lines[i], language)
+            if (clean.isEmpty()) continue
+            headerSb.append(clean).append(' ')
+
+            val (newDepth, sawOpen) = updateLineParens(clean, parenDepth)
+            parenDepth = newDepth
+            if (sawOpen) foundOpen = true
+            if (shouldStopHeader(clean, foundOpen, parenDepth, isPy)) break
         }
         return headerSb.toString()
     }
 
-    private fun scanLineParens(line: String, startDepth: Int, startOpened: Boolean): Pair<Int, Boolean> {
-        var depth = startDepth
-        var opened = startOpened
-        for (c in line) {
-            if (c == '(') {
-                depth++
-                opened = true
-            } else if (c == ')') {
-                depth--
-            }
-        }
-        return Pair(depth, opened)
+    private fun skipWhitespace(s: String, startIndex: Int): Int {
+        var pos = startIndex
+        while (pos < s.length && s[pos].isWhitespace()) pos++
+        return pos
     }
 
-    private fun countTopLevelCommas(paramContent: String): Int {
+    private fun skipAngleBrackets(s: String, startIndex: Int): Int {
+        if (startIndex >= s.length || s[startIndex] != '<') return startIndex
         var depth = 0
-        var commas = 0
-        for (c in paramContent) {
+        var pos = startIndex
+        while (pos < s.length) {
+            val c = s[pos]
+            if (c == '<') {
+                depth++
+            } else if (c == '>') {
+                depth--
+                if (depth == 0) return pos + 1
+            }
+            pos++
+        }
+        return pos
+    }
+
+    private fun findOpenParenAfterName(header: String, functionName: String): Int {
+        val fnRegex = Regex("""(?:\b|\.)""" + Regex.escape(functionName) + """\b""")
+        for (match in fnRegex.findAll(header)) {
+            val afterName = match.range.last + 1
+            val afterWs = skipWhitespace(header, afterName)
+            val afterGenerics = skipAngleBrackets(header, afterWs)
+            val finalPos = skipWhitespace(header, afterGenerics)
+            if (finalPos < header.length && header[finalPos] == '(') return finalPos
+        }
+        return -1
+    }
+
+    private fun resolveFunctionKeyword(language: String): String {
+        val lang = language.lowercase()
+        return when {
+            lang == "python" || lang == "py" -> "def"
+            lang == "swift" -> "func"
+            lang == "rust" || lang == "rs" -> "fn"
+            else -> "fun"
+        }
+    }
+
+    private fun checkReceiverParen(header: String, openParen: Int): Int {
+        val closeParen = findMatchingClosingParen(header, openParen)
+        if (closeParen <= openParen) return -1
+        val nextNonWs = skipWhitespace(header, closeParen + 1)
+        return if (nextNonWs < header.length && header[nextNonWs] == '.') closeParen + 1 else -1
+    }
+
+    private fun scanHeaderForOpenParen(header: String, searchStart: Int): Int {
+        var angleDepth = 0
+        var i = searchStart
+        while (i < header.length) {
+            val c = header[i]
+            if (c == '<') {
+                angleDepth++
+            } else if (c == '>') {
+                angleDepth = maxOf(0, angleDepth - 1)
+            } else if (c == '(' && angleDepth == 0) {
+                val skipTo = checkReceiverParen(header, i)
+                if (skipTo > i) {
+                    i = skipTo
+                    continue
+                }
+                return i
+            }
+            i++
+        }
+        return -1
+    }
+
+    private fun findParameterListOpenParen(
+        header: String,
+        functionName: String?,
+        language: String
+    ): Int {
+        if (!functionName.isNullOrBlank()) {
+            val namedParen = findOpenParenAfterName(header, functionName)
+            if (namedParen >= 0) return namedParen
+        }
+
+        val kw = resolveFunctionKeyword(language)
+        val kwRegex = Regex("""\b(?:$kw|constructor|function)\b""")
+        val kwMatch = kwRegex.find(header)
+        val searchStart = if (kwMatch != null) kwMatch.range.last + 1 else 0
+
+        val scannedParen = scanHeaderForOpenParen(header, searchStart)
+        return if (scannedParen >= 0) scannedParen else header.indexOf('(')
+    }
+
+    private fun findMatchingClosingParen(header: String, openParen: Int): Int {
+        var parenDepth = 0
+        var i = openParen
+        while (i < header.length) {
+            val c = header[i]
+            if (c == '"' || c == '\'') {
+                i = skipQuotedLiteral(header, i)
+                continue
+            }
+            if (c == '(') {
+                parenDepth++
+            } else if (c == ')') {
+                parenDepth--
+                if (parenDepth == 0) return i
+            }
+            i++
+        }
+        return -1
+    }
+
+    private class ParamBracketTracker {
+        var paren = 0
+        var angle = 0
+        var square = 0
+        var curly = 0
+
+        val isTopLevel: Boolean
+            get() = paren == 0 && angle == 0 && square == 0 && curly == 0
+
+        fun consume(c: Char) {
             when (c) {
-                '(', '<', '[', '{' -> depth++
-                ')', '>', ']', '}' -> depth--
-                ',' -> if (depth == 0) commas++
+                '(' -> paren++
+                ')' -> paren = maxOf(0, paren - 1)
+                '<' -> angle++
+                '>' -> angle = maxOf(0, angle - 1)
+                '[' -> square++
+                ']' -> square = maxOf(0, square - 1)
+                '{' -> curly++
+                '}' -> curly = maxOf(0, curly - 1)
             }
         }
-        return commas
+    }
+
+    private fun addChunkIfNonEmpty(chunks: MutableList<String>, sb: StringBuilder) {
+        val s = sb.toString().trim()
+        if (s.isNotEmpty()) chunks.add(s)
+        sb.clear()
+    }
+
+    private fun resolveTwoCharSymbol(c: Char, next: Char): String? = when {
+        c == '-' && next == '>' -> "->"
+        c == '=' && next == '>' -> "=>"
+        c == '>' && next == '=' -> ">="
+        c == '<' && (next == '=' || next == ' ') -> "<"
+        else -> null
+    }
+
+    private fun tryConsumeMultiCharToken(s: String, i: Int, out: StringBuilder): Int {
+        val c = s[i]
+        if (c == '"' || c == '\'') {
+            val end = skipQuotedLiteral(s, i)
+            out.append(s, i, end)
+            return end
+        }
+        if (i + 1 < s.length) {
+            val sym = resolveTwoCharSymbol(c, s[i + 1])
+            if (sym != null) {
+                out.append(sym)
+                return if (sym == "<") i + 1 else i + 2
+            }
+        }
+        return -1
+    }
+
+    private fun splitParamChunks(trimmed: String): List<String> {
+        val chunks = mutableListOf<String>()
+        val current = StringBuilder()
+        val tracker = ParamBracketTracker()
+        var i = 0
+
+        while (i < trimmed.length) {
+            val nextIdx = tryConsumeMultiCharToken(trimmed, i, current)
+            if (nextIdx > i) {
+                i = nextIdx
+                continue
+            }
+            val c = trimmed[i]
+            if (c == ',' && tracker.isTopLevel) {
+                addChunkIfNonEmpty(chunks, current)
+                i++
+                continue
+            }
+            tracker.consume(c)
+            current.append(c)
+            i++
+        }
+        addChunkIfNonEmpty(chunks, current)
+        return chunks
+    }
+
+    private fun adjustPythonChunks(chunks: List<String>): Int {
+        if (chunks.isEmpty()) return 0
+        val firstWord = chunks.first().takeWhile { it.isLetterOrDigit() || it == '_' }
+        return if (firstWord == "self" || firstWord == "cls") chunks.size - 1 else chunks.size
+    }
+
+    fun countParameters(paramContent: String, language: String = "kotlin"): Int {
+        val trimmed = paramContent.trim()
+        if (trimmed.isEmpty()) return 0
+        val chunks = splitParamChunks(trimmed)
+        val isPy = language.equals("python", ignoreCase = true) || language.equals("py", ignoreCase = true)
+        return if (isPy) adjustPythonChunks(chunks) else chunks.size
     }
 
     private enum class ScopeType {
