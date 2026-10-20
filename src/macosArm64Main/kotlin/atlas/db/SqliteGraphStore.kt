@@ -1435,69 +1435,77 @@ class SqliteGraphStore(val dbPath: String) {
         return results
     }
 
-    fun searchNodes(
+    private fun scoreFtsSegments(
         projectId: String,
-        query: String,
-        limit: Int = 15,
-        kind: String? = null
-    ): List<GraphNode> {
-        val scores = mutableMapOf<String, Double>()
-        val segments = NameSegmentTokenizer.tokenize(query)
-
-        if (segments.isNotEmpty()) {
-            val ftsExpr = segments.joinToString(" OR ") { "\"$it\"*" }
-            try {
-                val ftsStmt = db.prepare(
-                    """
-                    SELECT node_id, bm25(nodes_fts) AS rank
-                    FROM nodes_fts
-                    WHERE project_id = ? AND nodes_fts MATCH ?
-                    ORDER BY rank
-                    LIMIT ?;
-                    """.trimIndent()
-                )
-                try {
-                    ftsStmt.bindString(1, projectId)
-                    ftsStmt.bindString(2, ftsExpr)
-                    ftsStmt.bindInt(3, (limit * 10).coerceAtLeast(100))
-                    while (ftsStmt.step()) {
-                        val nid = ftsStmt.columnString(0)
-                        val rank = ftsStmt.columnDouble(1)
-                        val current = scores.getOrElse(nid) { 0.0 }
-                        scores[nid] = current + (10.0 / (1.0 + abs(rank)))
-                    }
-                } finally {
-                    ftsStmt.close()
-                }
-            } catch (e: Exception) {
-                PlatformFiles.logWarning("SqliteGraphStore", "FTS segment ranking failed: ${e.message}")
-            }
-
-            for (chunk in segments.chunked(250)) {
-                val placeholders = chunk.joinToString(",") { "?" }
-                val vocabSql = """
-                    SELECT node_id, COUNT(*) AS matched_segments
-                    FROM name_segment_vocab
-                    WHERE project_id = ? AND segment IN ($placeholders)
-                    GROUP BY node_id;
+        segments: List<String>,
+        limit: Int,
+        scores: MutableMap<String, Double>
+    ) {
+        val ftsExpr = segments.joinToString(" OR ") { "\"$it\"*" }
+        try {
+            val ftsStmt = db.prepare(
+                """
+                SELECT node_id, bm25(nodes_fts) AS rank
+                FROM nodes_fts
+                WHERE project_id = ? AND nodes_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?;
                 """.trimIndent()
-                val vocabStmt = db.prepare(vocabSql)
-                try {
-                    vocabStmt.bindString(1, projectId)
-                    chunk.forEachIndexed { i, s -> vocabStmt.bindString(2 + i, s) }
-                    while (vocabStmt.step()) {
-                        val nid = vocabStmt.columnString(0)
-                        val matched = vocabStmt.columnInt(1)
-                        val coverage = matched.toDouble() / segments.size.toDouble()
-                        val current = scores.getOrElse(nid) { 0.0 }
-                        scores[nid] = current + (coverage * coverage * 15.0)
-                    }
-                } finally {
-                    vocabStmt.close()
+            )
+            try {
+                ftsStmt.bindString(1, projectId)
+                ftsStmt.bindString(2, ftsExpr)
+                ftsStmt.bindInt(3, (limit * 10).coerceAtLeast(100))
+                while (ftsStmt.step()) {
+                    val nid = ftsStmt.columnString(0)
+                    val rank = ftsStmt.columnDouble(1)
+                    val current = scores.getOrElse(nid) { 0.0 }
+                    scores[nid] = current + (10.0 / (1.0 + abs(rank)))
                 }
+            } finally {
+                ftsStmt.close()
+            }
+        } catch (e: Exception) {
+            PlatformFiles.logWarning("SqliteGraphStore", "FTS segment ranking failed: ${e.message}")
+        }
+    }
+
+    private fun scoreVocabCoverage(
+        projectId: String,
+        segments: List<String>,
+        scores: MutableMap<String, Double>
+    ) {
+        for (chunk in segments.chunked(250)) {
+            val placeholders = chunk.joinToString(",") { "?" }
+            val vocabSql = """
+                SELECT node_id, COUNT(*) AS matched_segments
+                FROM name_segment_vocab
+                WHERE project_id = ? AND segment IN ($placeholders)
+                GROUP BY node_id;
+            """.trimIndent()
+            val vocabStmt = db.prepare(vocabSql)
+            try {
+                vocabStmt.bindString(1, projectId)
+                chunk.forEachIndexed { i, s -> vocabStmt.bindString(2 + i, s) }
+                while (vocabStmt.step()) {
+                    val nid = vocabStmt.columnString(0)
+                    val matched = vocabStmt.columnInt(1)
+                    val coverage = matched.toDouble() / segments.size.toDouble()
+                    val current = scores.getOrElse(nid) { 0.0 }
+                    scores[nid] = current + (coverage * coverage * 15.0)
+                }
+            } finally {
+                vocabStmt.close()
             }
         }
+    }
 
+    private fun scoreExactAndFuzzyNames(
+        projectId: String,
+        query: String,
+        limit: Int,
+        scores: MutableMap<String, Double>
+    ) {
         val escapedQuery = query
             .replace("\\", "\\\\")
             .replace("%", "\\%")
@@ -1537,12 +1545,10 @@ class SqliteGraphStore(val dbPath: String) {
         } finally {
             likeStmt.close()
         }
+    }
 
-        if (scores.isEmpty()) return emptyList()
-
-        val rankedIds = scores.entries.sortedByDescending { it.value }.map { it.key }
+    private fun loadRankedNodesMap(rankedIds: List<String>, limit: Int): Map<String, GraphNode> {
         val nodeMap = mutableMapOf<String, GraphNode>()
-
         val batchIds = rankedIds.take((limit * 5).coerceAtLeast(50))
         for (chunk in batchIds.chunked(250)) {
             val placeholders = chunk.joinToString(",") { "?" }
@@ -1565,6 +1571,29 @@ class SqliteGraphStore(val dbPath: String) {
                 nodesStmt.close()
             }
         }
+        return nodeMap
+    }
+
+    fun searchNodes(
+        projectId: String,
+        query: String,
+        limit: Int = 15,
+        kind: String? = null
+    ): List<GraphNode> {
+        val scores = mutableMapOf<String, Double>()
+        val segments = NameSegmentTokenizer.tokenize(query)
+
+        if (segments.isNotEmpty()) {
+            scoreFtsSegments(projectId, segments, limit, scores)
+            scoreVocabCoverage(projectId, segments, scores)
+        }
+
+        scoreExactAndFuzzyNames(projectId, query, limit, scores)
+
+        if (scores.isEmpty()) return emptyList()
+
+        val rankedIds = scores.entries.sortedByDescending { it.value }.map { it.key }
+        val nodeMap = loadRankedNodesMap(rankedIds, limit)
 
         val candidates = rankedIds.mapNotNull { nid ->
             val node = nodeMap[nid]
