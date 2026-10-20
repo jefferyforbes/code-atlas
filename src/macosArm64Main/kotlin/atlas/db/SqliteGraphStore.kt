@@ -1770,63 +1770,62 @@ class SqliteGraphStore(val dbPath: String) {
         return results
     }
 
-    fun resolveNodesByUrlOrRoute(projectId: String, rawUrlOrRoute: String, limit: Int = 25): List<GraphNode> {
-        val trimmed = rawUrlOrRoute.trim().trim('\'', '"')
-        if (trimmed.isEmpty()) return emptyList()
-
-        val codeLink = UrlTargetResolver.parseCodeLocationUrl(trimmed)
-        if (codeLink != null) {
-            return if (codeLink.startLine != null || codeLink.symbolFragment != null) {
-                listOfNotNull(getNode(projectId, trimmed))
-            } else {
-                getNodesForFile(projectId, codeLink.filePathSuffix)
-            }
-        }
-
-        val matchedNodes = LinkedHashMap<String, GraphNode>()
-        val canonRoute = if (UrlTargetResolver.isHttpRouteCandidate(trimmed, hasExplicitRouteCall = true) || trimmed.startsWith("/")) {
-            UrlTargetResolver.normalizeRouteTemplate(trimmed)
+    private fun resolveCodeLocationNodes(
+        projectId: String,
+        query: String,
+        codeLink: UrlTargetResolver.CodeLocationLink
+    ): List<GraphNode> =
+        if (codeLink.startLine != null || codeLink.symbolFragment != null) {
+            listOfNotNull(getNode(projectId, query))
         } else {
-            val pathFromUrl = UrlTargetResolver.extractPathFromHttpUrl(trimmed)
-            if (pathFromUrl != null && UrlTargetResolver.isHttpRouteCandidate(pathFromUrl, hasExplicitRouteCall = false)) {
-                UrlTargetResolver.normalizeRouteTemplate(pathFromUrl)
-            } else null
+            getNodesForFile(projectId, codeLink.filePathSuffix)
         }
 
-        if (canonRoute != null) {
-            val epNodeId = "$projectId:endpoint#$canonRoute"
-            getNode(projectId, epNodeId)?.let { matchedNodes[it.nodeId] = it }
-            val escRoute = canonRoute.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            val epStmt = db.prepare(
-                """
-                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree, description, is_top_level,
-                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
-                FROM nodes
-                WHERE project_id = ? AND kind = 'endpoint'
-                  AND (node_id = ? OR name = ? OR name LIKE ? ESCAPE '\')
-                ORDER BY (name = ?) DESC, in_degree DESC
-                LIMIT ?;
-                """.trimIndent()
-            )
-            try {
-                epStmt.bindString(1, projectId)
-                epStmt.bindString(2, epNodeId)
-                epStmt.bindString(3, canonRoute)
-                epStmt.bindString(4, "%$escRoute%")
-                epStmt.bindString(5, canonRoute)
-                epStmt.bindInt(6, limit)
-                while (epStmt.step()) {
-                    val n = rowToNode(epStmt)
-                    matchedNodes[n.nodeId] = n
-                }
-            } finally {
-                epStmt.close()
+    private fun queryMatchedEndpoints(
+        projectId: String,
+        canonRoute: String,
+        limit: Int,
+        outMatched: MutableMap<String, GraphNode>
+    ) {
+        val epNodeId = "$projectId:endpoint#$canonRoute"
+        getNode(projectId, epNodeId)?.let { outMatched[it.nodeId] = it }
+        val escRoute = canonRoute.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val epStmt = db.prepare(
+            """
+            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                   is_test_double, in_degree, out_degree, description, is_top_level,
+                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+            FROM nodes
+            WHERE project_id = ? AND kind = 'endpoint'
+              AND (node_id = ? OR name = ? OR name LIKE ? ESCAPE '\')
+            ORDER BY (name = ?) DESC, in_degree DESC
+            LIMIT ?;
+            """.trimIndent()
+        )
+        try {
+            epStmt.bindString(1, projectId)
+            epStmt.bindString(2, epNodeId)
+            epStmt.bindString(3, canonRoute)
+            epStmt.bindString(4, "%$escRoute%")
+            epStmt.bindString(5, canonRoute)
+            epStmt.bindInt(6, limit)
+            while (epStmt.step()) {
+                val n = rowToNode(epStmt)
+                outMatched[n.nodeId] = n
             }
+        } finally {
+            epStmt.close()
         }
+    }
 
-        val canonUrl = UrlTargetResolver.normalizeExternalUrl(trimmed)
+    private fun queryMatchedUrlEdges(
+        projectId: String,
+        canonRoute: String?,
+        canonUrl: String,
+        limit: Int,
+        outMatched: MutableMap<String, GraphNode>
+    ) {
         val escUrl = canonUrl.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         val edgeStmt = db.prepare(
             """
@@ -1850,11 +1849,31 @@ class SqliteGraphStore(val dbPath: String) {
             edgeStmt.bindInt(5, limit)
             while (edgeStmt.step()) {
                 val n = rowToNode(edgeStmt)
-                matchedNodes[n.nodeId] = n
+                outMatched[n.nodeId] = n
             }
         } finally {
             edgeStmt.close()
         }
+    }
+
+    fun resolveNodesByUrlOrRoute(projectId: String, rawUrlOrRoute: String, limit: Int = 25): List<GraphNode> {
+        val trimmed = rawUrlOrRoute.trim().trim('\'', '"')
+        if (trimmed.isEmpty()) return emptyList()
+
+        val codeLink = UrlTargetResolver.parseCodeLocationUrl(trimmed)
+        if (codeLink != null) {
+            return resolveCodeLocationNodes(projectId, trimmed, codeLink)
+        }
+
+        val matchedNodes = LinkedHashMap<String, GraphNode>()
+        val canonRoute = resolveCanonicalRoute(trimmed)
+
+        if (canonRoute != null) {
+            queryMatchedEndpoints(projectId, canonRoute, limit, matchedNodes)
+        }
+
+        val canonUrl = UrlTargetResolver.normalizeExternalUrl(trimmed)
+        queryMatchedUrlEdges(projectId, canonRoute, canonUrl, limit, matchedNodes)
 
         return matchedNodes.values.toList()
     }
