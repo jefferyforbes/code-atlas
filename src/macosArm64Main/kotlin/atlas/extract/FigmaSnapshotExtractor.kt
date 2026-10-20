@@ -851,47 +851,60 @@ class FigmaSnapshotExtractor {
         }
     }
 
-    private fun traverseDtcgGroup(
+    private fun resolveDtcgType(obj: JsonObject, inheritedType: String?): String? {
+        val direct = obj["\$type"].asString()
+        if (direct != null) return direct
+        val type = obj["type"].asString()
+        if (type != null) return type
+        return inheritedType
+    }
+
+    private fun extractDtcgToken(obj: JsonObject, path: List<String>, currentType: String?): DtcgRawToken {
+        val tokenName = path.joinToString("/")
+        val collectionName = if (path.size > 1) path.first() else "Tokens"
+        val value = obj["\$value"] ?: obj["value"] ?: JsonPrimitive("")
+        val resolvedType = normalizeDtcgType(currentType)
+
+        val ext = obj["\$extensions"]?.jsonObject ?: obj["extensions"]?.jsonObject
+        val codeWeb = ext?.get("web").asString() ?: ext?.get("css").asString()
+        val codeCompose = ext?.get("compose").asString()
+
+        return DtcgRawToken(
+            name = tokenName,
+            collectionName = collectionName,
+            resolvedType = resolvedType,
+            value = value,
+            codeSyntaxWeb = codeWeb,
+            codeSyntaxCompose = codeCompose
+        )
+    }
+
+    private fun traverseDtcgChildren(
         obj: JsonObject,
         path: List<String>,
-        inheritedType: String?,
+        currentType: String?,
         results: MutableList<DtcgRawToken>
     ) {
-        val currentType = obj["\$type"].asString()
-            ?: obj["type"].asString()
-            ?: inheritedType
-
-        val isToken = obj.containsKey("\$value") || obj.containsKey("value")
-        if (isToken) {
-            val tokenName = path.joinToString("/")
-            val collectionName = if (path.size > 1) path.first() else "Tokens"
-            val value = obj["\$value"] ?: obj["value"] ?: JsonPrimitive("")
-            val resolvedType = normalizeDtcgType(currentType)
-
-            val ext = obj["\$extensions"]?.jsonObject ?: obj["extensions"]?.jsonObject
-            val codeWeb = ext?.get("web").asString()
-                ?: ext?.get("css").asString()
-            val codeCompose = ext?.get("compose").asString()
-
-            results.add(
-                DtcgRawToken(
-                    name = tokenName,
-                    collectionName = collectionName,
-                    resolvedType = resolvedType,
-                    value = value,
-                    codeSyntaxWeb = codeWeb,
-                    codeSyntaxCompose = codeCompose
-                )
-            )
-            return
-        }
-
         for ((key, child) in obj) {
             if (key.startsWith("\$") || key in DTCG_METADATA_KEYS) continue
             if (child is JsonObject) {
                 traverseDtcgGroup(child, path + key, currentType, results)
             }
         }
+    }
+
+    private fun traverseDtcgGroup(
+        obj: JsonObject,
+        path: List<String>,
+        inheritedType: String?,
+        results: MutableList<DtcgRawToken>
+    ) {
+        val currentType = resolveDtcgType(obj, inheritedType)
+        if (obj.containsKey("\$value") || obj.containsKey("value")) {
+            results.add(extractDtcgToken(obj, path, currentType))
+            return
+        }
+        traverseDtcgChildren(obj, path, currentType, results)
     }
 
     private fun normalizeDtcgType(typeStr: String?): String {
