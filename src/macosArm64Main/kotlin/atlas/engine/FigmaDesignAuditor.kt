@@ -4,8 +4,10 @@ import atlas.db.SqliteGraphStore
 import atlas.extract.UrlTargetResolver
 import atlas.model.Figma3DScope
 import atlas.model.FigmaAuditResult
+import atlas.model.FigmaEdge
 import atlas.model.FigmaNode
 import atlas.model.FigmaSpatialBounds
+import atlas.model.FigmaVariable
 import atlas.model.FigmaViolation
 import kotlin.math.max
 import kotlin.math.min
@@ -211,6 +213,193 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
         return Pair(score, resultViolations)
     }
 
+    private fun normalizeSeedIdentifier(seed: String): String {
+        val seedLink = UrlTargetResolver.parseFigmaUrl(seed)
+        val nodeId = seedLink?.nodeId
+        if (nodeId != null) return nodeId
+        return UrlTargetResolver.normalizeFigmaNodeId(seed)
+    }
+
+    private fun resolveEffectiveSeeds(rawFileKey: String, seedNodeNames: List<String>): Pair<String, List<String>> {
+        val parsedFileLink = UrlTargetResolver.parseFigmaUrl(rawFileKey)
+        val fileKey = parsedFileLink?.fileKey ?: rawFileKey
+        val rawExpanded = seedNodeNames.flatMap { it.split(',') }.map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
+        if (rawExpanded.isEmpty() && parsedFileLink?.nodeId != null) {
+            rawExpanded.add(parsedFileLink.nodeId)
+        }
+        val expandedSeeds = rawExpanded.map { normalizeSeedIdentifier(it) }
+        return Pair(fileKey, expandedSeeds)
+    }
+
+    private fun querySeedNodes(fileKey: String, seeds: List<String>): List<FigmaNode> {
+        val seedNodes = mutableListOf<FigmaNode>()
+        for (seed in seeds) {
+            val byName = store.queryFigmaNodesByName(fileKey, seed)
+            if (byName.isNotEmpty()) {
+                seedNodes.addAll(byName)
+                continue
+            }
+            val byId = store.queryFigmaNodeById(fileKey, seed)
+            if (byId != null) {
+                seedNodes.add(byId)
+                continue
+            }
+            seedNodes.addAll(store.queryFigmaNodesByNameLike(fileKey, seed))
+        }
+        return seedNodes
+    }
+
+    private fun computeSpatialBounds(seedNodes: List<FigmaNode>): FigmaSpatialBounds {
+        if (seedNodes.isEmpty()) {
+            return FigmaSpatialBounds(0.0, 0.0, 0.0, 0.0)
+        }
+        var minX = Double.MAX_VALUE
+        var minY = Double.MAX_VALUE
+        var maxX = -Double.MAX_VALUE
+        var maxY = -Double.MAX_VALUE
+        for (n in seedNodes) {
+            minX = min(minX, n.canvasX)
+            minY = min(minY, n.canvasY)
+            maxX = max(maxX, n.canvasX + n.width)
+            maxY = max(maxY, n.canvasY + n.height)
+        }
+        return FigmaSpatialBounds(minX, maxX, minY, maxY)
+    }
+
+    private data class ComponentHierarchyBoundary(
+        val sharedMasterComponents: List<String>,
+        val potentialCollisions: List<String>
+    )
+
+    private fun formatMasterCollisionMessage(
+        masterName: String,
+        targetId: String,
+        isMasterInScope: Boolean,
+        instantiatedInside: Boolean,
+        externalCount: Int
+    ): String {
+        if (isMasterInScope && !instantiatedInside) {
+            return "Master Component '$masterName' ($targetId) defined in scope has $externalCount external instance(s) outside scope"
+        }
+        if (isMasterInScope && instantiatedInside) {
+            return "Master Component '$masterName' ($targetId) defined in scope is instantiated both inside and outside scope ($externalCount external instance(s))"
+        }
+        return "Master Component '$masterName' ($targetId) is instantiated inside scope and shared with $externalCount external instance(s)"
+    }
+
+    private data class TargetInstanceUsage(
+        val instantiatedInside: Boolean,
+        val externalCount: Int
+    )
+
+    private fun countInstanceUsage(
+        inEdges: List<FigmaEdge>,
+        scopedNodeIds: Set<String>
+    ): TargetInstanceUsage {
+        var instantiatedInside = false
+        var externalCount = 0
+        for (edge in inEdges) {
+            if (edge.sourceNodeId in scopedNodeIds) {
+                instantiatedInside = true
+            } else {
+                externalCount++
+            }
+        }
+        return TargetInstanceUsage(instantiatedInside, externalCount)
+    }
+
+    private fun isEligibleMasterCollision(
+        instantiatedInside: Boolean,
+        isMasterInScope: Boolean,
+        externalCount: Int
+    ): Boolean {
+        if (externalCount <= 0) return false
+        return instantiatedInside || isMasterInScope
+    }
+
+    private fun synthesizeComponentBoundary(
+        fileKey: String,
+        scopedNodeIds: Set<String>
+    ): ComponentHierarchyBoundary {
+        if (scopedNodeIds.isEmpty()) {
+            return ComponentHierarchyBoundary(emptyList(), emptyList())
+        }
+
+        val sharedMasterComponents = mutableListOf<String>()
+        val potentialCollisions = mutableListOf<String>()
+        val allInstantiatesEdges = store.queryFigmaEdgesByType(fileKey, "INSTANTIATES")
+        val edgesByTarget = allInstantiatesEdges.groupBy { it.targetNodeId }
+
+        for ((targetId, inEdges) in edgesByTarget) {
+            val (instantiatedInside, externalCount) = countInstanceUsage(inEdges, scopedNodeIds)
+            val isMasterInScope = targetId in scopedNodeIds
+            if (!isEligibleMasterCollision(instantiatedInside, isMasterInScope, externalCount)) continue
+
+            val masterNode = store.queryFigmaNodeById(fileKey, targetId)
+            val masterName = masterNode?.name ?: targetId
+            sharedMasterComponents.add(masterName)
+            potentialCollisions.add(
+                formatMasterCollisionMessage(masterName, targetId, isMasterInScope, instantiatedInside, externalCount)
+            )
+        }
+
+        return ComponentHierarchyBoundary(
+            sharedMasterComponents.distinct().sorted(),
+            potentialCollisions
+        )
+    }
+
+    private fun collectUpstreamVariableAliases(
+        fileKey: String,
+        initialVar: FigmaVariable,
+        tokenLayers: MutableSet<String>
+    ) {
+        val visitedAliases = mutableSetOf<String>()
+        var upstreamId = initialVar.aliasedVariableId
+        var hops = 0
+        while (!upstreamId.isNullOrEmpty() && hops < 50 && visitedAliases.add(upstreamId)) {
+            hops++
+            val parentVar = store.queryFigmaVariableById(fileKey, upstreamId)
+                ?: store.queryFigmaVariableByName(fileKey, upstreamId)
+            if (parentVar != null) {
+                tokenLayers.add(parentVar.name)
+                tokenLayers.add(parentVar.variableId)
+                upstreamId = parentVar.aliasedVariableId
+            } else {
+                tokenLayers.add(upstreamId)
+                break
+            }
+        }
+    }
+
+    private fun synthesizeTokenBoundary(
+        fileKey: String,
+        scopedNodeIds: Set<String>
+    ): List<String> {
+        if (scopedNodeIds.isEmpty()) return emptyList()
+
+        val tokenLayers = mutableSetOf<String>()
+        val allBindsEdges = store.queryFigmaEdgesByType(fileKey, "BINDS_VARIABLE")
+        val scopedBindsEdges = allBindsEdges.filter { it.sourceNodeId in scopedNodeIds }
+        val distinctVarTargets = scopedBindsEdges.map { it.targetNodeId }.distinct()
+
+        for (varTarget in distinctVarTargets) {
+            tokenLayers.add(varTarget)
+            val currentVar = store.queryFigmaVariableById(fileKey, varTarget)
+                ?: store.queryFigmaVariableByName(fileKey, varTarget)
+            if (currentVar != null) {
+                tokenLayers.add(currentVar.name)
+                collectUpstreamVariableAliases(fileKey, currentVar, tokenLayers)
+            }
+
+            val impact = store.resolveVariableAliasImpact(fileKey, varTarget, depth = 5)
+            for (v in impact) {
+                tokenLayers.add(v.name)
+            }
+        }
+        return tokenLayers.toList().sorted()
+    }
+
     /**
      * Synthesizes 3D Concurrency Scope for concurrent multi-agent design tasks:
      * 1. Spatial R*Tree bounding box
@@ -222,142 +411,25 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
         fileKey: String,
         seedNodeNames: List<String>
     ): Figma3DScope {
-        val rawFileKey = fileKey
-        val parsedFileLink = UrlTargetResolver.parseFigmaUrl(rawFileKey)
-        val fileKey = parsedFileLink?.fileKey ?: rawFileKey
-        val rawExpanded = seedNodeNames.flatMap { it.split(',') }.map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
-        if (rawExpanded.isEmpty() && parsedFileLink?.nodeId != null) {
-            rawExpanded.add(parsedFileLink.nodeId)
-        }
-        val expandedSeeds = rawExpanded.map { seed ->
-            val seedLink = UrlTargetResolver.parseFigmaUrl(seed)
-            when {
-                seedLink?.nodeId != null -> seedLink.nodeId
-                else -> UrlTargetResolver.normalizeFigmaNodeId(seed)
-            }
-        }
-        val seedNodes = mutableListOf<FigmaNode>()
-        for (seed in expandedSeeds) {
-            val byName = store.queryFigmaNodesByName(fileKey, seed)
-            if (byName.isNotEmpty()) {
-                seedNodes.addAll(byName)
-            } else {
-                val byId = store.queryFigmaNodeById(fileKey, seed)
-                if (byId != null) {
-                    seedNodes.add(byId)
-                } else {
-                    seedNodes.addAll(store.queryFigmaNodesByNameLike(fileKey, seed))
-                }
-            }
-        }
+        val (effectiveFileKey, expandedSeeds) = resolveEffectiveSeeds(fileKey, seedNodeNames)
+        val seedNodes = querySeedNodes(effectiveFileKey, expandedSeeds)
+        val spatialBounds = computeSpatialBounds(seedNodes)
 
-        val spatialBounds = if (seedNodes.isEmpty()) {
-            FigmaSpatialBounds(0.0, 0.0, 0.0, 0.0)
-        } else {
-            var minX = Double.MAX_VALUE
-            var minY = Double.MAX_VALUE
-            var maxX = -Double.MAX_VALUE
-            var maxY = -Double.MAX_VALUE
-            for (n in seedNodes) {
-                minX = min(minX, n.canvasX)
-                minY = min(minY, n.canvasY)
-                maxX = max(maxX, n.canvasX + n.width)
-                maxY = max(maxY, n.canvasY + n.height)
-            }
-            FigmaSpatialBounds(minX, maxX, minY, maxY)
-        }
-
-        val scopedNodes = if (seedNodes.isEmpty()) emptyList() else store.queryFigmaSpatialIntersection(fileKey, spatialBounds)
+        val scopedNodes = if (seedNodes.isEmpty()) emptyList() else store.queryFigmaSpatialIntersection(effectiveFileKey, spatialBounds)
         val scopedNodeIds = scopedNodes.map { it.nodeId }.toSet()
 
-        // Dimension 2: Component Hierarchy & Shared Master Components (Batched)
-        val sharedMasterComponents = mutableListOf<String>()
-        val potentialCollisions = mutableListOf<String>()
-
-        if (scopedNodeIds.isNotEmpty()) {
-            val allInstantiatesEdges = store.queryFigmaEdgesByType(fileKey, "INSTANTIATES")
-            val edgesByTarget = allInstantiatesEdges.groupBy { it.targetNodeId }
-
-            for ((targetId, inEdges) in edgesByTarget) {
-                var instantiatedInside = false
-                var externalCount = 0
-
-                for (edge in inEdges) {
-                    if (edge.sourceNodeId in scopedNodeIds) {
-                        instantiatedInside = true
-                    } else {
-                        externalCount++
-                    }
-                }
-
-                val isMasterInScope = targetId in scopedNodeIds
-                if (!instantiatedInside && !isMasterInScope) continue
-
-                val masterNode = store.queryFigmaNodeById(fileKey, targetId)
-                val masterName = masterNode?.name ?: targetId
-
-                if (externalCount > 0) {
-                    sharedMasterComponents.add(masterName)
-                    val msg = if (isMasterInScope && !instantiatedInside) {
-                        "Master Component '$masterName' ($targetId) defined in scope has $externalCount external instance(s) outside scope"
-                    } else if (isMasterInScope && instantiatedInside) {
-                        "Master Component '$masterName' ($targetId) defined in scope is instantiated both inside and outside scope ($externalCount external instance(s))"
-                    } else {
-                        "Master Component '$masterName' ($targetId) is instantiated inside scope and shared with $externalCount external instance(s)"
-                    }
-                    potentialCollisions.add(msg)
-                }
-            }
-        }
-
-        // Dimension 3: Design Tokens & Variable Boundary (Batched)
-        val tokenLayers = mutableSetOf<String>()
-        if (scopedNodeIds.isNotEmpty()) {
-            val allBindsEdges = store.queryFigmaEdgesByType(fileKey, "BINDS_VARIABLE")
-            val scopedBindsEdges = allBindsEdges.filter { it.sourceNodeId in scopedNodeIds }
-            val distinctVarTargets = scopedBindsEdges.map { it.targetNodeId }.distinct()
-
-            for (varTarget in distinctVarTargets) {
-                tokenLayers.add(varTarget)
-
-                val currentVar = store.queryFigmaVariableById(fileKey, varTarget)
-                    ?: store.queryFigmaVariableByName(fileKey, varTarget)
-                if (currentVar != null) {
-                    tokenLayers.add(currentVar.name)
-                    val visitedAliases = mutableSetOf<String>()
-                    var upstreamId = currentVar.aliasedVariableId
-                    var hops = 0
-                    while (!upstreamId.isNullOrEmpty() && hops < 50 && visitedAliases.add(upstreamId)) {
-                        hops++
-                        val parentVar = store.queryFigmaVariableById(fileKey, upstreamId)
-                            ?: store.queryFigmaVariableByName(fileKey, upstreamId)
-                        if (parentVar != null) {
-                            tokenLayers.add(parentVar.name)
-                            tokenLayers.add(parentVar.variableId)
-                            upstreamId = parentVar.aliasedVariableId
-                        } else {
-                            tokenLayers.add(upstreamId)
-                            break
-                        }
-                    }
-                }
-
-                val impact = store.resolveVariableAliasImpact(fileKey, varTarget, depth = 5)
-                for (v in impact) {
-                    tokenLayers.add(v.name)
-                }
-            }
-        }
+        val componentBoundary = synthesizeComponentBoundary(effectiveFileKey, scopedNodeIds)
+        val tokenLayers = synthesizeTokenBoundary(effectiveFileKey, scopedNodeIds)
 
         return Figma3DScope(
             project = project,
-            fileKey = fileKey,
+            fileKey = effectiveFileKey,
             seedNodes = expandedSeeds,
             spatialBounds = spatialBounds,
             scopedNodesCount = scopedNodes.size,
-            sharedMasterComponents = sharedMasterComponents.distinct().sorted(),
-            tokenLayers = tokenLayers.toList().sorted(),
-            potentialCollisions = potentialCollisions
+            sharedMasterComponents = componentBoundary.sharedMasterComponents,
+            tokenLayers = tokenLayers,
+            potentialCollisions = componentBoundary.potentialCollisions
         )
     }
 }
