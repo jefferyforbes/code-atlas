@@ -893,6 +893,59 @@ class ComposeStabilityExtractor {
         return result
     }
 
+    private fun evaluateWorkspaceVarProperty(
+        wn: GraphNode,
+        sig: String,
+        hasStable: Boolean
+    ): Pair<String, String> {
+        val prop = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""").find(sig)?.groupValues?.get(1) ?: "prop"
+        if (hasStable) {
+            return "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:${wn.name}.$prop"
+        }
+        return "UNSTABLE" to "MUTABLE_VAR_PROPERTY:$prop"
+    }
+
+    private fun evaluateWorkspaceCollectionProperty(
+        wn: GraphNode,
+        rawColMatch: MatchResult,
+        hasStable: Boolean,
+        stabilityPatterns: List<Regex>
+    ): Pair<String, String> {
+        val propName = rawColMatch.groupValues[1]
+        val colType = rawColMatch.groupValues[2]
+        val matchedByConf = stabilityPatterns.any { it.matches("kotlin.collections.$colType") }
+        if (matchedByConf) {
+            return "STABLE" to "STABILITY_CONFIG_MATCH:kotlin.collections.$colType"
+        }
+        if (hasStable) {
+            return "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:${wn.name}.$propName"
+        }
+        return "UNSTABLE" to "UNSTABLE_COLLECTION_PROPERTY:$propName($colType)"
+    }
+
+    private fun evaluateWorkspaceClassSignature(
+        wn: GraphNode,
+        stabilityPatterns: List<Regex>
+    ): Pair<String, String>? {
+        val sig = wn.signature
+        val hasStable = sig.contains("@Immutable") || sig.contains("@Stable")
+
+        if (sig.contains("var ")) {
+            return evaluateWorkspaceVarProperty(wn, sig, hasStable)
+        }
+        val rawColMatch = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map)<""").find(sig)
+        if (rawColMatch != null) {
+            return evaluateWorkspaceCollectionProperty(wn, rawColMatch, hasStable, stabilityPatterns)
+        }
+        if (hasStable) {
+            return "STABLE" to "EXPLICIT_STABLE_ANNOTATION"
+        }
+        if (sig.contains("data class") && sig.contains('(') && sig.contains(')')) {
+            return "STABLE" to "WORKSPACE_DATA_CLASS"
+        }
+        return null
+    }
+
     private fun analyzeLocalClasses(
         projectSlug: String,
         relPath: String,
@@ -908,33 +961,10 @@ class ComposeStabilityExtractor {
 
         // Also incorporate workspace class signatures
         for (wn in workspaceNodes) {
-            if (wn.kind in setOf("class", "interface") && wn.name !in result) {
-                val sig = wn.signature
-                val rawColMatch = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map)<""").find(sig)
-                val hasStable = sig.contains("@Immutable") || sig.contains("@Stable")
-                if (sig.contains("var ")) {
-                    val prop = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""").find(sig)?.groupValues?.get(1) ?: "prop"
-                    if (hasStable) {
-                        result[wn.name] = "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:${wn.name}.$prop"
-                    } else {
-                        result[wn.name] = "UNSTABLE" to "MUTABLE_VAR_PROPERTY:$prop"
-                    }
-                } else if (rawColMatch != null) {
-                    val propName = rawColMatch.groupValues[1]
-                    val colType = rawColMatch.groupValues[2]
-                    val matchedByConf = stabilityPatterns.any { it.matches("kotlin.collections.$colType") }
-                    if (matchedByConf) {
-                        result[wn.name] = "STABLE" to "STABILITY_CONFIG_MATCH:kotlin.collections.$colType"
-                    } else if (hasStable) {
-                        result[wn.name] = "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:${wn.name}.$propName"
-                    } else {
-                        result[wn.name] = "UNSTABLE" to "UNSTABLE_COLLECTION_PROPERTY:$propName($colType)"
-                    }
-                } else if (hasStable) {
-                    result[wn.name] = "STABLE" to "EXPLICIT_STABLE_ANNOTATION"
-                } else if (sig.contains("data class") && sig.contains('(') && sig.contains(')')) {
-                    result[wn.name] = "STABLE" to "WORKSPACE_DATA_CLASS"
-                }
+            if (wn.kind !in setOf("class", "interface") || wn.name in result) continue
+            val stability = evaluateWorkspaceClassSignature(wn, stabilityPatterns)
+            if (stability != null) {
+                result[wn.name] = stability
             }
         }
         return result
