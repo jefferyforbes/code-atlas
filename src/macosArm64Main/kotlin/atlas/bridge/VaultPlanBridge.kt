@@ -18,6 +18,21 @@ object VaultPlanBridge {
     private val TRIGGERED_PATTERN_RE = Regex("""(?i)triggered(?:\s+natively)?\s+by\s+([^.\n]+)""")
     private val SLASH_COMMAND_RE = Regex("""\/([a-z][a-z0-9_-]{1,30})""")
 
+    private val SCRIPT_EXTENSIONS = setOf("py", "sh", "bash", "zsh", "kexe", "rb", "ts", "js")
+    private val NON_SCRIPT_EXTENSIONS = setOf(
+        "md", "txt", "json", "yaml", "yml", "toml", "xml", "csv", "sql", "conf",
+        "properties", "png", "jpg", "jpeg", "webp", "svg", "pdf"
+    )
+    private val IGNORED_SCRIPT_INTERPRETERS = setOf(
+        "python", "python3", "bash", "sh", "zsh", "node", "bun", "deno", "uv", "poetry",
+        "pip", "brew", "git", "gradlew", "./gradlew", "sudo", "export", "cd"
+    )
+    private val WORKSPACE_PATH_MARKERS = listOf(
+        "/src/", "/plans/", "/skills/", "/app/", "/lib/", "/packages/", "/test/", "/tests/",
+        "/scripts/", "/bin/", "/references/", "/plugins/"
+    )
+    private val WHITESPACE_RE = Regex("""\s+""")
+
     fun extractMarkdownAndPlans(
         projectId: String,
         relPath: String,
@@ -66,6 +81,7 @@ object VaultPlanBridge {
             extractBacktickCodeSpans()
             extractMarkdownUrls()
             extractBareRoutes()
+            extractSkillScriptExecutions()
             return Pair(docNodes, edges)
         }
 
@@ -402,7 +418,211 @@ object VaultPlanBridge {
             val lineNo = lineNumberAt(urlMatch.range.first)
             if (handleSkillReference(rawLink, lineNo)) return
             if (handleCodeLocationReference(rawLink, lineNo)) return
+            if (handleRelativeFileReference(rawLink, lineNo)) return
             handleGenericUrlReference(rawLink, lineNo)
+        }
+
+        private fun normalizeAbsolutePath(cleanTarget: String): String {
+            val matchedMarker = WORKSPACE_PATH_MARKERS.firstOrNull { cleanTarget.contains(it) }
+            return if (matchedMarker != null) {
+                cleanTarget.substring(cleanTarget.indexOf(matchedMarker) + 1).trimStart('/')
+            } else {
+                cleanTarget.trimStart('/')
+            }
+        }
+
+        private fun pushPathSegment(stack: MutableList<String>, seg: String) {
+            if (seg.isEmpty() || seg == ".") return
+            if (seg == ".." && stack.isNotEmpty() && stack.last() != "..") {
+                stack.removeAt(stack.size - 1)
+            } else {
+                stack.add(seg)
+            }
+        }
+
+        private fun collapseDotSegments(rawCombined: String): String {
+            val stack = mutableListOf<String>()
+            for (seg in rawCombined.split('/')) {
+                pushPathSegment(stack, seg)
+            }
+            return stack.joinToString("/")
+        }
+
+        private fun resolveRelativePath(baseRelPath: String, targetRel: String): String {
+            val cleanTarget = targetRel.substringBefore('#').substringBefore('?').replace('\\', '/')
+            if (cleanTarget.startsWith("/")) return normalizeAbsolutePath(cleanTarget)
+            val baseDir = if (baseRelPath.contains('/')) baseRelPath.substringBeforeLast('/') else ""
+            val rawCombined = if (baseDir.isEmpty()) cleanTarget else "$baseDir/$cleanTarget"
+            return collapseDotSegments(rawCombined)
+        }
+
+        private fun isScriptPath(path: String): Boolean {
+            val ext = path.substringAfterLast('.', "").lowercase()
+            if (ext in NON_SCRIPT_EXTENSIONS) return false
+            if (ext in SCRIPT_EXTENSIONS) return true
+            val lower = path.lowercase()
+            return lower.contains("/scripts/") || lower.startsWith("scripts/") ||
+                lower.contains("/bin/") || lower.startsWith("bin/")
+        }
+
+        private fun isUnsupportedScheme(link: String): Boolean {
+            if (link.isEmpty() || link.startsWith("#")) return true
+            if (isExternalOrSchemeUrl(link)) return true
+            val lower = link.lowercase()
+            return lower.startsWith("mailto:") || lower.startsWith("javascript:") ||
+                lower.startsWith("data:") || lower.startsWith("tel:")
+        }
+
+        private fun tryEmitSkillDependency(resolvedRelPath: String, lineNo: Int): Boolean {
+            if (!isSkillPath(resolvedRelPath)) return false
+            val targetSkillName = resolveSkillRefName(resolvedRelPath)
+            if (targetSkillName.isEmpty() || targetSkillName == skillName) return false
+            val targetSkillId = "$projectId:skill#$targetSkillName"
+            emitEdge("$docNodeId:depends:$targetSkillId:$lineNo", targetSkillId, "DEPENDS_ON_SKILL", "EXTRACTED_SKILL_DEP", 1.0, lineNo)
+            return true
+        }
+
+        private fun findCandidateFileNodes(resolvedRelPath: String, cleanLink: String): List<GraphNode>? {
+            val withoutDotSlash = cleanLink.removePrefix("./")
+            return byRelFile[resolvedRelPath]
+                ?: byRelFile[withoutDotSlash]
+                ?: byRelFile.entries.firstOrNull { (k, _) ->
+                    k.endsWith("/$resolvedRelPath") || k.endsWith("/$withoutDotSlash")
+                }?.value
+        }
+
+        private fun resolveTargetFileRecord(
+            candidateNodes: List<GraphNode>?,
+            resolvedRelPath: String
+        ): Pair<String, Double> {
+            if (candidateNodes != null) {
+                val primary = candidateNodes.firstOrNull { it.kind in setOf("skill", "plan_contract", "obsidian_note", "file_scope", "file") }
+                    ?: candidateNodes.firstOrNull()
+                val targetId = primary?.nodeId ?: "$projectId:$resolvedRelPath"
+                return Pair(targetId, 1.0)
+            }
+            return Pair("$projectId:$resolvedRelPath", 0.8)
+        }
+
+        private fun handleRelativeFileReference(rawLink: String, lineNo: Int): Boolean {
+            if (isUnsupportedScheme(rawLink)) return false
+            val cleanLink = rawLink.substringBefore('#').substringBefore('?').replace('\\', '/')
+            if (cleanLink.isEmpty()) return false
+
+            val resolvedRelPath = resolveRelativePath(normRel, cleanLink)
+            if (resolvedRelPath.isEmpty()) return false
+            if (tryEmitSkillDependency(resolvedRelPath, lineNo)) return true
+
+            val edgeType = if (isScriptPath(resolvedRelPath)) "EXECUTES_SCRIPT" else "REFERENCES_FILE"
+            val candidateNodes = findCandidateFileNodes(resolvedRelPath, cleanLink)
+            val (targetId, confidence) = resolveTargetFileRecord(candidateNodes, resolvedRelPath)
+            val provenance = if (confidence == 1.0) "EXTRACTED_MARKDOWN_LINK" else "EXTRACTED_LOCAL_FILE_REF"
+
+            emitEdge(
+                edgeId = "$docNodeId:file:$targetId:$lineNo",
+                targetId = targetId,
+                edgeType = edgeType,
+                provenance = provenance,
+                confidence = confidence,
+                lineNumber = lineNo
+            )
+            return true
+        }
+
+        private fun isScriptCandidateToken(clean: String): Boolean {
+            if (clean.startsWith("http://", ignoreCase = true) || clean.startsWith("https://", ignoreCase = true)) return false
+            if (clean.startsWith("-")) return false
+            if (clean.contains('$') || clean.contains('*') || clean.contains('{') || clean.contains('}')) return false
+
+            val ext = clean.substringAfterLast('.', "").lowercase()
+            if (ext in NON_SCRIPT_EXTENSIONS) return false
+            if (ext in SCRIPT_EXTENSIONS) return true
+
+            val lower = clean.lowercase()
+            return lower.contains("/scripts/") || lower.startsWith("scripts/") ||
+                lower.contains("/bin/") || lower.startsWith("bin/") ||
+                lower.startsWith("./")
+        }
+
+        private fun resolveScriptCandidatePath(token: String): String {
+            val clean = token.substringBefore('?').substringBefore('#').replace('\\', '/')
+            val withoutPrefix = clean.removePrefix("./")
+            val stripped = when {
+                withoutPrefix.contains("/plugins/") -> withoutPrefix.substring(withoutPrefix.indexOf("/plugins/") + 1)
+                withoutPrefix.contains("/skills/") -> withoutPrefix.substring(withoutPrefix.indexOf("/skills/") + 1)
+                withoutPrefix.startsWith("/") -> withoutPrefix.trimStart('/')
+                else -> withoutPrefix
+            }
+
+            if (byRelFile.containsKey(stripped)) return stripped
+            val relToSkill = resolveRelativePath(normRel, clean)
+            if (byRelFile.containsKey(relToSkill)) return relToSkill
+
+            val suffixMatch = byRelFile.keys.firstOrNull { it.endsWith("/$stripped") }
+            if (suffixMatch != null) return suffixMatch
+
+            return if (clean.startsWith("./") || clean.startsWith("../")) relToSkill else stripped
+        }
+
+        private fun extractScriptInvocationsFromLine(line: String, lineNo: Int) {
+            if (line.isEmpty() || line.startsWith("#") || line.startsWith("//")) return
+            for (rawToken in line.split(WHITESPACE_RE)) {
+                val clean = rawToken.trim('\'', '"', '`', '(', ')', '[', ']', '<', '>', ',', ';')
+                processScriptToken(clean, lineNo)
+            }
+        }
+
+        private fun processScriptToken(clean: String, lineNo: Int) {
+            if (clean.isEmpty() || clean in IGNORED_SCRIPT_INTERPRETERS || !isScriptCandidateToken(clean)) return
+            val resolvedPath = resolveScriptCandidatePath(clean)
+            if (resolvedPath.isEmpty()) return
+
+            val directMatch = byRelFile[resolvedPath]
+                ?: byRelFile.entries.firstOrNull { (k, _) -> k.endsWith("/$resolvedPath") }?.value
+            val primaryNode = directMatch?.firstOrNull()
+            val targetId = primaryNode?.nodeId ?: "$projectId:$resolvedPath"
+            val confidence = if (directMatch != null) 1.0 else 0.85
+
+            emitEdge(
+                edgeId = "$docNodeId:exec:$targetId:$lineNo",
+                targetId = targetId,
+                edgeType = "EXECUTES_SCRIPT",
+                provenance = "EXTRACTED_SCRIPT_REF",
+                confidence = confidence,
+                lineNumber = lineNo
+            )
+        }
+
+        private fun scanInlineCodeScriptExecutions() {
+            for (match in INLINE_CODE_RE.findAll(markdownText)) {
+                val spanText = match.value.trim('`').trim()
+                val lineNo = lineNumberAt(match.range.first)
+                extractScriptInvocationsFromLine(spanText, lineNo)
+            }
+        }
+
+        private fun processCodeFenceBlock(match: MatchResult) {
+            val fenceLines = match.value.lines()
+            if (fenceLines.size <= 2) return
+            var currentOffset = match.range.first + fenceLines.first().length + 1
+            val innerLines = fenceLines.subList(1, fenceLines.size - 1)
+            for (line in innerLines) {
+                val lineNo = lineNumberAt(currentOffset)
+                extractScriptInvocationsFromLine(line.trim(), lineNo)
+                currentOffset += line.length + 1
+            }
+        }
+
+        private fun scanCodeFenceScriptExecutions() {
+            for (match in CODE_FENCE_RE.findAll(markdownText)) {
+                processCodeFenceBlock(match)
+            }
+        }
+
+        private fun extractSkillScriptExecutions() {
+            if (!isSkill) return
+            scanInlineCodeScriptExecutions()
+            scanCodeFenceScriptExecutions()
         }
 
         private fun extractMarkdownUrls() {

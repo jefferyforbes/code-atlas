@@ -2217,6 +2217,114 @@ class EngineAndMcpTest {
     }
 
     @Test
+    fun testSkillExtractsCompanionFileReferences() {
+        val skillMd = """
+            ---
+            name: product
+            description: Product strategy and discovery hub.
+            ---
+            # Product Strategy
+            Follow the [Discovery Playbook](./references/discovery-playbook.md) and [Product Charter Template](./references/product-charter-template.md).
+            Also see [Global Guidelines](../../knowledge/domain-operating-guidelines.md).
+        """.trimIndent()
+
+        val existingCompanion = GraphNode(
+            nodeId = "agent-os:skills/product/references/discovery-playbook.md#discovery-playbook",
+            projectId = "agent-os",
+            fileId = "agent-os:skills/product/references/discovery-playbook.md",
+            name = "discovery-playbook",
+            qualifiedName = "references/discovery-playbook.md",
+            kind = "obsidian_note",
+            signature = "obsidian_note (active): references/discovery-playbook.md",
+            startLine = 1,
+            endLine = 50,
+            moduleId = "vault",
+            sourceSet = "docs",
+            semioticLayer = "semantic",
+            archLayer = "infrastructure"
+        )
+
+        val (nodes, edges) = VaultPlanBridge.extractMarkdownAndPlans(
+            projectId = "agent-os",
+            relPath = "skills/product/SKILL.md",
+            markdownText = skillMd,
+            indexedNodes = listOf(existingCompanion)
+        )
+
+        val refEdges = edges.filter { it.edgeType == "REFERENCES_FILE" }
+        assertEquals(3, refEdges.size)
+
+        val discoveryEdge = refEdges.firstOrNull { it.targetNodeId == existingCompanion.nodeId }
+        assertNotNull(discoveryEdge)
+        assertEquals("EXTRACTED_MARKDOWN_LINK", discoveryEdge.provenance)
+        assertEquals(1.0, discoveryEdge.confidence)
+
+        val charterEdge = refEdges.firstOrNull { it.targetNodeId == "agent-os:skills/product/references/product-charter-template.md" }
+        assertNotNull(charterEdge)
+        assertEquals("EXTRACTED_LOCAL_FILE_REF", charterEdge.provenance)
+        assertEquals(0.8, charterEdge.confidence)
+
+        val guidelinesEdge = refEdges.firstOrNull { it.targetNodeId == "agent-os:knowledge/domain-operating-guidelines.md" }
+        assertNotNull(guidelinesEdge)
+        assertEquals("EXTRACTED_LOCAL_FILE_REF", guidelinesEdge.provenance)
+    }
+
+    @Test
+    fun testSkillExtractsScriptAndBinaryExecutions() {
+        val skillMd = """
+            ---
+            name: maintenance
+            description: Agent OS maintenance and test suite harness.
+            ---
+            # Maintenance
+            Run test regression via `maintenance/scripts/run_regression.py` or compiled binary `maintenance/bin/run_regression.kexe`.
+            ```bash
+            python scripts/validate_excalidraw.py --check
+            ./bin/skill_optimizer.kexe
+            ```
+        """.trimIndent()
+
+        val indexedScript = GraphNode(
+            nodeId = "agent-os:file:maintenance/scripts/run_regression.py",
+            projectId = "agent-os",
+            fileId = "agent-os:maintenance/scripts/run_regression.py",
+            name = "run_regression.py",
+            qualifiedName = "maintenance/scripts/run_regression.py",
+            kind = "file",
+            signature = "file: maintenance/scripts/run_regression.py",
+            startLine = 1,
+            endLine = 100,
+            moduleId = "maintenance",
+            sourceSet = "scripts",
+            semioticLayer = "pragmatic",
+            archLayer = "infrastructure"
+        )
+
+        val (nodes, edges) = VaultPlanBridge.extractMarkdownAndPlans(
+            projectId = "agent-os",
+            relPath = "skills/maintenance/SKILL.md",
+            markdownText = skillMd,
+            indexedNodes = listOf(indexedScript)
+        )
+
+        val execEdges = edges.filter { it.edgeType == "EXECUTES_SCRIPT" }
+        assertTrue(execEdges.size >= 4, "Expected at least 4 script execution edges, found ${execEdges.size}")
+
+        val pyEdge = execEdges.firstOrNull { it.targetNodeId == indexedScript.nodeId }
+        assertNotNull(pyEdge, "Should link to indexed script nodeId")
+        assertEquals(1.0, pyEdge.confidence)
+
+        val kexeEdge = execEdges.firstOrNull { it.targetNodeId == "agent-os:maintenance/bin/run_regression.kexe" }
+        assertNotNull(kexeEdge, "Should extract kexe binary execution")
+
+        val valEdge = execEdges.firstOrNull { it.targetNodeId == "agent-os:scripts/validate_excalidraw.py" }
+        assertNotNull(valEdge, "Should extract script from code fence")
+
+        val optEdge = execEdges.firstOrNull { it.targetNodeId == "agent-os:skills/maintenance/bin/skill_optimizer.kexe" }
+        assertNotNull(optEdge, "Should extract binary from code fence relative to skill directory")
+    }
+
+    @Test
     fun testGodNodesExcludesTagsAndSkills() {
         val dbPath = "/tmp/test_atlas_god_nodes_${getpid()}.db"
         PlatformFiles.delete(dbPath)
