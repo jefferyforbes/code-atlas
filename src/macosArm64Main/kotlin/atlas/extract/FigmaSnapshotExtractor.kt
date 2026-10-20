@@ -872,15 +872,7 @@ class FigmaSnapshotExtractor {
         }
     }
 
-    private fun parseDtcgTokensFormat(
-        fileKey: String,
-        rootObj: JsonObject,
-        variables: MutableMap<String, FigmaVariable>,
-        edges: MutableMap<String, FigmaEdge>
-    ) {
-        val collectedTokens = mutableListOf<DtcgRawToken>()
-        traverseDtcgGroup(rootObj, emptyList(), null, collectedTokens)
-
+    private fun buildDtcgKnownTokensMap(collectedTokens: List<DtcgRawToken>): Map<String, String> {
         val knownTokens = mutableMapOf<String, String>()
         for (t in collectedTokens) {
             knownTokens[t.name] = t.name
@@ -890,62 +882,83 @@ class FigmaSnapshotExtractor {
                 knownTokens[leaf] = t.name
             }
         }
+        return knownTokens
+    }
+
+    private fun resolveDtcgAliasTarget(rawRef: String, knownTokens: Map<String, String>): String {
+        return knownTokens[rawRef]
+            ?: knownTokens[rawRef.replace('.', '/')]
+            ?: rawRef.replace('.', '/')
+    }
+
+    private fun extractDtcgAlias(value: JsonElement, knownTokens: Map<String, String>): String? {
+        val primContent = (value as? JsonPrimitive)?.content
+        if (primContent != null) {
+            if (primContent.startsWith("{") && primContent.endsWith("}")) {
+                val rawRef = primContent.removePrefix("{").removeSuffix("}").trim()
+                return resolveDtcgAliasTarget(rawRef, knownTokens)
+            }
+            return null
+        }
+        if (value is JsonObject) {
+            for ((_, modeVal) in value) {
+                val str = (modeVal as? JsonPrimitive)?.content
+                if (str != null && str.startsWith("{") && str.endsWith("}")) {
+                    val rawRef = str.removePrefix("{").removeSuffix("}").trim()
+                    return resolveDtcgAliasTarget(rawRef, knownTokens)
+                }
+            }
+        }
+        return null
+    }
+
+    private fun formatDtcgModesJson(value: JsonElement): String {
+        if (value is JsonObject) return value.toString()
+        val contentStr = (value as? JsonPrimitive)?.content ?: ""
+        return JsonObject(mapOf("default" to JsonPrimitive(contentStr))).toString()
+    }
+
+    private fun buildDtcgVariable(
+        fileKey: String,
+        t: DtcgRawToken,
+        targetAlias: String?
+    ): FigmaVariable {
+        val isAlias = targetAlias != null
+        val modesJson = formatDtcgModesJson(t.value)
+        val codeWeb = t.codeSyntaxWeb ?: "var(--${t.name.replace('/', '-').replace('.', '-')})"
+        val codeCompose = t.codeSyntaxCompose ?: "Theme.tokens.${toCamelCase(t.name.substringAfterLast('/'))}"
+
+        return FigmaVariable(
+            variableId = t.name,
+            fileKey = fileKey,
+            collectionName = t.collectionName,
+            name = t.name,
+            resolvedType = t.resolvedType,
+            isAlias = isAlias,
+            aliasedVariableId = targetAlias,
+            modesJson = modesJson,
+            codeSyntaxCompose = codeCompose,
+            codeSyntaxWeb = codeWeb
+        )
+    }
+
+    private fun parseDtcgTokensFormat(
+        fileKey: String,
+        rootObj: JsonObject,
+        variables: MutableMap<String, FigmaVariable>,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        val collectedTokens = mutableListOf<DtcgRawToken>()
+        traverseDtcgGroup(rootObj, emptyList(), null, collectedTokens)
+        val knownTokens = buildDtcgKnownTokensMap(collectedTokens)
 
         for (t in collectedTokens) {
-            var isAlias = false
-            var aliasedVariableId: String? = null
-
-            val primContent = (t.value as? JsonPrimitive)?.content
-            if (primContent != null) {
-                if (primContent.startsWith("{") && primContent.endsWith("}")) {
-                    isAlias = true
-                    val rawRef = primContent.removePrefix("{").removeSuffix("}").trim()
-                    val target = knownTokens[rawRef]
-                        ?: knownTokens[rawRef.replace('.', '/')]
-                        ?: rawRef.replace('.', '/')
-                    aliasedVariableId = target
-                    val edgeId = "$fileKey:alias:${t.name}->$target"
-                    edges[edgeId] = FigmaEdge(edgeId, fileKey, t.name, target, "VARIABLE_ALIAS_OF", "alias")
-                }
-            } else if (t.value is JsonObject) {
-                for ((_, modeVal) in t.value) {
-                    val str = (modeVal as? JsonPrimitive)?.content
-                    if (str != null && str.startsWith("{") && str.endsWith("}")) {
-                        isAlias = true
-                        val rawRef = str.removePrefix("{").removeSuffix("}").trim()
-                        val target = knownTokens[rawRef]
-                            ?: knownTokens[rawRef.replace('.', '/')]
-                            ?: rawRef.replace('.', '/')
-                        aliasedVariableId = target
-                        val edgeId = "$fileKey:alias:${t.name}->$target"
-                        edges[edgeId] = FigmaEdge(edgeId, fileKey, t.name, target, "VARIABLE_ALIAS_OF", "alias")
-                        break
-                    }
-                }
+            val targetAlias = extractDtcgAlias(t.value, knownTokens)
+            if (targetAlias != null) {
+                val edgeId = "$fileKey:alias:${t.name}->$targetAlias"
+                edges[edgeId] = FigmaEdge(edgeId, fileKey, t.name, targetAlias, "VARIABLE_ALIAS_OF", "alias")
             }
-
-            val modesJson = if (t.value is JsonObject) {
-                t.value.toString()
-            } else {
-                val contentStr = (t.value as? JsonPrimitive)?.content ?: ""
-                JsonObject(mapOf("default" to JsonPrimitive(contentStr))).toString()
-            }
-
-            val codeWeb = t.codeSyntaxWeb ?: "var(--${t.name.replace('/', '-').replace('.', '-')})"
-            val codeCompose = t.codeSyntaxCompose ?: "Theme.tokens.${toCamelCase(t.name.substringAfterLast('/'))}"
-
-            variables[t.name] = FigmaVariable(
-                variableId = t.name,
-                fileKey = fileKey,
-                collectionName = t.collectionName,
-                name = t.name,
-                resolvedType = t.resolvedType,
-                isAlias = isAlias,
-                aliasedVariableId = aliasedVariableId,
-                modesJson = modesJson,
-                codeSyntaxCompose = codeCompose,
-                codeSyntaxWeb = codeWeb
-            )
+            variables[t.name] = buildDtcgVariable(fileKey, t, targetAlias)
         }
     }
 
