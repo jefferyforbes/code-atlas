@@ -541,6 +541,119 @@ class PolyglotAstExtractor {
             return out.concatToString()
         }
 
+        private fun dispatchLanguageExtraction(
+            lang: String,
+            projectId: String,
+            relPath: String,
+            sourceText: String,
+            moduleId: String,
+            sourceSet: String,
+            maskedText: String
+        ): Triple<List<GraphNode>, List<GraphEdge>, Int>? {
+            return when (lang) {
+                "kotlin" -> extractKotlin(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "swift" -> extractSwift(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "python" -> extractPython(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "typescript", "javascript" -> extractTypeScript(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "rust" -> extractRust(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "cpp" -> extractCpp(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                else -> null
+            }
+        }
+
+        private fun isEnclosingClassLike(node: GraphNode?): Boolean {
+            return node == null || node.kind == "class" || node.kind == "interface" || node.kind == "object"
+        }
+
+        private fun findAnnotatedChild(baseNodes: List<GraphNode>, directEnclosing: GraphNode?, lineNumber: Int): GraphNode? {
+            return baseNodes
+                .filter {
+                    (it.kind == "function" || it.kind == "method" || it.kind == "composable") &&
+                        it.startLine in (lineNumber + 1)..(lineNumber + 5) &&
+                        (directEnclosing == null || (it.startLine >= directEnclosing.startLine && it.endLine <= directEnclosing.endLine))
+                }
+                .minByOrNull { it.startLine - lineNumber }
+        }
+
+        private fun findUrlEnclosingNode(
+            baseNodes: List<GraphNode>,
+            lineNumber: Int
+        ): GraphNode? {
+            val directEnclosing = baseNodes
+                .filter { it.kind != "file_scope" && lineNumber in it.startLine..it.endLine }
+                .minWithOrNull(compareBy<GraphNode> { it.endLine - it.startLine }.thenByDescending { it.startLine })
+            val annotatedChild = if (isEnclosingClassLike(directEnclosing)) {
+                findAnnotatedChild(baseNodes, directEnclosing, lineNumber)
+            } else null
+            return annotatedChild ?: directEnclosing
+        }
+
+        private fun createFileScopeNode(
+            fileId: String,
+            projectId: String,
+            relPath: String,
+            moduleId: String,
+            sourceSet: String,
+            sourceText: String
+        ): GraphNode {
+            val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relPath)
+            val totalLines = sourceText.lines().size.coerceAtLeast(1)
+            return GraphNode(
+                nodeId = "$fileId#file", projectId = projectId, fileId = fileId,
+                name = relPath.substringAfterLast('/'), qualifiedName = relPath,
+                kind = "file_scope", signature = relPath, startLine = 1, endLine = totalLines,
+                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = semLayer,
+                archLayer = archLayer, isTestDouble = false, isTopLevel = false
+            )
+        }
+
+        private fun enrichNodesAndEdgesWithUrls(
+            projectId: String,
+            relPath: String,
+            moduleId: String,
+            sourceSet: String,
+            sourceText: String,
+            baseNodes: List<GraphNode>,
+            baseEdges: List<GraphEdge>,
+            extractedUrls: List<UrlTargetResolver.ExtractedEndpointOrUrl>
+        ): Pair<List<GraphNode>, List<GraphEdge>> {
+            val fileId = "$projectId:$relPath"
+            val finalNodes = baseNodes.toMutableList()
+            val finalEdges = baseEdges.toMutableList()
+            var fileScopeNode: GraphNode? = finalNodes.firstOrNull { it.nodeId == "$fileId#file" }
+
+            for (item in extractedUrls) {
+                var sourceNode = findUrlEnclosingNode(baseNodes, item.lineNumber)
+                if (sourceNode == null) {
+                    if (fileScopeNode == null) {
+                        val created = createFileScopeNode(fileId, projectId, relPath, moduleId, sourceSet, sourceText)
+                        fileScopeNode = created
+                        finalNodes.add(created)
+                    }
+                    sourceNode = fileScopeNode
+                }
+
+                val targetId = if (item.isHttpEndpointRoute) {
+                    "$projectId:endpoint#${item.canonicalRouteOrUrl}"
+                } else {
+                    "$projectId:url_ref#${item.canonicalRouteOrUrl}"
+                }
+                finalEdges.add(
+                    GraphEdge(
+                        edgeId = "${sourceNode.nodeId}:url:${item.edgeType.lowercase()}:${item.canonicalRouteOrUrl}:${item.lineNumber}",
+                        projectId = projectId,
+                        sourceNodeId = sourceNode.nodeId,
+                        targetNodeId = targetId,
+                        edgeType = item.edgeType,
+                        provenance = "EXTRACTED_URL",
+                        confidence = 1.0,
+                        lineNumber = item.lineNumber
+                    )
+                )
+            }
+            return Pair(finalNodes, finalEdges)
+        }
+
         fun extractFile(
             projectId: String,
             relPath: String,
@@ -553,68 +666,25 @@ class PolyglotAstExtractor {
             val sourceSet = SemioticLayerClassifier.detectSourceSet(relPath)
 
             val maskedText = maskCommentsAndStrings(sourceText, lang)
-            val (baseNodes, baseEdges, topLevelCount) = when (lang) {
-                "kotlin" -> extractKotlin(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                "swift" -> extractSwift(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                "python" -> extractPython(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                "typescript", "javascript" -> extractTypeScript(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                "rust" -> extractRust(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                "cpp" -> extractCpp(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                else -> return Triple(emptyList(), emptyList(), 0)
-            }
+            val extracted = dispatchLanguageExtraction(lang, projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                ?: return Triple(emptyList(), emptyList(), 0)
+            val (baseNodes, baseEdges, topLevelCount) = extracted
 
             val extractedUrls = UrlTargetResolver.extractCodeRoutesAndUrls(sourceText, maskedText, lang)
             if (extractedUrls.isEmpty()) {
                 return Triple(baseNodes, baseEdges, topLevelCount)
             }
 
-            val fileId = "$projectId:$relPath"
-            val finalNodes = baseNodes.toMutableList()
-            val finalEdges = baseEdges.toMutableList()
-            var fileScopeNode: GraphNode? = finalNodes.firstOrNull { it.nodeId == "$fileId#file" }
-
-            for (item in extractedUrls) {
-                val directEnclosing = baseNodes
-                    .filter { it.kind != "file_scope" && item.lineNumber in it.startLine..it.endLine }
-                    .minWithOrNull(compareBy<GraphNode> { it.endLine - it.startLine }.thenByDescending { it.startLine })
-                val annotatedChild = if (directEnclosing == null || directEnclosing.kind in setOf("class", "interface", "object")) {
-                    baseNodes
-                        .filter {
-                            it.kind in setOf("function", "method", "composable") &&
-                                it.startLine in (item.lineNumber + 1)..(item.lineNumber + 5) &&
-                                (directEnclosing == null || (it.startLine >= directEnclosing.startLine && it.endLine <= directEnclosing.endLine))
-                        }
-                        .minByOrNull { it.startLine - item.lineNumber }
-                } else null
-
-                val sourceNode: GraphNode = annotatedChild ?: directEnclosing ?: (fileScopeNode ?: run {
-                    val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relPath)
-                    val totalLines = sourceText.lines().size.coerceAtLeast(1)
-                    val created = GraphNode(
-                        nodeId = "$fileId#file", projectId = projectId, fileId = fileId,
-                        name = relPath.substringAfterLast('/'), qualifiedName = relPath,
-                        kind = "file_scope", signature = relPath, startLine = 1, endLine = totalLines,
-                        moduleId = moduleId, sourceSet = sourceSet, semioticLayer = semLayer,
-                        archLayer = archLayer, isTestDouble = false, isTopLevel = false
-                    )
-                    fileScopeNode = created
-                    finalNodes.add(created)
-                    created
-                })
-
-                val targetId = if (item.isHttpEndpointRoute) {
-                    "$projectId:endpoint#${item.canonicalRouteOrUrl}"
-                } else {
-                    "$projectId:url_ref#${item.canonicalRouteOrUrl}"
-                }
-                finalEdges.add(
-                    GraphEdge(
-                        edgeId = "${sourceNode.nodeId}:url:${item.edgeType.lowercase()}:${item.canonicalRouteOrUrl}:${item.lineNumber}",
-                        projectId = projectId, sourceNodeId = sourceNode.nodeId, targetNodeId = targetId,
-                        edgeType = item.edgeType, provenance = "EXTRACTED_URL", confidence = 1.0, lineNumber = item.lineNumber
-                    )
-                )
-            }
+            val (finalNodes, finalEdges) = enrichNodesAndEdgesWithUrls(
+                projectId = projectId,
+                relPath = relPath,
+                moduleId = moduleId,
+                sourceSet = sourceSet,
+                sourceText = sourceText,
+                baseNodes = baseNodes,
+                baseEdges = baseEdges,
+                extractedUrls = extractedUrls
+            )
 
             return Triple(finalNodes, finalEdges, topLevelCount)
         }
