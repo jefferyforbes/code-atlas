@@ -31,6 +31,7 @@ class PolyglotAstExtractor {
             """(?<kw>struct|class|protocol|actor|enum|func|extension)\s+(?<name>[A-Za-z0-9_]+)""",
             RegexOption.MULTILINE
         )
+        private val SWIFT_SCOPE_KEYWORDS = setOf("class", "struct", "protocol", "actor", "enum", "func", "extension")
 
         private val TS_IMP_RE = Regex("""import\s+(?:type\s+)?(?:(?:\{([^}]+)\})|([A-Za-z0-9_]+))\s+from\s+['"]([^'"]+)['"]""")
         private val TS_DECL_RE = Regex(
@@ -1954,6 +1955,184 @@ class PolyglotAstExtractor {
             return Triple(nodes, edges, topLevelCount)
         }
 
+        private fun extractSwiftImports(maskedText: String): List<Pair<String, Int>> =
+            SWIFT_IMP_RE.findAll(maskedText).map { match ->
+                Pair(match.groupValues[1], maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
+            }.toList()
+
+        private fun parseSwiftCallEdge(
+            callMatch: MatchResult,
+            node: GraphNode,
+            body: String,
+            seenCallees: MutableSet<String>,
+            projectId: String
+        ): GraphEdge? {
+            val receiver = callMatch.groups["receiver"]?.value?.trim()
+            val callee = callMatch.groups["callee"]?.value ?: return null
+            val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "self")
+            if (isSelfCall || callee in CALL_STOPWORDS) return null
+            val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
+            if (!seenCallees.add(targetSym)) return null
+
+            val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+            return GraphEdge(
+                edgeId = "${node.nodeId}:call:$targetSym:$callLine",
+                projectId = projectId,
+                sourceNodeId = node.nodeId,
+                targetNodeId = "sym:$targetSym",
+                edgeType = "CALLS",
+                provenance = "INFERRED_CALL",
+                confidence = 0.85,
+                lineNumber = callLine
+            )
+        }
+
+        private fun extractSwiftCallEdges(
+            node: GraphNode,
+            allNodes: List<GraphNode>,
+            maskedLines: List<String>,
+            projectId: String
+        ): List<GraphEdge> {
+            val childRanges = buildChildRanges(allNodes, node)
+            val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
+            val seenCallees = mutableSetOf<String>()
+            val edges = mutableListOf<GraphEdge>()
+            for (callMatch in CALL_RE.findAll(body)) {
+                val edge = parseSwiftCallEdge(callMatch, node, body, seenCallees, projectId)
+                if (edge != null) edges.add(edge)
+            }
+            return edges
+        }
+
+        private fun extractSwiftDeclHeader(match: MatchResult): Triple<String, String, String>? {
+            val name = match.groups["name"]?.value ?: return null
+            val groups = match.groups
+            val kw = groups["kw"]?.value ?: "class"
+            val indent = groups["indent"]?.value ?: ""
+            return Triple(indent, kw, name)
+        }
+
+        private fun buildSwiftNodeIdentifiers(fileId: String, relPath: String, name: String, scopeStack: List<ScopeEntry>): Pair<String, String> {
+            val prefix = scopeStack.joinToString(".") { it.name }
+            return if (prefix.isNotEmpty()) {
+                Pair("$fileId#$prefix.$name", "$relPath:$prefix.$name")
+            } else {
+                Pair("$fileId#$name", "$relPath:$name")
+            }
+        }
+
+        private fun buildSwiftNode(
+            nodeId: String,
+            qualifiedName: String,
+            name: String,
+            kw: String,
+            startLine: Int,
+            endLine: Int,
+            isTopLevel: Boolean,
+            lines: List<String>,
+            maskedLines: List<String>,
+            fileId: String,
+            relPath: String,
+            projectId: String,
+            moduleId: String,
+            sourceSet: String
+        ): GraphNode {
+            val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
+            val description = if (isTopLevel) extractDocDescription(lines, startLine, "swift") else null
+            val kind = if (kw == "func") "function" else kw
+            val (cVec, cScore) = computeComplexityMetrics(
+                kind = kind,
+                startLine = startLine,
+                endLine = endLine,
+                maskedLines = maskedLines,
+                lines = lines,
+                language = "swift",
+                functionName = name
+            )
+            return GraphNode(
+                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                qualifiedName = qualifiedName, kind = kind,
+                signature = sigLine, startLine = startLine, endLine = endLine,
+                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                archLayer = arch, isTestDouble = isTd,
+                description = description, isTopLevel = isTopLevel,
+                cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                maxNestingDepth = cVec.maxNesting, complexityScore = cScore
+            )
+        }
+
+        private fun buildSwiftImportEdges(nodeId: String, projectId: String, imports: List<Pair<String, Int>>): List<GraphEdge> {
+            return imports.map { (impTarget, impLine) ->
+                GraphEdge(
+                    edgeId = "$nodeId:imp:$impTarget:$impLine",
+                    projectId = projectId,
+                    sourceNodeId = nodeId,
+                    targetNodeId = "sym:$impTarget",
+                    edgeType = "IMPORTS",
+                    lineNumber = impLine
+                )
+            }
+        }
+
+        private fun isSwiftTopLevel(indent: String, scopeStack: List<ScopeEntry>): Boolean =
+            indent.isEmpty() && scopeStack.isEmpty()
+
+        private fun recordSwiftScopeEntry(kw: String, name: String, startLine: Int, endLine: Int, scopeStack: MutableList<ScopeEntry>) {
+            if (kw in SWIFT_SCOPE_KEYWORDS) {
+                scopeStack.add(ScopeEntry(name, startLine, endLine))
+            }
+        }
+
+        private fun recordSwiftNodeAndEdges(
+            node: GraphNode,
+            isTopLevel: Boolean,
+            nodeId: String,
+            projectId: String,
+            imports: List<Pair<String, Int>>,
+            nodes: MutableList<GraphNode>,
+            edges: MutableList<GraphEdge>
+        ) {
+            nodes.add(node)
+            if (isTopLevel) {
+                edges.addAll(buildSwiftImportEdges(nodeId, projectId, imports))
+            }
+        }
+
+        private fun processSwiftDeclaration(
+            match: MatchResult,
+            maskedText: String,
+            lines: List<String>,
+            maskedLines: List<String>,
+            cleanLines: List<String>,
+            scopeStack: MutableList<ScopeEntry>,
+            fileId: String,
+            relPath: String,
+            projectId: String,
+            moduleId: String,
+            sourceSet: String,
+            imports: List<Pair<String, Int>>,
+            nodes: MutableList<GraphNode>,
+            edges: MutableList<GraphEdge>
+        ): Boolean {
+            val (indent, kw, name) = extractSwiftDeclHeader(match) ?: return false
+            val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
+            val endLine = findBlockEndLine(lines, startLine, cleanLines)
+
+            pruneScopeStack(scopeStack, startLine)
+            val (nodeId, qualifiedName) = buildSwiftNodeIdentifiers(fileId, relPath, name, scopeStack)
+            val isTopLevel = isSwiftTopLevel(indent, scopeStack)
+
+            val node = buildSwiftNode(
+                nodeId, qualifiedName, name, kw, startLine, endLine, isTopLevel,
+                lines, maskedLines, fileId, relPath, projectId, moduleId, sourceSet
+            )
+            recordSwiftNodeAndEdges(node, isTopLevel, nodeId, projectId, imports, nodes, edges)
+            recordSwiftScopeEntry(kw, name, startLine, endLine, scopeStack)
+
+            return isTopLevel && kw != "extension"
+        }
+
         private fun extractSwift(
             projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
             precomputedMaskedText: String? = null
@@ -1966,96 +2145,20 @@ class PolyglotAstExtractor {
             val maskedLines = maskedText.lines()
             val cleanLines = cleanLinesFrom(lines, 0)
             val scopeStack = mutableListOf<ScopeEntry>()
-
-            val imports = SWIFT_IMP_RE.findAll(maskedText).map { match ->
-                Pair(match.groupValues[1], maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
-            }.toList()
+            val imports = extractSwiftImports(maskedText)
 
             var topLevelCount = 0
             for (match in SWIFT_DECL_RE.findAll(maskedText)) {
-                val indent = match.groups["indent"]?.value ?: ""
-                val kw = match.groups["kw"]?.value ?: "class"
-                val name = match.groups["name"]?.value ?: continue
-
-                val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                val endLine = findBlockEndLine(lines, startLine, cleanLines)
-
-                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
-                    scopeStack.removeAt(scopeStack.size - 1)
-                }
-                val enclosingPrefix = scopeStack.joinToString(".") { it.name }
-                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
-                    Pair("$fileId#$enclosingPrefix.$name", "$relPath:$enclosingPrefix.$name")
-                } else {
-                    Pair("$fileId#$name", "$relPath:$name")
-                }
-
-                val isTopLevel = indent.isEmpty() && scopeStack.isEmpty()
-                if (isTopLevel && kw != "extension") topLevelCount++
-                val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
-                val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-
-                val description = if (isTopLevel) extractDocDescription(lines, startLine, "swift") else null
-
-                val kind = if (kw == "func") "function" else kw
-                val (cVec, cScore) = computeComplexityMetrics(
-                    kind = kind,
-                    startLine = startLine,
-                    endLine = endLine,
-                    maskedLines = maskedLines,
-                    lines = lines,
-                    language = "swift",
-                    functionName = name
-                )
-
-                nodes.add(
-                    GraphNode(
-                        nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = qualifiedName, kind = kind,
-                        signature = sigLine, startLine = startLine, endLine = endLine,
-                        moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel,
-                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
-                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
-                    )
-                )
-
-                if (isTopLevel) {
-                    for ((impTarget, impLine) in imports) {
-                        edges.add(GraphEdge(
-                            edgeId = "$nodeId:imp:$impTarget:$impLine", projectId = projectId,
-                            sourceNodeId = nodeId, targetNodeId = "sym:$impTarget", edgeType = "IMPORTS",
-                            lineNumber = impLine
-                        ))
-                    }
-                }
-
-                if (kw in setOf("class", "struct", "protocol", "actor", "enum", "func", "extension")) {
-                    scopeStack.add(ScopeEntry(name, startLine, endLine))
+                if (processSwiftDeclaration(
+                    match, maskedText, lines, maskedLines, cleanLines, scopeStack,
+                    fileId, relPath, projectId, moduleId, sourceSet, imports, nodes, edges
+                )) {
+                    topLevelCount++
                 }
             }
 
             for (node in nodes) {
-                val childRanges = nodes
-                    .filter { it.nodeId != node.nodeId && it.startLine >= node.startLine && it.endLine <= node.endLine && (it.startLine > node.startLine || it.endLine < node.endLine) }
-                    .map { it.startLine..it.endLine }
-                val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
-                val seenCallees = mutableSetOf<String>()
-                for (callMatch in CALL_RE.findAll(body)) {
-                    val receiver = callMatch.groups["receiver"]?.value?.trim()
-                    val callee = callMatch.groups["callee"]?.value ?: continue
-                    val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
-                    val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "self")
-                    if (!isSelfCall && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
-                        val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
-                        edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
-                            provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
-                        ))
-                    }
-                }
+                edges.addAll(extractSwiftCallEdges(node, nodes, maskedLines, projectId))
             }
             return Triple(nodes, edges, topLevelCount)
         }
