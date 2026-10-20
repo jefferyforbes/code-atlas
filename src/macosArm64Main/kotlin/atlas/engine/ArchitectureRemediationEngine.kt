@@ -742,6 +742,68 @@ class ArchitectureRemediationEngine(
         )
     }
 
+    private fun isPresentationConstruct(checkPath: String, symLow: String, normSrcPath: String): Boolean {
+        val presentationPathSegments = listOf(
+            "/ui/", "/presentation/", "/screen/", "/screens/", "/components/", "/views/", "/view/", "/cli/", "/mcp/",
+            "/web/", "/gui/", "/activity/", "/activities/", "/demo/", "/launcher/"
+        )
+        if (presentationPathSegments.any { it in checkPath }) return true
+
+        val presentationSuffixes = listOf(
+            "screen", "viewmodel", "composable", "dialog", "sheet", "cli", "mcpserver",
+            "activity", "launcher", "gui", "component", "components"
+        )
+        if (presentationSuffixes.any { symLow.endsWith(it) }) return true
+
+        return normSrcPath.endsWith("cli.py") || normSrcPath.endsWith("cli.kt") || normSrcPath.endsWith("mcpserver.kt") ||
+            normSrcPath.endsWith("gui.py") || normSrcPath.endsWith("_gui.py") || normSrcPath.endsWith("_runner.py") ||
+            normSrcPath.endsWith("_tool.py") || normSrcPath.endsWith("mb_tool.py") ||
+            normSrcPath.endsWith("/main.kt") || normSrcPath == "main.kt"
+    }
+
+    private fun isInfraConstruct(checkPath: String): Boolean {
+        val infraPathSegments = listOf(
+            "/extract/", "/bridge/", "/config/", "/util/", "/tools/", "/scripts/", "/orchestrator/",
+            "/tools & scripts/"
+        )
+        return infraPathSegments.any { it in checkPath } ||
+            checkPath.contains("/tools") || checkPath.contains("/scripts") || checkPath.contains("/orchestrator")
+    }
+
+    private fun buildClassificationCorrection(
+        projectId: String,
+        violation: LayerInversionViolation,
+        srcRelPath: String,
+        isPresentation: Boolean,
+        dryRun: Boolean
+    ): ArchitectureRemediationPrescription {
+        val details = mutableListOf<String>()
+        val targetLayer = if (isPresentation) "Presentation/Pragmatic" else "Infrastructure"
+        val targetArch = if (isPresentation) "presentation" else "infrastructure"
+        val targetSemiotic = if (isPresentation) "pragmatic" else "semantic"
+        val rationale = "Source symbol '${violation.source}' in '$srcRelPath' belongs to the $targetLayer layer. Correcting classifier eliminates false layer inversion."
+
+        if (!dryRun) {
+            val indexer = WorkspaceIndexer(workspaceRoot, store)
+            indexer.indexWorkspace(projectId, subpaths = listOf(srcRelPath), force = true)
+            details.add("Re-indexed '$srcRelPath' with updated classification: arch_layer=$targetArch, semiotic_layer=$targetSemiotic.")
+        } else {
+            details.add("Dry-run: reindexing '$srcRelPath' with updated SemioticLayerClassifier will classify as $targetLayer.")
+        }
+
+        return ArchitectureRemediationPrescription(
+            id = "rx-arch-${violation.source.replace('.', '_')}",
+            ruleId = "ARCH-LAYER-INVERSION",
+            filePath = srcRelPath,
+            line = violation.lineNumber,
+            fixStrategy = "CLASSIFICATION_CORRECTION",
+            rationale = rationale,
+            verified = true,
+            applied = !dryRun,
+            details = details
+        )
+    }
+
     private fun remediateLayerInversion(
         projectId: String,
         violation: LayerInversionViolation,
@@ -751,60 +813,20 @@ class ArchitectureRemediationEngine(
         val srcNode = store.getNode(projectId, violation.source)
         val tgtNode = store.getNode(projectId, violation.target)
         val srcRelPath = srcNode?.fileId?.substringAfter(':') ?: violation.source.substringBefore(':')
-        val root = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
-        val fullPath = if (srcRelPath.startsWith("/")) srcRelPath else "$root/$srcRelPath"
-        val details = mutableListOf<String>()
 
         val normSrcPath = srcRelPath.replace('\\', '/').lowercase()
         val checkPath = if (normSrcPath.startsWith("/")) normSrcPath else "/$normSrcPath"
         val symLow = srcNode?.name?.lowercase() ?: ""
 
-        val isPresentationConstruct = listOf(
-            "/ui/", "/presentation/", "/screen/", "/screens/", "/components/", "/views/", "/view/", "/cli/", "/mcp/",
-            "/web/", "/gui/", "/activity/", "/activities/", "/demo/", "/launcher/"
-        ).any { it in checkPath } ||
-                listOf("screen", "viewmodel", "composable", "dialog", "sheet", "cli", "mcpserver",
-                       "activity", "launcher", "gui", "component", "components").any { symLow.endsWith(it) } ||
-                normSrcPath.endsWith("cli.py") || normSrcPath.endsWith("cli.kt") || normSrcPath.endsWith("mcpserver.kt") ||
-                normSrcPath.endsWith("gui.py") || normSrcPath.endsWith("_gui.py") || normSrcPath.endsWith("_runner.py") ||
-                normSrcPath.endsWith("_tool.py") || normSrcPath.endsWith("mb_tool.py") ||
-                normSrcPath.endsWith("/main.kt") || normSrcPath == "main.kt"
+        val isPresentation = isPresentationConstruct(checkPath, symLow, normSrcPath)
+        val isInfra = isInfraConstruct(checkPath)
 
-        val isInfraConstruct = listOf(
-            "/extract/", "/bridge/", "/config/", "/util/", "/tools/", "/scripts/", "/orchestrator/",
-            "/tools & scripts/"
-        ).any { it in checkPath } ||
-                checkPath.contains("/tools") || checkPath.contains("/scripts") || checkPath.contains("/orchestrator")
-
-        if (isPresentationConstruct || isInfraConstruct) {
-            val targetLayer = if (isPresentationConstruct) "Presentation/Pragmatic" else "Infrastructure"
-            val targetArch = if (isPresentationConstruct) "presentation" else "infrastructure"
-            val targetSemiotic = if (isPresentationConstruct) "pragmatic" else "semantic"
-            val rationale = "Source symbol '${violation.source}' in '$srcRelPath' belongs to the $targetLayer layer. Correcting classifier eliminates false layer inversion."
-
-            if (!dryRun) {
-                // Re-index this specific file with force to update node arch_layer in sqlite store
-                val indexer = WorkspaceIndexer(workspaceRoot, store)
-                indexer.indexWorkspace(projectId, subpaths = listOf(srcRelPath), force = true)
-                details.add("Re-indexed '$srcRelPath' with updated classification: arch_layer=$targetArch, semiotic_layer=$targetSemiotic.")
-            } else {
-                details.add("Dry-run: reindexing '$srcRelPath' with updated SemioticLayerClassifier will classify as $targetLayer.")
-            }
-
-            return ArchitectureRemediationPrescription(
-                id = "rx-arch-${violation.source.replace('.', '_')}",
-                ruleId = "ARCH-LAYER-INVERSION",
-                filePath = srcRelPath,
-                line = violation.lineNumber,
-                fixStrategy = "CLASSIFICATION_CORRECTION",
-                rationale = rationale,
-                verified = true,
-                applied = !dryRun,
-                details = details
-            )
+        if (isPresentation || isInfra) {
+            return buildClassificationCorrection(projectId, violation, srcRelPath, isPresentation, dryRun)
         }
 
         // True architectural inversion
+        val details = mutableListOf<String>()
         val portName = "${tgtNode?.name ?: "ExternalService"}Port"
         val rationale = "Domain symbol '${violation.source}' directly references ${tgtNode?.archLayer ?: "infrastructure"} symbol '${violation.target}'. Introduce Domain Port interface '$portName' (Dependency Inversion Principle)."
         details.add("Prescription: Define 'interface $portName' in domain, inject into '${violation.source}', and implement in infrastructure.")
@@ -860,6 +882,78 @@ class ArchitectureRemediationEngine(
         return expanded
     }
 
+    private fun isCommentOrPragma(trimmed: String, lang: String): Boolean = when (lang) {
+        "python" -> trimmed.startsWith("#") || trimmed.startsWith("\"\"\"") || trimmed.startsWith("'''")
+        "cpp" -> trimmed.startsWith("#") || trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")
+        "kotlin", "swift", "rust", "typescript", "javascript" -> trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")
+        else -> false
+    }
+
+    private fun isAllowedPreamble(trimmed: String, lang: String): Boolean = when (lang) {
+        "kotlin" -> trimmed.startsWith("@file:") || trimmed.startsWith("package ") || trimmed.startsWith("import ")
+        "python" -> trimmed.startsWith("import ") || trimmed.startsWith("from ")
+        "swift" -> trimmed.startsWith("import ")
+        "rust" -> trimmed.startsWith("#![") || trimmed.startsWith("use ")
+        "cpp" -> false
+        "typescript", "javascript" -> trimmed.startsWith("import ") || (trimmed.startsWith("const ") && "require(" in trimmed)
+        else -> trimmed.startsWith("package ") || trimmed.startsWith("import ") || trimmed.startsWith("from ") || trimmed.startsWith("use ")
+    }
+
+    private fun isDeclarationStart(trimmed: String, lang: String): Boolean {
+        if (isCommentOrPragma(trimmed, lang)) return false
+        return !isAllowedPreamble(trimmed, lang)
+    }
+
+    private fun recordKotlinHeaderOrImport(trimmed: String, headers: MutableList<String>, imports: MutableList<String>) {
+        if (trimmed.startsWith("@file:") || trimmed.startsWith("package ")) headers.add(trimmed)
+        else if (trimmed.startsWith("import ")) imports.add(trimmed)
+    }
+
+    private fun recordPythonHeaderOrImport(trimmed: String, headers: MutableList<String>, imports: MutableList<String>) {
+        if (trimmed.startsWith("#!") || trimmed.startsWith("# -*-")) headers.add(trimmed)
+        else if (trimmed.startsWith("import ") || trimmed.startsWith("from ")) imports.add(trimmed)
+    }
+
+    private fun recordRustHeaderOrImport(trimmed: String, headers: MutableList<String>, imports: MutableList<String>) {
+        if (trimmed.startsWith("#![")) headers.add(trimmed)
+        else if (trimmed.startsWith("use ")) imports.add(trimmed)
+    }
+
+    private fun recordCppHeaderOrImport(trimmed: String, headers: MutableList<String>, imports: MutableList<String>) {
+        if (trimmed.startsWith("#pragma once")) headers.add(trimmed)
+        else if (trimmed.startsWith("#include ")) imports.add(trimmed)
+    }
+
+    private fun recordJsHeaderOrImport(trimmed: String, imports: MutableList<String>) {
+        if (trimmed.startsWith("import ") || (trimmed.startsWith("const ") && "require(" in trimmed)) {
+            imports.add(trimmed)
+        }
+    }
+
+    private fun recordOtherHeaderOrImport(trimmed: String, headers: MutableList<String>, imports: MutableList<String>) {
+        if (trimmed.startsWith("package ")) headers.add(trimmed)
+        if (trimmed.startsWith("import ") || trimmed.startsWith("from ") || trimmed.startsWith("use ")) {
+            imports.add(trimmed)
+        }
+    }
+
+    private fun recordHeaderOrImport(
+        trimmed: String,
+        lang: String,
+        headers: MutableList<String>,
+        imports: MutableList<String>
+    ) {
+        when (lang) {
+            "kotlin" -> recordKotlinHeaderOrImport(trimmed, headers, imports)
+            "swift" -> if (trimmed.startsWith("import ")) imports.add(trimmed)
+            "python" -> recordPythonHeaderOrImport(trimmed, headers, imports)
+            "rust" -> recordRustHeaderOrImport(trimmed, headers, imports)
+            "cpp" -> recordCppHeaderOrImport(trimmed, headers, imports)
+            "typescript", "javascript" -> recordJsHeaderOrImport(trimmed, imports)
+            else -> recordOtherHeaderOrImport(trimmed, headers, imports)
+        }
+    }
+
     private fun extractHeaderAndImports(originalLines: List<String>, ext: String): Pair<List<String>, List<String>> {
         val headers = mutableListOf<String>()
         val imports = mutableListOf<String>()
@@ -868,80 +962,8 @@ class ArchitectureRemediationEngine(
         for (line in originalLines) {
             val trimmed = line.trim()
             if (trimmed.isEmpty()) continue
-
-            // Stop scanning once declarations begin to prevent extracting false imports from code bodies
-            val isDeclStart = when (lang) {
-                "kotlin" -> !trimmed.startsWith("@file:") && !trimmed.startsWith("package ") &&
-                    !trimmed.startsWith("import ") && !trimmed.startsWith("//") &&
-                    !trimmed.startsWith("/*") && !trimmed.startsWith("*")
-                "python" -> !trimmed.startsWith("#") && !trimmed.startsWith("\"\"\"") &&
-                    !trimmed.startsWith("'''") && !trimmed.startsWith("import ") &&
-                    !trimmed.startsWith("from ")
-                "swift" -> !trimmed.startsWith("//") && !trimmed.startsWith("/*") &&
-                    !trimmed.startsWith("*") && !trimmed.startsWith("import ")
-                "rust" -> !trimmed.startsWith("//") && !trimmed.startsWith("/*") &&
-                    !trimmed.startsWith("*") && !trimmed.startsWith("#![") &&
-                    !trimmed.startsWith("use ")
-                "cpp" -> !trimmed.startsWith("//") && !trimmed.startsWith("/*") &&
-                    !trimmed.startsWith("*") && !trimmed.startsWith("#")
-                "typescript", "javascript" -> !trimmed.startsWith("//") && !trimmed.startsWith("/*") &&
-                    !trimmed.startsWith("*") && !trimmed.startsWith("import ") &&
-                    !(trimmed.startsWith("const ") && "require(" in trimmed)
-                else -> !trimmed.startsWith("package ") && !trimmed.startsWith("import ") &&
-                    !trimmed.startsWith("from ") && !trimmed.startsWith("use ")
-            }
-            if (isDeclStart) {
-                break
-            }
-
-            when (lang) {
-                "kotlin" -> {
-                    if (trimmed.startsWith("@file:")) {
-                        headers.add(trimmed)
-                    } else if (trimmed.startsWith("package ")) {
-                        headers.add(trimmed)
-                    } else if (trimmed.startsWith("import ")) {
-                        imports.add(trimmed)
-                    }
-                }
-                "swift" -> {
-                    if (trimmed.startsWith("import ")) {
-                        imports.add(trimmed)
-                    }
-                }
-                "python" -> {
-                    if (trimmed.startsWith("#!") || trimmed.startsWith("# -*-")) {
-                        headers.add(trimmed)
-                    } else if (trimmed.startsWith("import ") || trimmed.startsWith("from ")) {
-                        imports.add(trimmed)
-                    }
-                }
-                "rust" -> {
-                    if (trimmed.startsWith("#![")) {
-                        headers.add(trimmed)
-                    } else if (trimmed.startsWith("use ")) {
-                        imports.add(trimmed)
-                    }
-                }
-                "cpp" -> {
-                    if (trimmed.startsWith("#pragma once")) {
-                        headers.add(trimmed)
-                    } else if (trimmed.startsWith("#include ")) {
-                        imports.add(trimmed)
-                    }
-                }
-                "typescript", "javascript" -> {
-                    if (trimmed.startsWith("import ") || (trimmed.startsWith("const ") && "require(" in trimmed)) {
-                        imports.add(trimmed)
-                    }
-                }
-                else -> {
-                    if (trimmed.startsWith("package ")) headers.add(trimmed)
-                    if (trimmed.startsWith("import ") || trimmed.startsWith("from ") || trimmed.startsWith("use ")) {
-                        imports.add(trimmed)
-                    }
-                }
-            }
+            if (isDeclarationStart(trimmed, lang)) break
+            recordHeaderOrImport(trimmed, lang, headers, imports)
         }
         return Pair(headers, imports)
     }
