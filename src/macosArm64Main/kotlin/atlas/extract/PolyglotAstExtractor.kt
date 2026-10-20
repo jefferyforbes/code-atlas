@@ -1468,35 +1468,45 @@ class PolyglotAstExtractor {
             }
         }
 
-        private fun parseBlockDocComment(lines: List<String>, endIdx: Int): String? {
-            var startIdx = endIdx
-            while (startIdx >= 0) {
-                if (lines[startIdx].trimStart().startsWith("/*")) {
-                    break
+        private fun findBlockDocStart(lines: List<String>, endIdx: Int): Int? {
+            var idx = endIdx
+            while (idx >= 0) {
+                val trimmed = lines[idx].trimStart()
+                if (trimmed.startsWith("/*")) {
+                    return if (trimmed.startsWith("/**") || trimmed.startsWith("/*!")) idx else null
                 }
-                startIdx--
+                idx--
             }
-            if (startIdx < 0) return null
-            val firstLine = lines[startIdx].trimStart()
-            if (!firstLine.startsWith("/**") && !firstLine.startsWith("/*!")) {
-                return null
-            }
+            return null
+        }
 
+        private fun isDocTagLine(line: String): Boolean {
+            return line.startsWith("@") || line.startsWith(":param") ||
+                line.startsWith("- Parameter") || line.startsWith("- Returns")
+        }
+
+        private fun cleanBlockDocLine(raw: String, isFirst: Boolean, isLast: Boolean): String {
+            var line = raw.trim()
+            if (isFirst) {
+                line = if (line.startsWith("/**")) line.removePrefix("/**").trim()
+                       else line.removePrefix("/*!").trim()
+            }
+            if (isLast) {
+                line = line.removeSuffix("*/").trim()
+            }
+            if (line.startsWith("*")) {
+                line = line.removePrefix("*").trim()
+            }
+            return line
+        }
+
+        private fun parseBlockDocComment(lines: List<String>, endIdx: Int): String? {
+            val startIdx = findBlockDocStart(lines, endIdx) ?: return null
             val contentLines = mutableListOf<String>()
             for (i in startIdx..endIdx) {
-                var line = lines[i].trim()
-                if (i == startIdx) {
-                    line = if (line.startsWith("/**")) line.removePrefix("/**").trim()
-                           else line.removePrefix("/*!").trim()
-                }
-                if (i == endIdx) {
-                    line = line.removeSuffix("*/").trim()
-                }
-                if (line.startsWith("*")) {
-                    line = line.removePrefix("*").trim()
-                }
+                val line = cleanBlockDocLine(lines[i], i == startIdx, i == endIdx)
                 if (line.isNotEmpty()) {
-                    if (line.startsWith("@") || line.startsWith(":param") || line.startsWith("- Parameter") || line.startsWith("- Returns")) {
+                    if (isDocTagLine(line)) {
                         break
                     }
                     contentLines.add(line)
@@ -1514,7 +1524,7 @@ class PolyglotAstExtractor {
             val contentLines = mutableListOf<String>()
             for (i in startIdx..endIdx) {
                 val line = lines[i].trim().removePrefix("///").trim()
-                if (line.startsWith("@") || line.startsWith(":param") || line.startsWith("- Parameter") || line.startsWith("- Returns")) {
+                if (isDocTagLine(line)) {
                     break
                 }
                 if (line.isNotEmpty()) {
@@ -1525,21 +1535,26 @@ class PolyglotAstExtractor {
             return if (result.isNotEmpty()) result else null
         }
 
-        private fun parseDoubleSlashDocComment(lines: List<String>, endIdx: Int): String? {
+        private fun findDoubleSlashDocStart(lines: List<String>, endIdx: Int): Int {
             var startIdx = endIdx
             while (startIdx > 0 && lines[startIdx - 1].trim().startsWith("//")) {
                 val prevLow = lines[startIdx - 1].trim().lowercase()
                 if (NON_DOC_LINE_PREFIXES.any { prevLow.startsWith(it) }) break
                 startIdx--
             }
+            return startIdx
+        }
+
+        private fun parseDoubleSlashDocComment(lines: List<String>, endIdx: Int): String? {
+            val startIdx = findDoubleSlashDocStart(lines, endIdx)
             val contentLines = mutableListOf<String>()
             for (i in startIdx..endIdx) {
                 val rawTrim = lines[i].trim()
-                val line = rawTrim.removePrefix("//").trim()
                 val lLow = rawTrim.lowercase()
                 if (NON_DOC_LINE_PREFIXES.any { lLow.startsWith(it) }) {
                     break
                 }
+                val line = rawTrim.removePrefix("//").trim()
                 if (line.isNotEmpty()) {
                     contentLines.add(line)
                 }
