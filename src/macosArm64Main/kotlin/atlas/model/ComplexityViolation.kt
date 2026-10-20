@@ -15,5 +15,6 @@ data class ComplexityViolation(
     @SerialName("line_span") val lineSpan: String = "",
     @SerialName("risk_index") val riskIndex: Double = 0.0,
     @SerialName("cognitive_complexity") val cognitiveComplexity: Int = 0,
-    @SerialName("cyclomatic_complexity") val cyclomaticComplexity: Int = 1
+    @SerialName("cyclomatic_complexity") val cyclomaticComplexity: Int = 1,
+    @SerialName("param_count") val paramCount: Int = 0
 )

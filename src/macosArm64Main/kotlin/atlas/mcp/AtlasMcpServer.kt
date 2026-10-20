@@ -98,7 +98,7 @@ class AtlasMcpServer(
         artifactsDir = artifacts
         store = SqliteGraphStore(dbPath)
         synthesizer = ScopeSynthesizer(store)
-        auditor = ArchitectureAuditor(store)
+        auditor = ArchitectureAuditor(store, workspaceRoot)
         memory = WorkMemoryStore(store)
         figmaAuditor = FigmaDesignAuditor(store)
         composeEngine = ComposeStabilityEngine(store)
@@ -313,6 +313,26 @@ class AtlasMcpServer(
                 putJsonObject("max_cyclomatic") {
                     put("type", "integer")
                     put("description", "Maximum cyclomatic complexity threshold for audit_complexity (default: 15).")
+                }
+                putJsonObject("warn_params") {
+                    put("type", "integer")
+                    put("description", "Warning threshold for function parameter count in audit_complexity (default: 5).")
+                }
+                putJsonObject("max_params") {
+                    put("type", "integer")
+                    put("description", "Error/HIGH severity threshold for function parameter count in audit_complexity (default: 7).")
+                }
+                putJsonObject("compose_warn_params") {
+                    put("type", "integer")
+                    put("description", "Warning threshold for Compose function parameter count in audit_complexity (default: 10).")
+                }
+                putJsonObject("compose_max_params") {
+                    put("type", "integer")
+                    put("description", "Error/HIGH severity threshold for Compose function parameter count in audit_complexity (default: 14).")
+                }
+                putJsonObject("check_params") {
+                    put("type", "boolean")
+                    put("description", "Enable parameter count complexity rule COMPLEXITY-002-PARAMS (default: true).")
                 }
                 putJsonObject("ratchet") {
                     put("type", "integer")
@@ -1305,11 +1325,24 @@ class AtlasMcpServer(
     ): JsonObject {
         val threshold = args["threshold"]?.jsonPrimitive?.intOrNull ?: 10
         val maxCyclomatic = args["max_cyclomatic"]?.jsonPrimitive?.intOrNull ?: 15
-        val violations = auditor.checkComplexityViolations(
-            projectId = project,
+        val warnParams = extractIntOrParsed(args, "warn_params", "max_parameters") ?: 5
+        val maxParams = extractIntOrParsed(args, "max_params") ?: 7
+        val composeWarnParams = extractIntOrParsed(args, "compose_warn_params") ?: 10
+        val composeMaxParams = extractIntOrParsed(args, "compose_max_params") ?: 14
+        val checkParams = args["check_params"]?.jsonPrimitive?.booleanOrNull ?: true
+        val thresholds = ArchitectureAuditor.ComplexityThresholds(
             maxCognitive = threshold,
             maxCyclomatic = maxCyclomatic,
-            pathPrefixes = if (targets.isNotEmpty()) targets else null
+            warnParams = warnParams,
+            maxParams = maxParams,
+            composeWarnParams = composeWarnParams,
+            composeMaxParams = composeMaxParams,
+            checkParams = checkParams
+        )
+        val violations = auditor.checkComplexityViolations(
+            projectId = project,
+            pathPrefixes = if (targets.isNotEmpty()) targets else null,
+            thresholds = thresholds
         )
         val (resolvedRatchet, resolvedHighRatchet) = resolveComplexityRatchets(args, project)
         return buildComplexityAuditResponse(project, threshold, maxCyclomatic, violations, resolvedRatchet, resolvedHighRatchet)
@@ -1427,9 +1460,11 @@ class AtlasMcpServer(
         resolvedRatchet: Int?,
         resolvedHighRatchet: Int?
     ): JsonObject {
-        val highCount = violations.count { it.severity == "HIGH" }
-        val warningCount = violations.count { it.severity == "WARNING" }
-        val totalPassed = if (resolvedRatchet != null) violations.size <= resolvedRatchet else violations.isEmpty()
+        val blockingViolations = violations.filter { it.ruleId == "COMPLEXITY-001" }
+        val advisoryViolations = violations.filter { it.ruleId != "COMPLEXITY-001" }
+        val highCount = blockingViolations.count { it.severity == "HIGH" }
+        val warningCount = blockingViolations.count { it.severity == "WARNING" }
+        val totalPassed = if (resolvedRatchet != null) blockingViolations.size <= resolvedRatchet else blockingViolations.isEmpty()
         val highPassed = if (resolvedHighRatchet != null) highCount <= resolvedHighRatchet else true
         val passed = totalPassed && highPassed
 
@@ -1438,12 +1473,13 @@ class AtlasMcpServer(
             put("passed", passed)
             put("threshold", threshold)
             put("max_cyclomatic", maxCyclomatic)
-            put("total_violations", violations.size)
+            put("total_violations", blockingViolations.size)
             put("high_severity_count", highCount)
             put("warning_count", warningCount)
+            put("advisory_count", advisoryViolations.size)
             if (resolvedRatchet != null) {
                 put("ratchet", resolvedRatchet)
-                put("baseline_delta", violations.size - resolvedRatchet)
+                put("baseline_delta", blockingViolations.size - resolvedRatchet)
             }
             if (resolvedHighRatchet != null) {
                 put("high_ratchet", resolvedHighRatchet)
