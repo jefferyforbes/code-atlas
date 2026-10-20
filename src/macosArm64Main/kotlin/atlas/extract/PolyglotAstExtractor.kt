@@ -102,6 +102,36 @@ class PolyglotAstExtractor {
             "arrayOf", "byteArrayOf", "intArrayOf"
         )
 
+        private fun scoreSpecialReceiver(clean: String, candFileId: String, srcFileId: String): Double? {
+            if (clean == "this") return if (candFileId == srcFileId) 100.0 else 0.0
+            if (clean == "super") return if (candFileId == srcFileId) 90.0 else 0.0
+            return null
+        }
+
+        private fun isExactReceiverMatch(clean: String, candSimpleName: String, candName: String, qn: String): Boolean {
+            return candSimpleName.equals(clean, ignoreCase = true) ||
+                candName.equals(clean, ignoreCase = true) ||
+                qn.contains(".$clean.", ignoreCase = true) ||
+                qn.endsWith(".$clean", ignoreCase = true)
+        }
+
+        private fun scoreTokenOverlap(clean: String, candSimpleName: String, candName: String, qn: String): Double {
+            val recTokens = NameSegmentTokenizer.tokenize(clean).toSet()
+            if (recTokens.isEmpty()) return 0.0
+
+            val candTokens = (
+                NameSegmentTokenizer.tokenize(candSimpleName) +
+                NameSegmentTokenizer.tokenize(candName) +
+                NameSegmentTokenizer.tokenize(qn)
+            ).toSet()
+
+            val tokenMatches = recTokens.count { it in candTokens }
+            if (tokenMatches == 0) return 0.0
+
+            val fraction = tokenMatches.toDouble() / recTokens.size
+            return fraction * 40.0
+        }
+
         private fun scoreReceiverCandidate(
             cand: GraphNode,
             receiver: String?,
@@ -111,42 +141,20 @@ class PolyglotAstExtractor {
             if (receiver.isNullOrBlank()) return 0.0
             val clean = receiver.trim()
 
+            val specialScore = scoreSpecialReceiver(clean, cand.fileId, srcFileId)
+            if (specialScore != null) return specialScore
+
             val candSimpleName = cand.fileId.substringAfterLast('/').substringBeforeLast('.')
             val qn = cand.qualifiedName
 
-            if (clean == "this") {
-                return if (cand.fileId == srcFileId) 100.0 else 0.0
-            }
-            if (clean == "super") {
-                return if (cand.fileId == srcFileId) 90.0 else 0.0
-            }
-
-            if (candSimpleName.equals(clean, ignoreCase = true) ||
-                qn.contains(".$clean.", ignoreCase = true) ||
-                qn.endsWith(".$clean", ignoreCase = true) ||
-                cand.name.equals(clean, ignoreCase = true)
-            ) {
+            if (isExactReceiverMatch(clean, candSimpleName, cand.name, qn)) {
                 return 100.0
             }
-
             if (qn.contains(clean, ignoreCase = true) || cand.signature.contains(clean, ignoreCase = true)) {
                 return 60.0
             }
 
-            val recTokens = NameSegmentTokenizer.tokenize(clean).toSet()
-            if (recTokens.isEmpty()) return 0.0
-
-            val candTokens = (
-                NameSegmentTokenizer.tokenize(candSimpleName) +
-                NameSegmentTokenizer.tokenize(cand.name) +
-                NameSegmentTokenizer.tokenize(qn)
-            ).toSet()
-
-            val matchCount = recTokens.count { it in candTokens }
-            if (matchCount == 0) return 0.0
-
-            val fraction = matchCount.toDouble() / recTokens.size
-            return fraction * 40.0
+            return scoreTokenOverlap(clean, candSimpleName, cand.name, qn)
         }
 
         fun supportedLanguage(ext: String): String = EXT_MAP[ext.lowercase()] ?: ""
