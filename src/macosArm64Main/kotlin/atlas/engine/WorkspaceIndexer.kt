@@ -477,6 +477,73 @@ class WorkspaceIndexer(
      * ingests optional Compose Compiler metrics reports (`*-composables.txt`), and ingests optional
      * `@TraceRecomposition` runtime telemetry (`traceLogPath`).
      */
+    private fun resolveCompilerReportFiles(resolvedDir: String): List<String> {
+        if (resolvedDir.endsWith(".txt") || resolvedDir.endsWith(".csv")) {
+            return listOf(resolvedDir)
+        }
+        return PlatformFiles.listFilesRecursively(resolvedDir).filter {
+            it.endsWith("-composables.txt") || it.endsWith("composables.txt")
+        }
+    }
+
+    private fun ingestCompilerReports(
+        projectId: String,
+        root: String,
+        compilerReportsDir: String?
+    ): Int {
+        if (compilerReportsDir.isNullOrBlank()) return 0
+        val resolvedDir = if (compilerReportsDir.startsWith("/")) compilerReportsDir else "$root/$compilerReportsDir"
+        if (!PlatformFiles.exists(resolvedDir)) return 0
+
+        val reportFiles = resolveCompilerReportFiles(resolvedDir)
+        val existing = store.listComposeNodes(projectId)
+        var compilerUpgraded = 0
+        for (rf in reportFiles) {
+            val text = PlatformFiles.readText(rf)
+            val (updNodes, updParams) = composeExtractor.parseCompilerComposablesReport(projectId, text, existing)
+            if (updNodes.isNotEmpty() || updParams.isNotEmpty()) {
+                store.upsertComposeNodesAndParams(updNodes, updParams)
+                compilerUpgraded += updNodes.size
+            }
+        }
+        return compilerUpgraded
+    }
+
+    private fun matchTraceTargetNodeId(fqNameOrNodeId: String, existingNodes: List<ComposeNodeRecord>): String {
+        val matched = existingNodes.firstOrNull {
+            it.nodeId == fqNameOrNodeId ||
+                it.fqName == fqNameOrNodeId ||
+                it.fqName.endsWith(".${fqNameOrNodeId}")
+        }
+        return matched?.nodeId ?: fqNameOrNodeId
+    }
+
+    private fun ingestTraceTelemetry(
+        projectId: String,
+        root: String,
+        traceLogPath: String?
+    ): Int {
+        if (traceLogPath.isNullOrBlank()) return 0
+        val resolvedLog = if (traceLogPath.startsWith("/")) traceLogPath else "$root/$traceLogPath"
+        if (!PlatformFiles.exists(resolvedLog)) return 0
+
+        val rawLog = PlatformFiles.readText(resolvedLog)
+        val traces = composeExtractor.parseTraceTelemetry(rawLog)
+        val existingNodes = store.listComposeNodes(projectId)
+        for (tr in traces) {
+            val targetNodeId = matchTraceTargetNodeId(tr.fqNameOrNodeId, existingNodes)
+            store.upsertComposeTraceMetric(
+                nodeId = targetNodeId,
+                sessionId = tr.sessionId,
+                recompositionCount = tr.recompositionCount,
+                skipCount = tr.skipCount,
+                dirtyParamsJson = tr.dirtyParamsJson,
+                recordedAt = tr.recordedAt
+            )
+        }
+        return traces.size
+    }
+
     fun indexComposeArtifacts(
         projectId: String,
         subpaths: List<String>? = null,
@@ -492,55 +559,8 @@ class WorkspaceIndexer(
             forceComposeReindex = !stabilityConfigPath.isNullOrBlank()
         )
 
-        var compilerUpgraded = 0
-        if (!compilerReportsDir.isNullOrBlank()) {
-            val resolvedDir = if (compilerReportsDir.startsWith("/")) compilerReportsDir else "$root/$compilerReportsDir"
-            if (PlatformFiles.exists(resolvedDir)) {
-                val reportFiles = if (resolvedDir.endsWith(".txt") || resolvedDir.endsWith(".csv")) {
-                    listOf(resolvedDir)
-                } else {
-                    PlatformFiles.listFilesRecursively(resolvedDir).filter {
-                        it.endsWith("-composables.txt") || it.endsWith("composables.txt")
-                    }
-                }
-                val existing = store.listComposeNodes(projectId)
-                for (rf in reportFiles) {
-                    val text = PlatformFiles.readText(rf)
-                    val (updNodes, updParams) = composeExtractor.parseCompilerComposablesReport(projectId, text, existing)
-                    if (updNodes.isNotEmpty() || updParams.isNotEmpty()) {
-                        store.upsertComposeNodesAndParams(updNodes, updParams)
-                        compilerUpgraded += updNodes.size
-                    }
-                }
-            }
-        }
-
-        var traceRecordsIngested = 0
-        if (!traceLogPath.isNullOrBlank()) {
-            val resolvedLog = if (traceLogPath.startsWith("/")) traceLogPath else "$root/$traceLogPath"
-            if (PlatformFiles.exists(resolvedLog)) {
-                val rawLog = PlatformFiles.readText(resolvedLog)
-                val traces = composeExtractor.parseTraceTelemetry(rawLog)
-                val existingNodes = store.listComposeNodes(projectId)
-                for (tr in traces) {
-                    val matched = existingNodes.firstOrNull {
-                        it.nodeId == tr.fqNameOrNodeId ||
-                            it.fqName == tr.fqNameOrNodeId ||
-                            it.fqName.endsWith(".${tr.fqNameOrNodeId}")
-                    }
-                    val targetNodeId = matched?.nodeId ?: tr.fqNameOrNodeId
-                    store.upsertComposeTraceMetric(
-                        nodeId = targetNodeId,
-                        sessionId = tr.sessionId,
-                        recompositionCount = tr.recompositionCount,
-                        skipCount = tr.skipCount,
-                        dirtyParamsJson = tr.dirtyParamsJson,
-                        recordedAt = tr.recordedAt
-                    )
-                    traceRecordsIngested++
-                }
-            }
-        }
+        val compilerUpgraded = ingestCompilerReports(projectId, root, compilerReportsDir)
+        val traceRecordsIngested = ingestTraceTelemetry(projectId, root, traceLogPath)
 
         val finalComposeNodes = store.listComposeNodes(projectId)
         val skippableCount = finalComposeNodes.count { it.isSkippable }
