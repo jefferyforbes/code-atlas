@@ -561,6 +561,136 @@ class ArchitectureRemediationEngine(
         )
     }
 
+    private fun privatizeKotlinSubTrimmed(rest: String): String {
+        return when {
+            rest.startsWith("public ") -> "private " + rest.removePrefix("public ")
+            rest.startsWith("internal ") -> "private " + rest.removePrefix("internal ")
+            rest.startsWith("open ") -> "private " + rest.removePrefix("open ")
+            !rest.startsWith("private ") -> "private $rest"
+            else -> rest
+        }
+    }
+
+    private fun privatizeKotlinDeclaration(trimmed: String): String {
+        return when {
+            trimmed.startsWith("public ") -> "private " + trimmed.removePrefix("public ")
+            trimmed.startsWith("internal ") -> "private " + trimmed.removePrefix("internal ")
+            trimmed.startsWith("open ") -> "private " + trimmed.removePrefix("open ")
+            trimmed.startsWith("@") -> {
+                val annMatch = Regex("""^((?:@[A-Za-z0-9_]+(?:\([^)]*\))?\s*)+)(.*)""").find(trimmed)
+                if (annMatch != null) {
+                    annMatch.groupValues[1] + privatizeKotlinSubTrimmed(annMatch.groupValues[2])
+                } else {
+                    "private $trimmed"
+                }
+            }
+            !trimmed.startsWith("private ") -> "private $trimmed"
+            else -> trimmed
+        }
+    }
+
+    private fun privatizePythonDeclaration(trimmed: String, name: String, details: MutableList<String>): String {
+        if (name.startsWith("_")) return trimmed
+        return if (trimmed.startsWith("def ")) {
+            details.add("Converted function '$name' to private '_$name'.")
+            trimmed.replaceFirst("def $name", "def _$name")
+        } else if (trimmed.startsWith("class ")) {
+            details.add("Converted class '$name' to private '_$name'.")
+            trimmed.replaceFirst("class $name", "class _$name")
+        } else {
+            trimmed
+        }
+    }
+
+    private fun privatizeLine(
+        raw: String,
+        lang: String,
+        secName: String,
+        details: MutableList<String>
+    ): String {
+        val indent = raw.takeWhile { it == ' ' || it == '\t' }
+        val trimmed = raw.trimStart()
+
+        val newTrimmed = when (lang) {
+            "kotlin" -> {
+                details.add("Converted '$secName' to private visibility.")
+                privatizeKotlinDeclaration(trimmed)
+            }
+            "python" -> privatizePythonDeclaration(trimmed, secName, details)
+            else -> {
+                details.add("Converted '$secName' to private visibility.")
+                if (!trimmed.startsWith("private ")) "private $trimmed" else trimmed
+            }
+        }
+        return indent + newTrimmed
+    }
+
+    private fun privatizeSecondaryDeclarations(
+        workingLines: MutableList<String>,
+        secondaryNodes: List<GraphNode>,
+        lang: String,
+        details: MutableList<String>
+    ): String {
+        for (sec in secondaryNodes) {
+            val lineIdx = sec.startLine - 1
+            if (lineIdx in workingLines.indices) {
+                workingLines[lineIdx] = privatizeLine(workingLines[lineIdx], lang, sec.name, details)
+            }
+        }
+        return workingLines.joinToString("\n")
+    }
+
+    private fun verifyPrivatizedAst(
+        projectId: String,
+        relPath: String,
+        modifiedContent: String,
+        lang: String,
+        details: MutableList<String>
+    ): Boolean {
+        if (lang.isEmpty()) return true
+        val masked = PolyglotAstExtractor.maskCommentsAndStrings(modifiedContent, lang)
+        if (!AutonomousRemediationVerifier.hasBalancedDelimiters(masked)) {
+            details.add("Syntax check failed: Unbalanced delimiters after privatizing secondary declarations.")
+            return false
+        }
+        val (_, _, count) = PolyglotAstExtractor.extractFile(projectId, relPath, modifiedContent)
+        if (count > 1) {
+            details.add("File still declares $count public top-level symbols after privatization.")
+            return false
+        }
+        details.add("AST verification passed: public topLevelDeclCount reduced to $count.")
+        return true
+    }
+
+    private fun applyPrivatizedAndRunTest(
+        fullPath: String,
+        originalContent: String,
+        modifiedContent: String,
+        testCommand: String?,
+        dryRun: Boolean,
+        details: MutableList<String>
+    ): Boolean {
+        if (dryRun) {
+            details.add("Dry-run mode: verified private helper conversion without modifying disk.")
+            return true
+        }
+        return try {
+            PlatformFiles.writeText(fullPath, modifiedContent)
+            if (!testCommand.isNullOrBlank()) {
+                val passed = executeTestCommand(testCommand, details)
+                if (!passed) {
+                    PlatformFiles.writeText(fullPath, originalContent)
+                    return false
+                }
+            }
+            true
+        } catch (e: Exception) {
+            details.add("Disk application error: ${e.message}. Performing rollback.")
+            PlatformFiles.writeText(fullPath, originalContent)
+            false
+        }
+    }
+
     private fun remediateBoost003MakePrivate(
         projectId: String,
         relPath: String,
@@ -574,80 +704,9 @@ class ArchitectureRemediationEngine(
     ): ArchitectureRemediationPrescription {
         val details = mutableListOf<String>()
         val workingLines = originalContent.lines().toMutableList()
+        val modifiedContent = privatizeSecondaryDeclarations(workingLines, secondaryNodes, lang, details)
 
-        for (sec in secondaryNodes) {
-            val lineIdx = sec.startLine - 1
-            if (lineIdx in workingLines.indices) {
-                val raw = workingLines[lineIdx]
-                val indent = raw.takeWhile { it == ' ' || it == '\t' }
-                val trimmed = raw.trimStart()
-
-                when (lang) {
-                    "kotlin" -> {
-                        val newTrimmed = when {
-                            trimmed.startsWith("public ") -> "private " + trimmed.removePrefix("public ")
-                            trimmed.startsWith("internal ") -> "private " + trimmed.removePrefix("internal ")
-                            trimmed.startsWith("open ") -> "private " + trimmed.removePrefix("open ")
-                            trimmed.startsWith("@") -> {
-                                val annMatch = Regex("""^((?:@[A-Za-z0-9_]+(?:\([^)]*\))?\s*)+)(.*)""").find(trimmed)
-                                if (annMatch != null) {
-                                    val anns = annMatch.groupValues[1]
-                                    val rest = annMatch.groupValues[2]
-                                    val subTrimmed = when {
-                                        rest.startsWith("public ") -> "private " + rest.removePrefix("public ")
-                                        rest.startsWith("internal ") -> "private " + rest.removePrefix("internal ")
-                                        rest.startsWith("open ") -> "private " + rest.removePrefix("open ")
-                                        !rest.startsWith("private ") -> "private $rest"
-                                        else -> rest
-                                    }
-                                    anns + subTrimmed
-                                } else {
-                                    "private $trimmed"
-                                }
-                            }
-                            !trimmed.startsWith("private ") -> "private $trimmed"
-                            else -> trimmed
-                        }
-                        workingLines[lineIdx] = indent + newTrimmed
-                        details.add("Converted '${sec.name}' to private visibility.")
-                    }
-                    "python" -> {
-                        if (trimmed.startsWith("def ") && !sec.name.startsWith("_")) {
-                            workingLines[lineIdx] = indent + trimmed.replaceFirst("def ${sec.name}", "def _${sec.name}")
-                            details.add("Converted function '${sec.name}' to private '_${sec.name}'.")
-                        } else if (trimmed.startsWith("class ") && !sec.name.startsWith("_")) {
-                            workingLines[lineIdx] = indent + trimmed.replaceFirst("class ${sec.name}", "class _${sec.name}")
-                            details.add("Converted class '${sec.name}' to private '_${sec.name}'.")
-                        }
-                    }
-                    else -> {
-                        val newTrimmed = if (!trimmed.startsWith("private ")) "private $trimmed" else trimmed
-                        workingLines[lineIdx] = indent + newTrimmed
-                        details.add("Converted '${sec.name}' to private visibility.")
-                    }
-                }
-            }
-        }
-
-        val modifiedContent = workingLines.joinToString("\n")
-
-        var astValid = true
-        if (lang.isNotEmpty()) {
-            val masked = PolyglotAstExtractor.maskCommentsAndStrings(modifiedContent, lang)
-            if (!AutonomousRemediationVerifier.hasBalancedDelimiters(masked)) {
-                astValid = false
-                details.add("Syntax check failed: Unbalanced delimiters after privatizing secondary declarations.")
-            } else {
-                val (_, _, count) = PolyglotAstExtractor.extractFile(projectId, relPath, modifiedContent)
-                if (count > 1) {
-                    astValid = false
-                    details.add("File still declares $count public top-level symbols after privatization.")
-                } else {
-                    details.add("AST verification passed: public topLevelDeclCount reduced to $count.")
-                }
-            }
-        }
-
+        val astValid = verifyPrivatizedAst(projectId, relPath, modifiedContent, lang, details)
         if (!astValid) {
             return ArchitectureRemediationPrescription(
                 id = "rx-boost003-${relPath.replace('/', '_')}",
@@ -664,33 +723,9 @@ class ArchitectureRemediationEngine(
         }
 
         val diffPreview = buildDiffPreview(relPath, originalContent, modifiedContent, emptyList())
-
-        var testsPreserved = true
-        if (!dryRun) {
-            try {
-                PlatformFiles.writeText(fullPath, modifiedContent)
-                if (!testCommand.isNullOrBlank()) {
-                    val cmd = "cd \"$workspaceRoot\" && $testCommand"
-                    val rawStatus = system(cmd)
-                    val exitCode = if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
-                    if (exitCode != 0) {
-                        testsPreserved = false
-                        details.add("Test command '$testCommand' failed (exit code $exitCode). Automatic rollback performed.")
-                        PlatformFiles.writeText(fullPath, originalContent)
-                    } else {
-                        details.add("Test command '$testCommand' passed (exit code 0).")
-                    }
-                }
-            } catch (e: Exception) {
-                testsPreserved = false
-                details.add("Disk application error: ${e.message}. Performing rollback.")
-                PlatformFiles.writeText(fullPath, originalContent)
-            }
-        } else {
-            details.add("Dry-run mode: verified private helper conversion without modifying disk.")
-        }
-
+        val testsPreserved = applyPrivatizedAndRunTest(fullPath, originalContent, modifiedContent, testCommand, dryRun, details)
         val isSuccess = astValid && testsPreserved
+
         return ArchitectureRemediationPrescription(
             id = "rx-boost003-${relPath.replace('/', '_')}",
             ruleId = "BOOST-003",
