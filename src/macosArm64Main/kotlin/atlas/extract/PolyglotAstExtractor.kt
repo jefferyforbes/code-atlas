@@ -1850,12 +1850,373 @@ class PolyglotAstExtractor {
             return collectPrecedingCommentLines(lines, cStart, cEnd)
         }
 
+        private fun extractKotlinImports(maskedText: String): List<Pair<String, Int>> =
+            KT_IMP_RE.findAll(maskedText).map { match ->
+                Pair(match.groupValues[1], maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
+            }.toList()
+
+        private fun extractKotlinReceiverTypes(
+            text: String,
+            baseTypes: Map<String, String>? = null
+        ): Map<String, String> {
+            val result = baseTypes?.toMutableMap() ?: mutableMapOf()
+            for (m in LOCAL_VAL_COLON_RE.findAll(text)) {
+                val varName = m.groupValues[1]
+                val typeName = m.groupValues[2].substringAfterLast('.').substringBefore('<').trim()
+                if (varName.isNotEmpty() && typeName.isNotEmpty() && typeName !in KOTLIN_PRIMITIVE_TYPES) {
+                    result[varName] = typeName
+                }
+            }
+            for (m in LOCAL_VAL_ASSIGN_RE.findAll(text)) {
+                val varName = m.groupValues[1]
+                val typeName = m.groupValues[2].substringAfterLast('.').substringBefore('<').trim()
+                if (varName.isNotEmpty() && typeName.isNotEmpty() && typeName !in KOTLIN_PRIMITIVE_TYPES && typeName !in COMMON_CONSTRUCTORS) {
+                    result[varName] = typeName
+                }
+            }
+            return result
+        }
+
+        private fun extractKotlinKind(kw: String, modTokens: Set<String>, annTokens: List<String>): String = when {
+            "expect" in modTokens -> "expect_decl"
+            "actual" in modTokens -> "actual_decl"
+            "Composable" in annTokens -> "composable"
+            "enum" in modTokens -> "enum"
+            "annotation" in modTokens -> "annotation"
+            kw == "fun" -> "function"
+            else -> kw
+        }
+
+        private fun parseModifierTokens(modifiers: String?): Set<String> {
+            if (modifiers.isNullOrBlank()) return emptySet()
+            return modifiers.split(Regex("""\s+""")).filter { it.isNotEmpty() }.toSet()
+        }
+
+        private fun resolveKotlinDeclName(rawName: String?, kw: String, modTokens: Set<String>): String? {
+            if (!rawName.isNullOrEmpty()) return rawName
+            if (kw == "object" && "companion" in modTokens) return "Companion"
+            return null
+        }
+
+        private fun extractKotlinDeclHeader(match: MatchResult): Triple<String, String, Set<String>>? {
+            val kw = match.groups["kw"]?.value ?: return null
+            val modTokens = parseModifierTokens(match.groups["modifiers"]?.value)
+            val name = resolveKotlinDeclName(match.groups["name"]?.value, kw, modTokens) ?: return null
+            return Triple(kw, name, modTokens)
+        }
+
+        private fun lineNumberOfOffset(text: String, offset: Int): Int =
+            text.substring(0, offset).count { it == '\n' } + 1
+
+        private fun resolveDeclStartOffset(match: MatchResult): Int {
+            val modGroup = match.groups["modifiers"]
+            if (modGroup != null && modGroup.value.isNotEmpty()) {
+                return modGroup.range.first
+            }
+            return match.groups["kw"]!!.range.first
+        }
+
+        private fun resolveKotlinDeclLines(
+            match: MatchResult,
+            maskedText: String,
+            lines: List<String>,
+            cleanLines: List<String>
+        ): Triple<Int, Int, Int> {
+            val matchStartLine = lineNumberOfOffset(maskedText, match.range.first)
+            val declStartOffset = resolveDeclStartOffset(match)
+            val startLine = lineNumberOfOffset(maskedText, declStartOffset)
+            val endLine = findBlockEndLine(lines, startLine, cleanLines)
+            return Triple(matchStartLine, startLine, endLine)
+        }
+
+        private fun extractKotlinDoc(
+            isTopLevel: Boolean,
+            kw: String,
+            annTokens: List<String>,
+            lines: List<String>,
+            matchStartLine: Int
+        ): String? {
+            val isEligible = isTopLevel && (kw in listOf("class", "interface", "object", "fun") || "Composable" in annTokens)
+            return if (isEligible) extractDocDescription(lines, matchStartLine, "kotlin") else null
+        }
+
+        private fun addKotlinEdges(
+            nodeId: String,
+            isTopLevel: Boolean,
+            kw: String,
+            startLine: Int,
+            endLine: Int,
+            lines: List<String>,
+            imports: List<Pair<String, Int>>,
+            projectId: String,
+            edges: MutableList<GraphEdge>
+        ) {
+            if (isTopLevel) {
+                for ((impTarget, impLine) in imports) {
+                    edges.add(GraphEdge(
+                        edgeId = "$nodeId:imp:$impTarget:$impLine", projectId = projectId,
+                        sourceNodeId = nodeId, targetNodeId = "sym:$impTarget", edgeType = "IMPORTS",
+                        lineNumber = impLine
+                    ))
+                }
+            }
+            if (kw in listOf("class", "interface", "object")) {
+                for ((superName, edgeType) in extractKotlinSupertypes(lines, startLine, endLine)) {
+                    edges.add(GraphEdge(
+                        edgeId = "$nodeId:sup:$superName:$startLine", projectId = projectId,
+                        sourceNodeId = nodeId, targetNodeId = "sym:$superName", edgeType = edgeType,
+                        lineNumber = startLine
+                    ))
+                }
+            }
+        }
+
+        private fun resolveCallTargetAndProvenance(
+            receiver: String?,
+            callee: String,
+            localReceiverTypes: Map<String, String>
+        ): Pair<String, String> {
+            val resolvedType = if (!receiver.isNullOrEmpty()) localReceiverTypes[receiver] else null
+            val targetSym = when {
+                resolvedType != null -> "$resolvedType.$callee"
+                !receiver.isNullOrEmpty() -> "$receiver.$callee"
+                else -> callee
+            }
+            val provenance = when {
+                resolvedType != null -> "CALL_RECEIVER:$receiver;type=$resolvedType"
+                !receiver.isNullOrEmpty() -> "CALL_RECEIVER:$receiver"
+                else -> "INFERRED_CALL"
+            }
+            return Pair(targetSym, provenance)
+        }
+
+        private fun extractKotlinStandardCallEdges(
+            node: GraphNode,
+            body: String,
+            localReceiverTypes: Map<String, String>,
+            projectId: String,
+            seenCallees: MutableSet<String>,
+            edges: MutableList<GraphEdge>
+        ) {
+            for (callMatch in CALL_RE.findAll(body)) {
+                val receiver = callMatch.groups["receiver"]?.value?.trim()
+                val callee = callMatch.groups["callee"]?.value ?: continue
+                val isSelf = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
+                if (isSelf || callee in CALL_STOPWORDS) continue
+
+                val (targetSym, provenance) = resolveCallTargetAndProvenance(receiver, callee, localReceiverTypes)
+                if (seenCallees.add(targetSym)) {
+                    val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+                    edges.add(GraphEdge(
+                        edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
+                        sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
+                        provenance = provenance, confidence = 0.85, lineNumber = callLine
+                    ))
+                }
+            }
+        }
+
+        private fun extractKotlinInfixCallEdges(
+            node: GraphNode,
+            body: String,
+            projectId: String,
+            seenCallees: MutableSet<String>,
+            edges: MutableList<GraphEdge>
+        ) {
+            for (infixMatch in INFIX_CALL_RE.findAll(body)) {
+                val callee = infixMatch.groups["callee"]?.value ?: continue
+                val isIgnored = callee == node.name || callee in INFIX_STOPWORDS || callee in CALL_STOPWORDS
+                if (!isIgnored && seenCallees.add(callee)) {
+                    val callLine = node.startLine + body.substring(0, infixMatch.range.first).count { it == '\n' }
+                    edges.add(GraphEdge(
+                        edgeId = "${node.nodeId}:infix:$callee:$callLine", projectId = projectId,
+                        sourceNodeId = node.nodeId, targetNodeId = "sym:$callee", edgeType = "CALLS",
+                        provenance = "INFERRED_INFIX_CALL", confidence = 0.85, lineNumber = callLine
+                    ))
+                }
+            }
+        }
+
+        private fun extractKotlinCallEdges(
+            node: GraphNode,
+            body: String,
+            localReceiverTypes: Map<String, String>,
+            projectId: String,
+            edges: MutableList<GraphEdge>
+        ) {
+            val seenCallees = mutableSetOf<String>()
+            extractKotlinStandardCallEdges(node, body, localReceiverTypes, projectId, seenCallees, edges)
+            extractKotlinInfixCallEdges(node, body, projectId, seenCallees, edges)
+        }
+
+        private fun shrinkScopeStack(scopeStack: MutableList<ScopeEntry>, startLine: Int) {
+            while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
+                scopeStack.removeAt(scopeStack.size - 1)
+            }
+        }
+
+        private fun isPublicTopLevel(isTopLevel: Boolean, modTokens: Set<String>, kw: String): Boolean =
+            isTopLevel && "private" !in modTokens && "companion" !in modTokens && kw != "typealias"
+
+        private fun buildKotlinNode(
+            projectId: String,
+            relPath: String,
+            fileId: String,
+            pkgName: String,
+            name: String,
+            kw: String,
+            modTokens: Set<String>,
+            annotations: String,
+            enclosingPrefix: String,
+            startLine: Int,
+            endLine: Int,
+            matchStartLine: Int,
+            isTopLevel: Boolean,
+            lines: List<String>,
+            maskedLines: List<String>,
+            moduleId: String,
+            sourceSet: String
+        ): GraphNode {
+            val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
+                Pair("$fileId#$enclosingPrefix.$name", "$pkgName.$enclosingPrefix.$name")
+            } else {
+                Pair("$fileId#$name", "$pkgName.$name")
+            }
+
+            val annTokens = Regex("""@([A-Za-z0-9_]+)""").findAll(annotations).map { it.groupValues[1] }.toList()
+            val sigLine = if (startLine <= lines.size) stripLeadingInlineAnnotations(lines[startLine - 1]) else name
+            val kind = extractKotlinKind(kw, modTokens, annTokens)
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name, annTokens)
+            val description = extractKotlinDoc(isTopLevel, kw, annTokens, lines, matchStartLine)
+
+            val (cVec, cScore) = computeComplexityMetrics(
+                kind = kind,
+                startLine = startLine,
+                endLine = endLine,
+                maskedLines = maskedLines,
+                lines = lines,
+                language = "kotlin",
+                isComposable = "Composable" in annTokens,
+                functionName = name
+            )
+
+            return GraphNode(
+                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                qualifiedName = qualifiedName, kind = kind, signature = sigLine,
+                startLine = startLine, endLine = endLine, moduleId = moduleId,
+                sourceSet = sourceSet, semioticLayer = sem, archLayer = arch, isTestDouble = isTd,
+                description = description, isTopLevel = isTopLevel,
+                cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                maxNestingDepth = cVec.maxNesting, complexityScore = cScore
+            )
+        }
+
+        private fun extractChildLineRanges(nodes: List<GraphNode>, target: GraphNode): List<IntRange> {
+            val result = mutableListOf<IntRange>()
+            for (node in nodes) {
+                if (node.nodeId == target.nodeId) continue
+                if (node.startLine >= target.startLine && node.endLine <= target.endLine && (node.startLine > target.startLine || node.endLine < target.endLine)) {
+                    result.add(node.startLine..node.endLine)
+                }
+            }
+            return result
+        }
+
+        private fun pushScopeEntryIfContainer(
+            kw: String,
+            name: String,
+            startLine: Int,
+            endLine: Int,
+            scopeStack: MutableList<ScopeEntry>
+        ) {
+            if (kw in setOf("class", "interface", "object", "enum", "fun")) {
+                scopeStack.add(ScopeEntry(name, startLine, endLine))
+            }
+        }
+
+        private fun processSingleKotlinDeclaration(
+            match: MatchResult,
+            maskedText: String,
+            lines: List<String>,
+            maskedLines: List<String>,
+            cleanLines: List<String>,
+            scopeStack: MutableList<ScopeEntry>,
+            projectId: String,
+            relPath: String,
+            fileId: String,
+            pkgName: String,
+            imports: List<Pair<String, Int>>,
+            moduleId: String,
+            sourceSet: String,
+            edges: MutableList<GraphEdge>
+        ): Pair<GraphNode, Boolean>? {
+            val (kw, name, modTokens) = extractKotlinDeclHeader(match) ?: return null
+            val annotations = match.groups["annotations"]?.value ?: ""
+            val (matchStartLine, startLine, endLine) = resolveKotlinDeclLines(match, maskedText, lines, cleanLines)
+            shrinkScopeStack(scopeStack, startLine)
+
+            val isTopLevel = scopeStack.isEmpty()
+            val isPublicTop = isPublicTopLevel(isTopLevel, modTokens, kw)
+            val enclosingPrefix = scopeStack.joinToString(".") { it.name }
+            val node = buildKotlinNode(
+                projectId, relPath, fileId, pkgName, name, kw, modTokens,
+                annotations, enclosingPrefix, startLine, endLine, matchStartLine,
+                isTopLevel, lines, maskedLines, moduleId, sourceSet
+            )
+            addKotlinEdges(node.nodeId, isTopLevel, kw, startLine, endLine, lines, imports, projectId, edges)
+            pushScopeEntryIfContainer(kw, name, startLine, endLine, scopeStack)
+            return Pair(node, isPublicTop)
+        }
+
+        private fun parseKotlinDeclarations(
+            projectId: String,
+            relPath: String,
+            fileId: String,
+            pkgName: String,
+            maskedText: String,
+            lines: List<String>,
+            maskedLines: List<String>,
+            cleanLines: List<String>,
+            imports: List<Pair<String, Int>>,
+            moduleId: String,
+            sourceSet: String,
+            edges: MutableList<GraphEdge>
+        ): Pair<List<GraphNode>, Int> {
+            val nodes = mutableListOf<GraphNode>()
+            val scopeStack = mutableListOf<ScopeEntry>()
+            var topLevelCount = 0
+
+            for (match in KT_DECL_RE.findAll(maskedText)) {
+                val (node, isPublicTop) = processSingleKotlinDeclaration(
+                    match, maskedText, lines, maskedLines, cleanLines, scopeStack,
+                    projectId, relPath, fileId, pkgName, imports, moduleId, sourceSet, edges
+                ) ?: continue
+                nodes.add(node)
+                if (isPublicTop) topLevelCount++
+            }
+            return Pair(nodes, topLevelCount)
+        }
+
+        private fun parseKotlinCalls(
+            nodes: List<GraphNode>,
+            maskedLines: List<String>,
+            fileVarTypes: Map<String, String>,
+            projectId: String,
+            edges: MutableList<GraphEdge>
+        ) {
+            for (node in nodes) {
+                val childRanges = extractChildLineRanges(nodes, node)
+                val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
+                val localReceiverTypes = extractKotlinReceiverTypes(body, fileVarTypes)
+                extractKotlinCallEdges(node, body, localReceiverTypes, projectId, edges)
+            }
+        }
+
         private fun extractKotlin(
             projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
             precomputedMaskedText: String? = null
         ): Triple<List<GraphNode>, List<GraphEdge>, Int> {
             val fileId = "$projectId:$relPath"
-            val nodes = mutableListOf<GraphNode>()
             val edges = mutableListOf<GraphEdge>()
             val lines = sourceText.lines()
             val maskedText = precomputedMaskedText ?: maskCommentsAndStrings(sourceText, "kotlin")
@@ -1864,193 +2225,16 @@ class PolyglotAstExtractor {
 
             val pkgMatch = KT_PKG_RE.find(maskedText)
             val pkgName = pkgMatch?.groupValues?.get(1) ?: relPath.replace('/', '.')
-            val imports = KT_IMP_RE.findAll(maskedText).map { match ->
-                Pair(match.groupValues[1], maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
-            }.toList()
+            val imports = extractKotlinImports(maskedText)
 
-            val scopeStack = mutableListOf<ScopeEntry>()
+            val (nodes, topLevelCount) = parseKotlinDeclarations(
+                projectId, relPath, fileId, pkgName, maskedText, lines, maskedLines, cleanLines,
+                imports, moduleId, sourceSet, edges
+            )
 
-            var topLevelCount = 0
-            for (match in KT_DECL_RE.findAll(maskedText)) {
-                val annotations = match.groups["annotations"]?.value ?: ""
-                val modifiersGroup = match.groups["modifiers"]
-                val modifiers = modifiersGroup?.value ?: ""
-                val kwGroup = match.groups["kw"] ?: continue
-                val kw = kwGroup.value
-                val rawName = match.groups["name"]?.value
-                val modTokens = modifiers.split(Regex("""\s+""")).filter { it.isNotEmpty() }.toSet()
+            val fileVarTypes = extractKotlinReceiverTypes(maskedText)
+            parseKotlinCalls(nodes, maskedLines, fileVarTypes, projectId, edges)
 
-                val name = when {
-                    !rawName.isNullOrEmpty() -> rawName
-                    kw == "object" && "companion" in modTokens -> "Companion"
-                    else -> continue
-                }
-
-                val matchStartLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                val declStartOffset = if (modifiers.isNotEmpty() && modifiersGroup != null) {
-                    modifiersGroup.range.first
-                } else {
-                    kwGroup.range.first
-                }
-                val startLine = maskedText.substring(0, declStartOffset).count { it == '\n' } + 1
-                val endLine = findBlockEndLine(lines, startLine, cleanLines)
-
-                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
-                    scopeStack.removeAt(scopeStack.size - 1)
-                }
-
-                val isTopLevel = scopeStack.isEmpty()
-                if (isTopLevel && "private" !in modTokens && "companion" !in modTokens && kw != "typealias") topLevelCount++
-
-                val enclosingPrefix = scopeStack.joinToString(".") { it.name }
-                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
-                    Pair("$fileId#$enclosingPrefix.$name", "$pkgName.$enclosingPrefix.$name")
-                } else {
-                    Pair("$fileId#$name", "$pkgName.$name")
-                }
-
-                val annTokens = Regex("""@([A-Za-z0-9_]+)""").findAll(annotations).map { it.groupValues[1] }.toList()
-                val sigLine = if (startLine <= lines.size) stripLeadingInlineAnnotations(lines[startLine - 1]) else name
-                val kind = when {
-                    "expect" in modTokens -> "expect_decl"
-                    "actual" in modTokens -> "actual_decl"
-                    "Composable" in annTokens -> "composable"
-                    "enum" in modTokens -> "enum"
-                    "annotation" in modTokens -> "annotation"
-                    kw == "fun" -> "function"
-                    else -> kw
-                }
-
-                val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name, annTokens)
-
-                val description = if (isTopLevel && (kw in listOf("class", "interface", "object", "fun") || "Composable" in annTokens)) {
-                    extractDocDescription(lines, matchStartLine, "kotlin")
-                } else {
-                    null
-                }
-
-                val (cVec, cScore) = computeComplexityMetrics(
-                    kind = kind,
-                    startLine = startLine,
-                    endLine = endLine,
-                    maskedLines = maskedLines,
-                    lines = lines,
-                    language = "kotlin",
-                    isComposable = "Composable" in annTokens,
-                    functionName = name
-                )
-
-                nodes.add(
-                    GraphNode(
-                        nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = qualifiedName, kind = kind, signature = sigLine,
-                        startLine = startLine, endLine = endLine, moduleId = moduleId,
-                        sourceSet = sourceSet, semioticLayer = sem, archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel,
-                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
-                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
-                    )
-                )
-
-                if (isTopLevel) {
-                    for ((impTarget, impLine) in imports) {
-                        edges.add(GraphEdge(
-                            edgeId = "$nodeId:imp:$impTarget:$impLine", projectId = projectId,
-                            sourceNodeId = nodeId, targetNodeId = "sym:$impTarget", edgeType = "IMPORTS",
-                            lineNumber = impLine
-                        ))
-                    }
-                }
-
-                if (kw in listOf("class", "interface", "object")) {
-                    for ((superName, edgeType) in extractKotlinSupertypes(lines, startLine, endLine)) {
-                        edges.add(GraphEdge(
-                            edgeId = "$nodeId:sup:$superName:$startLine", projectId = projectId,
-                            sourceNodeId = nodeId, targetNodeId = "sym:$superName", edgeType = edgeType,
-                            lineNumber = startLine
-                        ))
-                    }
-                }
-
-                if (kw in setOf("class", "interface", "object", "enum", "fun")) {
-                    scopeStack.add(ScopeEntry(name, startLine, endLine))
-                }
-            }
-
-            val fileVarTypes = mutableMapOf<String, String>()
-            for (m in LOCAL_VAL_COLON_RE.findAll(maskedText)) {
-                val varName = m.groupValues[1]
-                val typeName = m.groupValues[2].substringAfterLast('.').substringBefore('<').trim()
-                if (varName.isNotEmpty() && typeName.isNotEmpty() && typeName !in KOTLIN_PRIMITIVE_TYPES) {
-                    fileVarTypes[varName] = typeName
-                }
-            }
-            for (m in LOCAL_VAL_ASSIGN_RE.findAll(maskedText)) {
-                val varName = m.groupValues[1]
-                val typeName = m.groupValues[2].substringAfterLast('.').substringBefore('<').trim()
-                if (varName.isNotEmpty() && typeName.isNotEmpty() && typeName !in KOTLIN_PRIMITIVE_TYPES && typeName !in COMMON_CONSTRUCTORS) {
-                    fileVarTypes[varName] = typeName
-                }
-            }
-
-            for (node in nodes) {
-                val childRanges = nodes
-                    .filter { it.nodeId != node.nodeId && it.startLine >= node.startLine && it.endLine <= node.endLine && (it.startLine > node.startLine || it.endLine < node.endLine) }
-                    .map { it.startLine..it.endLine }
-                val body = maskChildLineRanges(maskedLines, node.startLine, node.endLine, childRanges)
-                val localReceiverTypes = fileVarTypes.toMutableMap()
-                for (m in LOCAL_VAL_COLON_RE.findAll(body)) {
-                    val varName = m.groupValues[1]
-                    val typeName = m.groupValues[2].substringAfterLast('.').substringBefore('<').trim()
-                    if (varName.isNotEmpty() && typeName.isNotEmpty() && typeName !in KOTLIN_PRIMITIVE_TYPES) {
-                        localReceiverTypes[varName] = typeName
-                    }
-                }
-                for (m in LOCAL_VAL_ASSIGN_RE.findAll(body)) {
-                    val varName = m.groupValues[1]
-                    val typeName = m.groupValues[2].substringAfterLast('.').substringBefore('<').trim()
-                    if (varName.isNotEmpty() && typeName.isNotEmpty() && typeName !in KOTLIN_PRIMITIVE_TYPES && typeName !in COMMON_CONSTRUCTORS) {
-                        localReceiverTypes[varName] = typeName
-                    }
-                }
-                val seenCallees = mutableSetOf<String>()
-                for (callMatch in CALL_RE.findAll(body)) {
-                    val receiver = callMatch.groups["receiver"]?.value?.trim()
-                    val callee = callMatch.groups["callee"]?.value ?: continue
-                    val resolvedType = if (!receiver.isNullOrEmpty()) localReceiverTypes[receiver] else null
-                    val targetSym = when {
-                        resolvedType != null -> "$resolvedType.$callee"
-                        !receiver.isNullOrEmpty() -> "$receiver.$callee"
-                        else -> callee
-                    }
-                    val provenance = when {
-                        resolvedType != null -> "CALL_RECEIVER:$receiver;type=$resolvedType"
-                        !receiver.isNullOrEmpty() -> "CALL_RECEIVER:$receiver"
-                        else -> "INFERRED_CALL"
-                    }
-                    val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
-                    if (!isSelfCall && callee !in CALL_STOPWORDS && seenCallees.add(targetSym)) {
-                        val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
-                        edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
-                            provenance = provenance, confidence = 0.85, lineNumber = callLine
-                        ))
-                    }
-                }
-
-                for (infixMatch in INFIX_CALL_RE.findAll(body)) {
-                    val callee = infixMatch.groups["callee"]?.value ?: continue
-                    if (callee != node.name && callee !in INFIX_STOPWORDS && callee !in CALL_STOPWORDS && seenCallees.add(callee)) {
-                        val callLine = node.startLine + body.substring(0, infixMatch.range.first).count { it == '\n' }
-                        edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:infix:$callee:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$callee", edgeType = "CALLS",
-                            provenance = "INFERRED_INFIX_CALL", confidence = 0.85, lineNumber = callLine
-                        ))
-                    }
-                }
-            }
             return Triple(nodes, edges, topLevelCount)
         }
 
