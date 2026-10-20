@@ -93,6 +93,8 @@ class ComposeStabilityExtractor {
         private val CONDITIONAL_EFFECT_RE = Regex("""\b(if|when|for|while)\s*\([^)]*\)\s*\{[^}]*\b(remember|rememberSaveable|LaunchedEffect|DisposableEffect)\b|\?\.\s*let\s*\{[^}]*\b(remember|rememberSaveable|LaunchedEffect|DisposableEffect)\b""")
         private val COLLECT_AS_STATE_RAW_RE = Regex("""\.collectAsState\s*\(""")
         private val UNREMEMBERED_STATE_RE = Regex("""(?<!remember\s*\{\s*)(?<!rememberSaveable\s*\{\s*)(?<!by\s+remember\s*\{\s*)\b(mutableStateOf|mutableIntStateOf|mutableLongStateOf|mutableFloatStateOf|derivedStateOf|MutableInteractionSource)\s*\(""")
+        private val COMPILER_HEADER_RE = Regex("""^(.*?\bfun\s+)([A-Za-z0-9_.]+)\s*\(""")
+        private val COMPILER_PARAM_RE = Regex("""^\s*(stable|unstable|runtime|unused|default)\s+(?:(stable|unstable|runtime)\s+)?([A-Za-z0-9_]+)\s*:\s*(.+)$""")
         private val LAZY_ITEMS_NO_KEY_RE = Regex("""\b(items|itemsIndexed)\s*\((?![^)]*\bkey\s*=)[^)]*\)""")
         private val SCROLL_READ_RE = Regex("""\b\w*(scrollState|ScrollState|lazyListState|LazyListState|pagerState|PagerState)\.(value|firstVisibleItemIndex|firstVisibleItemScrollOffset)\b""")
         private val HARDCODED_TEXT_RE = Regex("""\bText\s*\(\s*(?:text\s*=\s*)?"([^"$\\]{2,})"|\bcontentDescription\s*=\s*"([^"$\\]{2,})"""")
@@ -532,6 +534,97 @@ class ComposeStabilityExtractor {
      * Parses Compose Compiler metrics (`*-composables.txt` and `*-classes.txt`) to upgrade
      * stability records to `COMPILER_VERIFIED` provenance.
      */
+    private fun parseCompilerParamLine(
+        pLine: String,
+        nodeId: String,
+        pIdx: Int
+    ): ComposeParamRecord? {
+        val pm = COMPILER_PARAM_RE.find(pLine) ?: return null
+        val modifier1 = pm.groupValues[1]
+        val modifier2 = pm.groupValues[2]
+        val pName = pm.groupValues[3]
+        val pType = pm.groupValues[4].trim()
+        val isUnused = modifier1 == "unused"
+        val effStability = when (modifier2.ifEmpty { modifier1 }) {
+            "stable" -> "STABLE"
+            "unstable" -> "UNSTABLE"
+            "runtime" -> "RUNTIME"
+            else -> "STABLE"
+        }
+        return ComposeParamRecord(
+            nodeId = nodeId,
+            paramIndex = pIdx,
+            paramName = pName,
+            typeSignature = pType,
+            stability = effStability,
+            stabilityReason = "COMPILER_REPORT_${effStability}",
+            hasDefault = modifier1 == "default",
+            isUsedInBody = !isUnused,
+            provenance = "COMPILER_VERIFIED"
+        )
+    }
+
+    private fun parseCompilerParamsBlock(
+        lines: List<String>,
+        startIndex: Int,
+        nodeId: String
+    ): Pair<List<ComposeParamRecord>, Int> {
+        val params = mutableListOf<ComposeParamRecord>()
+        var i = startIndex
+        while (i < lines.size) {
+            val pLine = lines[i].trim()
+            if (pLine.startsWith(")") || pLine.startsWith("fun ") || pLine.startsWith("restartable ")) {
+                break
+            }
+            val record = parseCompilerParamLine(pLine, nodeId, params.size)
+            if (record != null) {
+                params.add(record)
+            }
+            i++
+        }
+        return Pair(params, i)
+    }
+
+    private fun buildCompilerVerifiedNode(
+        projectSlug: String,
+        nodeId: String,
+        rawName: String,
+        flags: String,
+        matchedNode: ComposeNodeRecord?,
+        params: List<ComposeParamRecord>
+    ): ComposeNodeRecord {
+        val isRestartable = flags.contains("restartable")
+        val isSkippable = flags.contains("skippable")
+        val isReadonly = flags.contains("readonly")
+        val isInline = flags.contains("inline")
+        val unstableCnt = params.count { it.isUsedInBody && it.stability == "UNSTABLE" }
+        val runtimeCnt = params.count { it.isUsedInBody && it.stability == "RUNTIME" }
+        val baseNode = matchedNode ?: ComposeNodeRecord(
+            nodeId = nodeId,
+            projectSlug = projectSlug,
+            fqName = rawName,
+            filePath = "compiler_report",
+            startLine = 1,
+            endLine = 1
+        )
+        var newMask = baseNode.violationMask
+        if (isRestartable && !isSkippable && unstableCnt > 0) {
+            newMask = newMask or BIT_STAB_001
+        } else if (isSkippable) {
+            newMask = newMask and BIT_STAB_001.inv()
+        }
+        return baseNode.copy(
+            isRestartable = isRestartable,
+            isSkippable = isSkippable,
+            isReadonly = isReadonly,
+            isInline = isInline,
+            unstableParamCount = unstableCnt,
+            runtimeParamCount = runtimeCnt,
+            provenance = "COMPILER_VERIFIED",
+            violationMask = newMask
+        )
+    }
+
     fun parseCompilerComposablesReport(
         projectSlug: String,
         reportText: String,
@@ -547,15 +640,11 @@ class ComposeStabilityExtractor {
         val updatedNodes = mutableListOf<ComposeNodeRecord>()
         val updatedParams = mutableListOf<ComposeParamRecord>()
 
-        // Match blocks like: restartable skippable scheme("[androidx.compose.ui.UiComposable]") fun HomeScreen(
-        val headerRe = Regex("""^(.*?\bfun\s+)([A-Za-z0-9_.]+)\s*\(""")
-        val paramLineRe = Regex("""^\s*(stable|unstable|runtime|unused|default)\s+(?:(stable|unstable|runtime)\s+)?([A-Za-z0-9_]+)\s*:\s*(.+)$""")
-
         val lines = clipped.lineSequence().take(MAX_TELEMETRY_LINES).toList()
         var i = 0
         while (i < lines.size) {
             val line = lines[i]
-            val m = headerRe.find(line)
+            val m = COMPILER_HEADER_RE.find(line)
             if (m == null) {
                 i++
                 continue
@@ -564,82 +653,14 @@ class ComposeStabilityExtractor {
             val rawName = m.groupValues[2].trim()
             val shortName = rawName.substringAfterLast('.')
             val matchedNode = byFqName[rawName] ?: byShortName[shortName]?.firstOrNull()
-
-            val isRestartable = flags.contains("restartable")
-            val isSkippable = flags.contains("skippable")
-            val isReadonly = flags.contains("readonly")
-            val isInline = flags.contains("inline")
-
             val nodeId = matchedNode?.nodeId ?: "$projectSlug:compiler#$rawName"
-            val params = mutableListOf<ComposeParamRecord>()
-            var pIdx = 0
-            i++
-            while (i < lines.size) {
-                val pLine = lines[i].trim()
-                if (pLine.startsWith(")") || pLine.startsWith("fun ") || pLine.startsWith("restartable ")) {
-                    break
-                }
-                val pm = paramLineRe.find(pLine)
-                if (pm != null) {
-                    val modifier1 = pm.groupValues[1]
-                    val modifier2 = pm.groupValues[2]
-                    val pName = pm.groupValues[3]
-                    val pType = pm.groupValues[4].trim()
-                    val isUnused = modifier1 == "unused"
-                    val effStability = when (modifier2.ifEmpty { modifier1 }) {
-                        "stable" -> "STABLE"
-                        "unstable" -> "UNSTABLE"
-                        "runtime" -> "RUNTIME"
-                        else -> "STABLE"
-                    }
-                    params.add(
-                        ComposeParamRecord(
-                            nodeId = nodeId,
-                            paramIndex = pIdx++,
-                            paramName = pName,
-                            typeSignature = pType,
-                            stability = effStability,
-                            stabilityReason = "COMPILER_REPORT_${effStability}",
-                            hasDefault = modifier1 == "default",
-                            isUsedInBody = !isUnused,
-                            provenance = "COMPILER_VERIFIED"
-                        )
-                    )
-                }
-                i++
-            }
 
-            val unstableCnt = params.count { it.isUsedInBody && it.stability == "UNSTABLE" }
-            val runtimeCnt = params.count { it.isUsedInBody && it.stability == "RUNTIME" }
-            val baseNode = matchedNode ?: ComposeNodeRecord(
-                nodeId = nodeId,
-                projectSlug = projectSlug,
-                fqName = rawName,
-                filePath = "compiler_report",
-                startLine = 1,
-                endLine = 1
-            )
-            var newMask = baseNode.violationMask
-            if (isRestartable && !isSkippable && unstableCnt > 0) {
-                newMask = newMask or BIT_STAB_001
-            } else if (isSkippable) {
-                newMask = newMask and BIT_STAB_001.inv()
-            }
+            val (params, nextIndex) = parseCompilerParamsBlock(lines, i + 1, nodeId)
+            val updatedNode = buildCompilerVerifiedNode(projectSlug, nodeId, rawName, flags, matchedNode, params)
 
-            updatedNodes.add(
-                baseNode.copy(
-                    isRestartable = isRestartable,
-                    isSkippable = isSkippable,
-                    isReadonly = isReadonly,
-                    isInline = isInline,
-                    unstableParamCount = unstableCnt,
-                    runtimeParamCount = runtimeCnt,
-                    provenance = "COMPILER_VERIFIED",
-                    violationMask = newMask
-                )
-            )
+            updatedNodes.add(updatedNode)
             updatedParams.addAll(params)
-            i++
+            i = nextIndex
         }
 
         return Pair(updatedNodes, updatedParams)
