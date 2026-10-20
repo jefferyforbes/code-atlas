@@ -723,6 +723,110 @@ class ComposeStabilityExtractor {
         return records
     }
 
+    private fun isClassBodyTermination(maskedText: String, k: Int): Boolean {
+        if (maskedText[k] == ';') return true
+        if (maskedText[k] != '\n' || k + 1 >= maskedText.length) return false
+        val remainder = maskedText.substring(k + 1).trimStart()
+        return remainder.startsWith("class ") ||
+            remainder.startsWith("interface ") ||
+            remainder.startsWith("fun ") ||
+            remainder.startsWith("@Composable")
+    }
+
+    private fun findClassBodyOpenBrace(maskedText: String, fromOffset: Int): Int? {
+        var k = fromOffset
+        while (k < maskedText.length) {
+            val c = maskedText[k]
+            if (c == '{') return k
+            if (isClassBodyTermination(maskedText, k)) return null
+            k++
+        }
+        return null
+    }
+
+    private fun extractDepthOneBodyText(maskedText: String, openBrace: Int): String? {
+        val closeBrace = findBalancedCloseBrace(maskedText, openBrace)
+        if (closeBrace <= openBrace + 1) return null
+
+        var depth = 1
+        var bIdx = openBrace + 1
+        val classLevelChars = CharArray(closeBrace - openBrace - 1)
+        while (bIdx < closeBrace) {
+            val ch = maskedText[bIdx]
+            val slot = bIdx - openBrace - 1
+            when (ch) {
+                '{' -> { depth++; classLevelChars[slot] = ' ' }
+                '}' -> { depth--; classLevelChars[slot] = ' ' }
+                else -> { classLevelChars[slot] = if (depth == 1) ch else ' ' }
+            }
+            bIdx++
+        }
+        return classLevelChars.concatToString()
+    }
+
+    private fun findDepthOneBodyVar(maskedText: String, fromOffset: Int): String? {
+        val openBrace = findClassBodyOpenBrace(maskedText, fromOffset) ?: return null
+        val bodyText = extractDepthOneBodyText(maskedText, openBrace) ?: return null
+        val bodyVarMatch = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""").find(bodyText)
+        return bodyVarMatch?.groupValues?.get(1)
+    }
+
+    private fun evaluateSpecialClassKind(kindKw: String, hasStableAnnotation: Boolean): Pair<String, String>? {
+        if (kindKw == "enum class" || kindKw == "value class") {
+            return "STABLE" to "ENUM_OR_VALUE_CLASS"
+        }
+        if (kindKw == "interface" && !hasStableAnnotation) {
+            return "UNCERTAIN" to "UNANNOTATED_INTERFACE"
+        }
+        return null
+    }
+
+    private fun evaluateCollectionPropertyStability(
+        className: String,
+        propName: String,
+        colType: String,
+        stabilityPatterns: List<Regex>
+    ): Pair<String, String> {
+        val matchedByConf = stabilityPatterns.any { it.matches("kotlin.collections.$colType") }
+        if (matchedByConf) {
+            return "STABLE" to "STABILITY_CONFIG_MATCH:kotlin.collections.$colType"
+        }
+        return "UNSTABLE" to "UNSTABLE_COLLECTION_PROPERTY:$propName($colType)"
+    }
+
+    private fun evaluateClassStability(
+        className: String,
+        kindKw: String,
+        hasStableAnnotation: Boolean,
+        ctorSlice: String,
+        bodyVarName: String?,
+        stabilityPatterns: List<Regex>
+    ): Pair<String, String> {
+        val special = evaluateSpecialClassKind(kindKw, hasStableAnnotation)
+        if (special != null) return special
+
+        val ctorVarMatch = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)\s*:""").find(ctorSlice)
+        val rawCollectionMatch = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map|MutableList|MutableSet|MutableMap)<""").find(ctorSlice)
+        val varPropName = ctorVarMatch?.groupValues?.get(1) ?: bodyVarName
+
+        if (hasStableAnnotation && (varPropName != null || rawCollectionMatch != null)) {
+            val offender = varPropName ?: rawCollectionMatch?.groupValues?.get(1) ?: "field"
+            return "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:$className.$offender"
+        }
+        if (varPropName != null) {
+            return "UNSTABLE" to "MUTABLE_VAR_PROPERTY:$varPropName"
+        }
+        if (rawCollectionMatch != null) {
+            val propName = rawCollectionMatch.groupValues[1]
+            val colType = rawCollectionMatch.groupValues[2]
+            return evaluateCollectionPropertyStability(className, propName, colType, stabilityPatterns)
+        }
+        if (hasStableAnnotation) {
+            return "STABLE" to "EXPLICIT_STABLE_ANNOTATION"
+        }
+        return "STABLE" to "ALL_VAL_PROPERTIES_STABLE"
+    }
+
     /**
      * Extracts class stability metadata directly from a Kotlin source text slice.
      */
@@ -734,91 +838,17 @@ class ComposeStabilityExtractor {
         val result = mutableMapOf<String, Pair<String, String>>()
         val classRe = Regex("""((?:@(?:Immutable|Stable)\b[\s\S]*?)?)\b(data\s+class|value\s+class|enum\s+class|sealed\s+interface|sealed\s+class|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*(\([^)]*\))?""")
 
-        for (m in classRe.findAll(maskedText)) {
-            val annotations = m.groupValues[1]
-            val kindKw = m.groupValues[2].replace(Regex("""\s+"""), " ")
-            val className = m.groupValues[3]
-            val ctorSlice = m.groupValues[4]
-
+        for (declMatch in classRe.findAll(maskedText)) {
+            val annotations = declMatch.groupValues[1]
+            val kindKw = declMatch.groupValues[2].replace(Regex("""\s+"""), " ")
+            val className = declMatch.groupValues[3]
+            val ctorSlice = declMatch.groupValues[4]
             val hasStableAnnotation = annotations.contains("@Immutable") || annotations.contains("@Stable")
-            if (kindKw == "enum class" || kindKw == "value class") {
-                result[className] = "STABLE" to "ENUM_OR_VALUE_CLASS"
-                continue
-            }
-            if (kindKw == "interface" && !hasStableAnnotation) {
-                result[className] = "UNCERTAIN" to "UNANNOTATED_INTERFACE"
-                continue
-            }
 
-            // Inspect constructor parameters for `var` or standard `List`/`Set`/`Map`
-            val ctorVarMatch = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)\s*:""").find(ctorSlice)
-            val rawCollectionMatch = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map|MutableList|MutableSet|MutableMap)<""").find(ctorSlice)
-
-            // Inspect class body { ... } at depth 1 for mutable `var` properties
-            var bodyVarName: String? = null
-            var k = m.range.last
-            var foundBrace = false
-            while (k < maskedText.length) {
-                val c = maskedText[k]
-                if (c == '{') {
-                    foundBrace = true
-                    break
-                }
-                if (c == ';' || (c == '\n' && k + 1 < maskedText.length && maskedText.substring(k + 1).trimStart().let {
-                    it.startsWith("class ") || it.startsWith("interface ") || it.startsWith("fun ") || it.startsWith("@Composable")
-                })) {
-                    break
-                }
-                k++
-            }
-
-            if (foundBrace) {
-                val openBrace = k
-                val closeBrace = findBalancedCloseBrace(maskedText, openBrace)
-                if (closeBrace > openBrace) {
-                    var depth = 1
-                    var bIdx = openBrace + 1
-                    val classLevelChars = CharArray(closeBrace - openBrace - 1)
-                    while (bIdx < closeBrace) {
-                        val ch = maskedText[bIdx]
-                        when (ch) {
-                            '{' -> { depth++; classLevelChars[bIdx - openBrace - 1] = ' ' }
-                            '}' -> { depth--; classLevelChars[bIdx - openBrace - 1] = ' ' }
-                            else -> {
-                                classLevelChars[bIdx - openBrace - 1] = if (depth == 1) ch else ' '
-                            }
-                        }
-                        bIdx++
-                    }
-                    val classLevelText = classLevelChars.concatToString()
-                    val bodyVarMatch = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""").find(classLevelText)
-                    if (bodyVarMatch != null) {
-                        bodyVarName = bodyVarMatch.groupValues[1]
-                    }
-                }
-            }
-
-            val varPropName = ctorVarMatch?.groupValues?.get(1) ?: bodyVarName
-
-            if (hasStableAnnotation && (varPropName != null || rawCollectionMatch != null)) {
-                val offender = varPropName ?: rawCollectionMatch?.groupValues?.get(1) ?: "field"
-                result[className] = "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:$className.$offender"
-            } else if (varPropName != null) {
-                result[className] = "UNSTABLE" to "MUTABLE_VAR_PROPERTY:$varPropName"
-            } else if (rawCollectionMatch != null) {
-                val propName = rawCollectionMatch.groupValues[1]
-                val colType = rawCollectionMatch.groupValues[2]
-                val matchedByConf = stabilityPatterns.any { it.matches("kotlin.collections.$colType") }
-                if (matchedByConf) {
-                    result[className] = "STABLE" to "STABILITY_CONFIG_MATCH:kotlin.collections.$colType"
-                } else {
-                    result[className] = "UNSTABLE" to "UNSTABLE_COLLECTION_PROPERTY:$propName($colType)"
-                }
-            } else if (hasStableAnnotation) {
-                result[className] = "STABLE" to "EXPLICIT_STABLE_ANNOTATION"
-            } else {
-                result[className] = "STABLE" to "ALL_VAL_PROPERTIES_STABLE"
-            }
+            val bodyVarName = findDepthOneBodyVar(maskedText, declMatch.range.last)
+            result[className] = evaluateClassStability(
+                className, kindKw, hasStableAnnotation, ctorSlice, bodyVarName, stabilityPatterns
+            )
         }
         return result
     }
