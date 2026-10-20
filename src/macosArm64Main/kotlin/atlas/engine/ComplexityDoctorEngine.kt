@@ -559,52 +559,48 @@ class ComplexityDoctorEngine(
         return null
     }
 
-    private fun invertCondition(cond: String): String {
+    private fun isEnclosingParensBalanced(text: String, startIndex: Int = 0): Boolean {
+        var depth = 0
+        for (idx in startIndex until text.length) {
+            if (text[idx] == '(') depth++
+            else if (text[idx] == ')') {
+                depth--
+                if (depth == 0) return idx == text.length - 1
+            }
+        }
+        return false
+    }
+
+    private fun stripOuterParens(cond: String): String {
         var trimmed = cond.trim()
         while (trimmed.startsWith("(") && trimmed.endsWith(")")) {
-            var depth = 0
-            var balancedMatch = false
-            for (idx in trimmed.indices) {
-                if (trimmed[idx] == '(') depth++
-                else if (trimmed[idx] == ')') {
-                    depth--
-                    if (depth == 0) {
-                        balancedMatch = (idx == trimmed.length - 1)
-                        break
-                    }
-                }
-            }
-            if (balancedMatch) {
+            if (isEnclosingParensBalanced(trimmed, 0)) {
                 trimmed = trimmed.substring(1, trimmed.length - 1).trim()
             } else {
                 break
             }
         }
+        return trimmed
+    }
 
-        if (trimmed.startsWith("!(") && trimmed.endsWith(")")) {
-            var depth = 0
-            var balancedMatch = false
-            for (idx in 1 until trimmed.length) {
-                if (trimmed[idx] == '(') depth++
-                else if (trimmed[idx] == ')') {
-                    depth--
-                    if (depth == 0) {
-                        balancedMatch = (idx == trimmed.length - 1)
-                        break
-                    }
-                }
-            }
-            if (balancedMatch) {
-                return trimmed.substring(2, trimmed.length - 1).trim()
-            }
+    private fun isSimpleIdentifier(s: String): Boolean {
+        return s.isNotEmpty() && s.all { it.isLetterOrDigit() || it == '_' || it == '.' }
+    }
+
+    private fun invertSimpleNegation(trimmed: String): String? {
+        if (trimmed.startsWith("!(") && trimmed.endsWith(")") && isEnclosingParensBalanced(trimmed, 1)) {
+            return trimmed.substring(2, trimmed.length - 1).trim()
         }
         if (trimmed.startsWith("!")) {
             val rest = trimmed.substring(1).trim()
-            if (rest.all { it.isLetterOrDigit() || it == '_' || it == '.' }) {
+            if (isSimpleIdentifier(rest)) {
                 return rest
             }
         }
+        return null
+    }
 
+    private fun invertLogicalOperators(trimmed: String): String? {
         val topOrs = findTopLevelOperatorPositions(trimmed, "||")
         if (topOrs.isNotEmpty()) {
             val parts = splitAtIndices(trimmed, topOrs, 2)
@@ -613,68 +609,56 @@ class ComplexityDoctorEngine(
                 if (findTopLevelOperatorPositions(inv, "||").isNotEmpty()) "($inv)" else inv
             }
         }
-
         val topAnds = findTopLevelOperatorPositions(trimmed, "&&")
         if (topAnds.isNotEmpty()) {
             val parts = splitAtIndices(trimmed, topAnds, 2)
             return parts.joinToString(" || ") { invertCondition(it) }
         }
+        return null
+    }
 
-        val eq3Pos = findTopLevelOperatorPositions(trimmed, " === ")
-        if (eq3Pos.size == 1) {
-            val left = trimmed.substring(0, eq3Pos[0]).trim()
-            val right = trimmed.substring(eq3Pos[0] + 5).trim()
-            return "$left !== $right"
+    private fun invertComparison(trimmed: String): String? {
+        for (entry in COMPARISON_INVERSIONS) {
+            val op = entry.first
+            val opp = entry.second
+            val pos = findTopLevelOperatorPositions(trimmed, op)
+            if (pos.size == 1) {
+                val left = trimmed.substring(0, pos[0]).trim()
+                val right = trimmed.substring(pos[0] + op.length).trim()
+                return "$left$opp$right"
+            }
         }
-        val neq3Pos = findTopLevelOperatorPositions(trimmed, " !== ")
-        if (neq3Pos.size == 1) {
-            val left = trimmed.substring(0, neq3Pos[0]).trim()
-            val right = trimmed.substring(neq3Pos[0] + 5).trim()
-            return "$left === $right"
-        }
+        return null
+    }
 
-        val eqPos = findTopLevelOperatorPositions(trimmed, " == ")
-        if (eqPos.size == 1) {
-            val left = trimmed.substring(0, eqPos[0]).trim()
-            val right = trimmed.substring(eqPos[0] + 4).trim()
-            return "$left != $right"
-        }
-        val neqPos = findTopLevelOperatorPositions(trimmed, " != ")
-        if (neqPos.size == 1) {
-            val left = trimmed.substring(0, neqPos[0]).trim()
-            val right = trimmed.substring(neqPos[0] + 4).trim()
-            return "$left == $right"
-        }
+    private fun invertCondition(cond: String): String {
+        val trimmed = stripOuterParens(cond)
+        val invertedNeg = invertSimpleNegation(trimmed)
+        if (invertedNeg != null) return invertedNeg
 
-        val ltePos = findTopLevelOperatorPositions(trimmed, " <= ")
-        if (ltePos.size == 1) {
-            val left = trimmed.substring(0, ltePos[0]).trim()
-            val right = trimmed.substring(ltePos[0] + 4).trim()
-            return "$left > $right"
-        }
-        val gtePos = findTopLevelOperatorPositions(trimmed, " >= ")
-        if (gtePos.size == 1) {
-            val left = trimmed.substring(0, gtePos[0]).trim()
-            val right = trimmed.substring(gtePos[0] + 4).trim()
-            return "$left < $right"
-        }
-        val ltPos = findTopLevelOperatorPositions(trimmed, " < ")
-        if (ltPos.size == 1) {
-            val left = trimmed.substring(0, ltPos[0]).trim()
-            val right = trimmed.substring(ltPos[0] + 3).trim()
-            return "$left >= $right"
-        }
-        val gtPos = findTopLevelOperatorPositions(trimmed, " > ")
-        if (gtPos.size == 1) {
-            val left = trimmed.substring(0, gtPos[0]).trim()
-            val right = trimmed.substring(gtPos[0] + 3).trim()
-            return "$left <= $right"
-        }
+        val invertedLogic = invertLogicalOperators(trimmed)
+        if (invertedLogic != null) return invertedLogic
 
-        if (trimmed.all { it.isLetterOrDigit() || it == '_' || it == '.' }) {
+        val invertedCmp = invertComparison(trimmed)
+        if (invertedCmp != null) return invertedCmp
+
+        if (isSimpleIdentifier(trimmed)) {
             return "!$trimmed"
         }
         return "!($trimmed)"
+    }
+
+    companion object {
+        private val COMPARISON_INVERSIONS = listOf(
+            Pair(" === ", " !== "),
+            Pair(" !== ", " === "),
+            Pair(" == ", " != "),
+            Pair(" != ", " == "),
+            Pair(" <= ", " > "),
+            Pair(" >= ", " < "),
+            Pair(" < ", " >= "),
+            Pair(" > ", " <= ")
+        )
     }
 
     private fun findTopLevelOperatorPositions(text: String, op: String): List<Int> {
