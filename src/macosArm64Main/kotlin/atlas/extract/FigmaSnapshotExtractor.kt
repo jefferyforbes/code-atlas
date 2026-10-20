@@ -216,95 +216,71 @@ class FigmaSnapshotExtractor {
         return Pair(variables.values.toList(), edges.values.toList())
     }
 
-    private fun traverseNodeTree(
-        fileKey: String,
+    private fun detectEmoji(nodeObj: JsonObject, name: String): Boolean {
+        val explicit = nodeObj["hasEmoji"].asBoolean() ?: nodeObj["has_emoji"].asBoolean()
+        if (explicit != null) return explicit
+        val characters = nodeObj["characters"].asString() ?: ""
+        return containsEmoji(name) || containsEmoji(characters)
+    }
+
+    private fun detectInteractive(
         nodeObj: JsonObject,
+        rawType: String,
+        name: String,
+        hasReaction: Boolean
+    ): Boolean {
+        val explicit = nodeObj["isInteractive"].asBoolean() ?: nodeObj["is_interactive"].asBoolean()
+        if (explicit != null) return explicit
+        return hasReaction || rawType == "TOUCH_TARGET_FRAME" || isInteractiveByName(name)
+    }
+
+    private fun recordContainsEdge(
+        fileKey: String,
         parentId: String?,
-        pageName: String,
-        sectionId: String?,
-        nodes: MutableList<FigmaNode>,
+        nodeId: String,
         edges: MutableMap<String, FigmaEdge>
     ) {
-        val nodeId = nodeObj["id"].asString()
-            ?: nodeObj["nodeId"].asString()
-            ?: return
+        if (parentId == null) return
+        val containsEdgeId = "$fileKey:contains:$parentId->$nodeId"
+        edges[containsEdgeId] = FigmaEdge(
+            edgeId = containsEdgeId,
+            fileKey = fileKey,
+            sourceNodeId = parentId,
+            targetNodeId = nodeId,
+            edgeType = "CONTAINS",
+            propertySlot = "children"
+        )
+    }
 
-        val name = nodeObj["name"].asString() ?: ""
-        val rawType = nodeObj["type"].asString()?.uppercase() ?: "FRAME"
-
-        val effectivePageName = if (rawType == "CANVAS" && name.isNotBlank()) name else pageName
-
-        val currentSectionId = if (rawType == "SECTION" || rawType == "CANVAS_SECTION") {
-            sectionId
-        } else {
-            sectionId ?: nodeObj["sectionId"].asString()
-        }
-
-        val nextSectionId = if (rawType == "SECTION" || rawType == "CANVAS_SECTION") {
-            nodeId
-        } else {
-            currentSectionId
-        }
-
-        // AutoLayout flex parameters
+    private fun buildFigmaNode(
+        nodeId: String,
+        fileKey: String,
+        pageName: String,
+        sectionId: String?,
+        parentId: String?,
+        name: String,
+        rawType: String,
+        nodeObj: JsonObject,
+        isInteractive: Boolean,
+        hasEmoji: Boolean,
+        hasReaction: Boolean
+    ): FigmaNode {
         val autoLayout = extractAutoLayout(nodeObj)
-
-        // 2D spatial coordinates (stripping vector paths, geometry vertices, SVG)
         val bbox = extractBoundingBox(nodeObj)
-
-        // Emoji detection in name and text characters
-        val characters = nodeObj["characters"].asString() ?: ""
-        val hasEmoji = nodeObj["hasEmoji"].asBoolean()
-            ?: nodeObj["has_emoji"].asBoolean()
-            ?: (containsEmoji(name) || containsEmoji(characters))
-
-        // Prototype reaction extraction & edge creation
-        val hasReaction = extractReactions(fileKey, nodeId, nodeObj, edges)
-
-        // Interactive flag
-        val isInteractive = nodeObj["isInteractive"].asBoolean()
-            ?: nodeObj["is_interactive"].asBoolean()
-            ?: (hasReaction || rawType == "TOUCH_TARGET_FRAME" || isInteractiveByName(name))
-
-        // Bound variables edges extraction (fills, strokes, width, height, itemSpacing, etc.)
-        extractBoundVariableEdges(fileKey, nodeId, nodeObj, edges)
-
-        // Component instance edges
-        if (rawType == "INSTANCE") {
-            extractInstantiates(fileKey, nodeId, nodeObj, edges)
-        }
-
-        // Tree hierarchy CONTAINS edge
-        if (parentId != null) {
-            val containsEdgeId = "$fileKey:contains:$parentId->$nodeId"
-            edges[containsEdgeId] = FigmaEdge(
-                edgeId = containsEdgeId,
-                fileKey = fileKey,
-                sourceNodeId = parentId,
-                targetNodeId = nodeId,
-                edgeType = "CONTAINS",
-                propertySlot = "children"
-            )
-        }
-
-        // Unbound fills and strokes
         val fills = nodeObj["fills"]?.jsonArray
         val strokes = nodeObj["strokes"]?.jsonArray
         val unboundFill = extractUnboundFill(nodeObj, fills)
         val unboundStroke = extractUnboundStroke(nodeObj, strokes)
-
-        val wcagContrast = nodeObj["wcagContrast"].asDouble()
-            ?: nodeObj["wcag_contrast"].asDouble()
-
+        val wcagContrast = nodeObj["wcagContrast"].asDouble() ?: nodeObj["wcag_contrast"].asDouble()
         val semioticLayer = nodeObj["semioticLayer"].asString()
             ?: nodeObj["semiotic_layer"].asString()
             ?: classifySemioticLayer(rawType, name, isInteractive, hasReaction)
 
-        val figmaNode = FigmaNode(
+        return FigmaNode(
             nodeId = nodeId,
             fileKey = fileKey,
-            pageName = effectivePageName,
-            sectionId = currentSectionId,
+            pageName = pageName,
+            sectionId = sectionId,
             parentId = parentId,
             name = name,
             nodeType = rawType,
@@ -330,25 +306,70 @@ class FigmaSnapshotExtractor {
             wcagContrast = wcagContrast,
             semioticLayer = semioticLayer
         )
+    }
+
+    private fun traverseChildren(
+        children: JsonArray?,
+        fileKey: String,
+        parentId: String,
+        pageName: String,
+        sectionId: String?,
+        nodes: MutableList<FigmaNode>,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        if (children == null) return
+        for (child in children.filterIsInstance<JsonObject>()) {
+            traverseNodeTree(fileKey, child, parentId, pageName, sectionId, nodes, edges)
+        }
+    }
+
+    private fun traverseNodeTree(
+        fileKey: String,
+        nodeObj: JsonObject,
+        parentId: String?,
+        pageName: String,
+        sectionId: String?,
+        nodes: MutableList<FigmaNode>,
+        edges: MutableMap<String, FigmaEdge>
+    ) {
+        val nodeId = nodeObj["id"].asString()
+            ?: nodeObj["nodeId"].asString()
+            ?: return
+
+        val name = nodeObj["name"].asString() ?: ""
+        val rawType = nodeObj["type"].asString()?.uppercase() ?: "FRAME"
+
+        val effectivePageName = if (rawType == "CANVAS" && name.isNotBlank()) name else pageName
+        val isSection = rawType == "SECTION" || rawType == "CANVAS_SECTION"
+        val currentSectionId = if (isSection) sectionId else (sectionId ?: nodeObj["sectionId"].asString())
+        val nextSectionId = if (isSection) nodeId else currentSectionId
+
+        val hasEmoji = detectEmoji(nodeObj, name)
+        val hasReaction = extractReactions(fileKey, nodeId, nodeObj, edges)
+        val isInteractive = detectInteractive(nodeObj, rawType, name, hasReaction)
+
+        extractBoundVariableEdges(fileKey, nodeId, nodeObj, edges)
+        if (rawType == "INSTANCE") {
+            extractInstantiates(fileKey, nodeId, nodeObj, edges)
+        }
+        recordContainsEdge(fileKey, parentId, nodeId, edges)
+
+        val figmaNode = buildFigmaNode(
+            nodeId = nodeId,
+            fileKey = fileKey,
+            pageName = effectivePageName,
+            sectionId = currentSectionId,
+            parentId = parentId,
+            name = name,
+            rawType = rawType,
+            nodeObj = nodeObj,
+            isInteractive = isInteractive,
+            hasEmoji = hasEmoji,
+            hasReaction = hasReaction
+        )
         nodes.add(figmaNode)
 
-        // Recurse into children
-        val children = nodeObj["children"]?.jsonArray
-        if (children != null) {
-            for (child in children) {
-                if (child is JsonObject) {
-                    traverseNodeTree(
-                        fileKey = fileKey,
-                        nodeObj = child,
-                        parentId = nodeId,
-                        pageName = effectivePageName,
-                        sectionId = nextSectionId,
-                        nodes = nodes,
-                        edges = edges
-                    )
-                }
-            }
-        }
+        traverseChildren(nodeObj["children"]?.jsonArray, fileKey, nodeId, effectivePageName, nextSectionId, nodes, edges)
     }
 
     private fun resolveFallbackSizing(
