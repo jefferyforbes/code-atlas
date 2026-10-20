@@ -954,6 +954,121 @@ class SqliteGraphStore(val dbPath: String) {
         }
     }
 
+    private fun bindUpsertNode(stmt: NativeSqliteStatement, node: GraphNode) {
+        stmt.reset()
+        stmt.clearBindings()
+        stmt.bindString(1, node.nodeId)
+        stmt.bindString(2, node.projectId)
+        stmt.bindString(3, node.fileId)
+        stmt.bindString(4, node.name)
+        stmt.bindString(5, node.qualifiedName)
+        stmt.bindString(6, node.kind)
+        stmt.bindString(7, node.signature)
+        stmt.bindInt(8, node.startLine)
+        stmt.bindInt(9, node.endLine)
+        stmt.bindString(10, node.moduleId)
+        stmt.bindString(11, node.sourceSet)
+        stmt.bindString(12, node.semioticLayer)
+        stmt.bindString(13, node.archLayer)
+        stmt.bindInt(14, if (node.isTestDouble) 1 else 0)
+        stmt.bindInt(15, node.inDegree)
+        stmt.bindInt(16, node.outDegree)
+        if (node.description != null) {
+            stmt.bindString(17, node.description)
+        } else {
+            stmt.bindNull(17)
+        }
+        stmt.bindInt(18, if (node.isTopLevel) 1 else 0)
+        stmt.bindInt(19, node.cyclomaticComplexity)
+        stmt.bindInt(20, node.cognitiveComplexity)
+        stmt.bindInt(21, node.maxNestingDepth)
+        stmt.bindDouble(22, node.complexityScore)
+        stmt.step()
+    }
+
+    private fun upsertNodeSearchIndexes(
+        delVocab: NativeSqliteStatement,
+        delFtsByNodeId: NativeSqliteStatement,
+        delFts: NativeSqliteStatement,
+        insFts: NativeSqliteStatement,
+        insVocab: NativeSqliteStatement,
+        node: GraphNode
+    ) {
+        delVocab.reset(); delVocab.clearBindings(); delVocab.bindString(1, node.nodeId); delVocab.step()
+        delFtsByNodeId.reset(); delFtsByNodeId.clearBindings(); delFtsByNodeId.bindString(1, node.nodeId); delFtsByNodeId.step()
+        delFts.reset(); delFts.clearBindings(); delFts.bindString(1, node.nodeId); delFts.step()
+
+        insFts.reset()
+        insFts.clearBindings()
+        insFts.bindString(1, node.nodeId)
+        insFts.bindString(2, node.nodeId)
+        insFts.bindString(3, node.projectId)
+        insFts.bindString(4, node.name)
+        insFts.bindString(5, node.qualifiedName)
+        insFts.bindString(6, node.signature)
+        insFts.bindString(7, node.fileId)
+        insFts.step()
+
+        for (seg in NameSegmentTokenizer.tokenize("${node.name} ${node.qualifiedName}")) {
+            insVocab.reset()
+            insVocab.clearBindings()
+            insVocab.bindString(1, seg)
+            insVocab.bindString(2, node.nodeId)
+            insVocab.bindString(3, node.projectId)
+            insVocab.step()
+        }
+    }
+
+    private fun bindUpsertEdge(stmt: NativeSqliteStatement, edge: GraphEdge) {
+        stmt.reset()
+        stmt.clearBindings()
+        stmt.bindString(1, edge.edgeId)
+        stmt.bindString(2, edge.projectId)
+        stmt.bindString(3, edge.sourceNodeId)
+        stmt.bindString(4, edge.targetNodeId)
+        stmt.bindString(5, edge.edgeType)
+        stmt.bindString(6, edge.provenance)
+        stmt.bindDouble(7, edge.confidence)
+        stmt.bindInt(8, edge.lineNumber)
+        stmt.step()
+    }
+
+    private fun sweepOrphanEndpoints(
+        scope: StatementScope,
+        projectId: String,
+        delFtsByNodeId: NativeSqliteStatement,
+        delFts: NativeSqliteStatement,
+        delVocab: NativeSqliteStatement
+    ) {
+        val selectOrphanEndpoints = scope.prepare(
+            """
+            SELECT node_id FROM nodes
+            WHERE project_id = ?
+              AND kind = 'endpoint'
+              AND file_id = ?
+              AND node_id NOT IN (SELECT target_node_id FROM edges WHERE project_id = ?)
+              AND node_id NOT IN (SELECT source_node_id FROM edges WHERE project_id = ?);
+            """.trimIndent()
+        )
+        selectOrphanEndpoints.bindString(1, projectId)
+        selectOrphanEndpoints.bindString(2, "$projectId:__endpoints__")
+        selectOrphanEndpoints.bindString(3, projectId)
+        selectOrphanEndpoints.bindString(4, projectId)
+        val orphanEpIds = mutableListOf<String>()
+        while (selectOrphanEndpoints.step()) {
+            orphanEpIds.add(selectOrphanEndpoints.columnString(0))
+        }
+        if (orphanEpIds.isNotEmpty()) {
+            val delEpNode = scope.prepare("DELETE FROM nodes WHERE node_id = ?;")
+            for (epId in orphanEpIds) {
+                delFtsByNodeId.reset(); delFtsByNodeId.clearBindings(); delFtsByNodeId.bindString(1, epId); delFtsByNodeId.step()
+                delFts.reset(); delFts.clearBindings(); delFts.bindString(1, epId); delFts.step()
+                delVocab.reset(); delVocab.clearBindings(); delVocab.bindString(1, epId); delVocab.step()
+                delEpNode.reset(); delEpNode.clearBindings(); delEpNode.bindString(1, epId); delEpNode.step()
+            }
+        }
+    }
+
     fun upsertNodesAndEdges(
         projectId: String,
         nodes: List<GraphNode>,
@@ -1040,84 +1155,12 @@ class SqliteGraphStore(val dbPath: String) {
                 )
 
                 for (node in nodes) {
-                    delVocab.reset()
-                    delVocab.clearBindings()
-                    delVocab.bindString(1, node.nodeId)
-                    delVocab.step()
-
-                    insNode.reset()
-                    insNode.clearBindings()
-                    insNode.bindString(1, node.nodeId)
-                    insNode.bindString(2, node.projectId)
-                    insNode.bindString(3, node.fileId)
-                    insNode.bindString(4, node.name)
-                    insNode.bindString(5, node.qualifiedName)
-                    insNode.bindString(6, node.kind)
-                    insNode.bindString(7, node.signature)
-                    insNode.bindInt(8, node.startLine)
-                    insNode.bindInt(9, node.endLine)
-                    insNode.bindString(10, node.moduleId)
-                    insNode.bindString(11, node.sourceSet)
-                    insNode.bindString(12, node.semioticLayer)
-                    insNode.bindString(13, node.archLayer)
-                    insNode.bindInt(14, if (node.isTestDouble) 1 else 0)
-                    insNode.bindInt(15, node.inDegree)
-                    insNode.bindInt(16, node.outDegree)
-                    if (node.description != null) {
-                        insNode.bindString(17, node.description)
-                    } else {
-                        insNode.bindNull(17)
-                    }
-                    insNode.bindInt(18, if (node.isTopLevel) 1 else 0)
-                    insNode.bindInt(19, node.cyclomaticComplexity)
-                    insNode.bindInt(20, node.cognitiveComplexity)
-                    insNode.bindInt(21, node.maxNestingDepth)
-                    insNode.bindDouble(22, node.complexityScore)
-                    insNode.step()
-
-                    delFtsByNodeId.reset()
-                    delFtsByNodeId.clearBindings()
-                    delFtsByNodeId.bindString(1, node.nodeId)
-                    delFtsByNodeId.step()
-
-                    delFts.reset()
-                    delFts.clearBindings()
-                    delFts.bindString(1, node.nodeId)
-                    delFts.step()
-
-                    insFts.reset()
-                    insFts.clearBindings()
-                    insFts.bindString(1, node.nodeId)
-                    insFts.bindString(2, node.nodeId)
-                    insFts.bindString(3, node.projectId)
-                    insFts.bindString(4, node.name)
-                    insFts.bindString(5, node.qualifiedName)
-                    insFts.bindString(6, node.signature)
-                    insFts.bindString(7, node.fileId)
-                    insFts.step()
-
-                    for (seg in NameSegmentTokenizer.tokenize("${node.name} ${node.qualifiedName}")) {
-                        insVocab.reset()
-                        insVocab.clearBindings()
-                        insVocab.bindString(1, seg)
-                        insVocab.bindString(2, node.nodeId)
-                        insVocab.bindString(3, node.projectId)
-                        insVocab.step()
-                    }
+                    bindUpsertNode(insNode, node)
+                    upsertNodeSearchIndexes(delVocab, delFtsByNodeId, delFts, insFts, insVocab, node)
                 }
 
                 for (edge in edges) {
-                    insEdge.reset()
-                    insEdge.clearBindings()
-                    insEdge.bindString(1, edge.edgeId)
-                    insEdge.bindString(2, edge.projectId)
-                    insEdge.bindString(3, edge.sourceNodeId)
-                    insEdge.bindString(4, edge.targetNodeId)
-                    insEdge.bindString(5, edge.edgeType)
-                    insEdge.bindString(6, edge.provenance)
-                    insEdge.bindDouble(7, edge.confidence)
-                    insEdge.bindInt(8, edge.lineNumber)
-                    insEdge.step()
+                    bindUpsertEdge(insEdge, edge)
                 }
 
                 sweepOrphanEdges.bindString(1, projectId)
@@ -1125,33 +1168,7 @@ class SqliteGraphStore(val dbPath: String) {
                 sweepOrphanEdges.bindString(3, projectId)
                 sweepOrphanEdges.step()
 
-                val selectOrphanEndpoints = scope.prepare(
-                    """
-                    SELECT node_id FROM nodes
-                    WHERE project_id = ?
-                      AND kind = 'endpoint'
-                      AND file_id = ?
-                      AND node_id NOT IN (SELECT target_node_id FROM edges WHERE project_id = ?)
-                      AND node_id NOT IN (SELECT source_node_id FROM edges WHERE project_id = ?);
-                    """.trimIndent()
-                )
-                selectOrphanEndpoints.bindString(1, projectId)
-                selectOrphanEndpoints.bindString(2, "$projectId:__endpoints__")
-                selectOrphanEndpoints.bindString(3, projectId)
-                selectOrphanEndpoints.bindString(4, projectId)
-                val orphanEpIds = mutableListOf<String>()
-                while (selectOrphanEndpoints.step()) {
-                    orphanEpIds.add(selectOrphanEndpoints.columnString(0))
-                }
-                if (orphanEpIds.isNotEmpty()) {
-                    val delEpNode = scope.prepare("DELETE FROM nodes WHERE node_id = ?;")
-                    for (epId in orphanEpIds) {
-                        delFtsByNodeId.reset(); delFtsByNodeId.clearBindings(); delFtsByNodeId.bindString(1, epId); delFtsByNodeId.step()
-                        delFts.reset(); delFts.clearBindings(); delFts.bindString(1, epId); delFts.step()
-                        delVocab.reset(); delVocab.clearBindings(); delVocab.bindString(1, epId); delVocab.step()
-                        delEpNode.reset(); delEpNode.clearBindings(); delEpNode.bindString(1, epId); delEpNode.step()
-                    }
-                }
+                sweepOrphanEndpoints(scope, projectId, delFtsByNodeId, delFts, delVocab)
 
                 recomputeDegrees(projectId)
             } finally {
