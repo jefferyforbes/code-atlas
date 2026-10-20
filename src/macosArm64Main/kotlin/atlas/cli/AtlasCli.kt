@@ -1473,6 +1473,51 @@ class AtlasCli {
             return 0
         }
 
+        private fun buildComplexityDoctorToolArgs(
+            project: String,
+            target: String,
+            limit: Int,
+            apply: Boolean,
+            testCmd: String?,
+            threshold: Int?
+        ): JsonObject = buildJsonObject {
+            put("action", "complexity_doctor")
+            put("project", project)
+            if (target.isNotEmpty()) put("target", target)
+            put("limit", limit)
+            put("apply", apply)
+            if (threshold != null) put("threshold", threshold)
+            if (!testCmd.isNullOrBlank()) put("test_command", testCmd)
+        }
+
+        private fun printSinglePrescription(elem: JsonElement) {
+            val p = elem.jsonObject
+            val rank = p["rank"]?.jsonPrimitive?.intOrNull ?: 1
+            val strat = p["fix_strategy"]?.jsonPrimitive?.content ?: "UNKNOWN"
+            val file = p["file_path"]?.jsonPrimitive?.content ?: ""
+            val line = p["line"]?.jsonPrimitive?.intOrNull ?: 0
+            val cogB = p["cognitive_before"]?.jsonPrimitive?.intOrNull ?: 0
+            val cogA = p["cognitive_after"]?.jsonPrimitive?.intOrNull ?: 0
+            val red = p["reduction_percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+            println("  #$rank $strat at $file:$line (Cognitive: $cogB -> $cogA, reduction: ${red}%)")
+        }
+
+        private fun printComplexityDoctorOutput(
+            project: String,
+            data: JsonObject,
+            limit: Int
+        ) {
+            val total = data["total_prescriptions"]?.jsonPrimitive?.intOrNull ?: 0
+            val verified = data["verified_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val rolledBack = data["rolled_back_count"]?.jsonPrimitive?.intOrNull ?: 0
+            val prescriptions = data["prescriptions"]?.jsonArray ?: JsonArray(emptyList())
+
+            println("[Complexity Doctor] project=$project prescriptions=$total applied=$verified rolled_back=$rolledBack")
+            for (elem in prescriptions.take(limit)) {
+                printSinglePrescription(elem)
+            }
+        }
+
         private fun runComplexityDoctorCommand(
             server: AtlasMcpServer,
             project: String,
@@ -1483,37 +1528,14 @@ class AtlasCli {
             threshold: Int?,
             isJson: Boolean
         ): Int {
-            val toolArgs = buildJsonObject {
-                put("action", "complexity_doctor")
-                put("project", project)
-                if (target.isNotEmpty()) put("target", target)
-                put("limit", limit)
-                put("apply", apply)
-                if (threshold != null) put("threshold", threshold)
-                if (!testCmd.isNullOrBlank()) put("test_command", testCmd)
-            }
+            val toolArgs = buildComplexityDoctorToolArgs(project, target, limit, apply, testCmd, threshold)
             val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)
-            val total = data["total_prescriptions"]?.jsonPrimitive?.intOrNull ?: 0
-            val verified = data["verified_count"]?.jsonPrimitive?.intOrNull ?: 0
-            val rolledBack = data["rolled_back_count"]?.jsonPrimitive?.intOrNull ?: 0
-            val prescriptions = data["prescriptions"]?.jsonArray ?: JsonArray(emptyList())
 
             if (isJson) {
                 println(jsonPretty.encodeToString(data))
             } else {
-                println("[Complexity Doctor] project=$project prescriptions=$total applied=$verified rolled_back=$rolledBack")
-                for (elem in prescriptions.take(limit)) {
-                    val p = elem.jsonObject
-                    val rank = p["rank"]?.jsonPrimitive?.intOrNull ?: 1
-                    val strat = p["fix_strategy"]?.jsonPrimitive?.content ?: "UNKNOWN"
-                    val file = p["file_path"]?.jsonPrimitive?.content ?: ""
-                    val line = p["line"]?.jsonPrimitive?.intOrNull ?: 0
-                    val cogB = p["cognitive_before"]?.jsonPrimitive?.intOrNull ?: 0
-                    val cogA = p["cognitive_after"]?.jsonPrimitive?.intOrNull ?: 0
-                    val red = p["reduction_percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0
-                    println("  #$rank $strat at $file:$line (Cognitive: $cogB -> $cogA, reduction: ${red}%)")
-                }
+                printComplexityDoctorOutput(project, data, limit)
             }
             return 0
         }
