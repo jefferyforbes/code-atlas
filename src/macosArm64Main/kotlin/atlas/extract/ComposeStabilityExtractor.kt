@@ -1301,42 +1301,44 @@ class ComposeStabilityExtractor {
         return -1
     }
 
-    private fun hasConditionalEffectOrRemember(maskedBody: String): Boolean {
-        val effectRe = Regex("""\b(remember|rememberSaveable|LaunchedEffect|DisposableEffect)\b""")
+    private fun containsEffectInBlock(maskedBody: String, openBrace: Int, effectRe: Regex): Boolean {
+        val closeBrace = findBalancedCloseBrace(maskedBody, openBrace)
+        if (closeBrace <= openBrace) return false
+        val blockSlice = maskedBody.substring(openBrace + 1, closeBrace)
+        return effectRe.containsMatchIn(blockSlice)
+    }
+
+    private fun hasEffectInDirectBraceBlocks(maskedBody: String, regex: Regex, effectRe: Regex): Boolean {
+        for (m in regex.findAll(maskedBody)) {
+            if (containsEffectInBlock(maskedBody, m.range.last, effectRe)) return true
+        }
+        return false
+    }
+
+    private fun findConditionalBlockOpenBrace(maskedBody: String, openParen: Int): Int? {
+        val closeParen = findBalancedCloseParen(maskedBody, openParen)
+        if (closeParen < 0) return null
+        val i = skipWhitespace(maskedBody, closeParen + 1)
+        if (i < maskedBody.length && maskedBody[i] == '{') return i
+        return null
+    }
+
+    private fun hasConditionalParenEffect(maskedBody: String, effectRe: Regex): Boolean {
         val condRe = Regex("""\b(if|when|for|while)\s*\(""")
         for (m in condRe.findAll(maskedBody)) {
-            val openParen = m.range.last
-            val closeParen = findBalancedCloseParen(maskedBody, openParen)
-            if (closeParen < 0) continue
-            var i = closeParen + 1
-            while (i < maskedBody.length && maskedBody[i].isWhitespace()) i++
-            if (i < maskedBody.length && maskedBody[i] == '{') {
-                val closeBrace = findBalancedCloseBrace(maskedBody, i)
-                if (closeBrace > i) {
-                    val blockSlice = maskedBody.substring(i + 1, closeBrace)
-                    if (effectRe.containsMatchIn(blockSlice)) return true
-                }
-            }
-        }
-        val arglessWhenRe = Regex("""\bwhen\s*\{""")
-        for (m in arglessWhenRe.findAll(maskedBody)) {
-            val openBrace = m.range.last
-            val closeBrace = findBalancedCloseBrace(maskedBody, openBrace)
-            if (closeBrace > openBrace) {
-                val blockSlice = maskedBody.substring(openBrace + 1, closeBrace)
-                if (effectRe.containsMatchIn(blockSlice)) return true
-            }
-        }
-        val letRe = Regex("""\?\.\s*let\s*\{""")
-        for (m in letRe.findAll(maskedBody)) {
-            val openBrace = m.range.last
-            val closeBrace = findBalancedCloseBrace(maskedBody, openBrace)
-            if (closeBrace > openBrace) {
-                val blockSlice = maskedBody.substring(openBrace + 1, closeBrace)
-                if (effectRe.containsMatchIn(blockSlice)) return true
+            val openBrace = findConditionalBlockOpenBrace(maskedBody, m.range.last)
+            if (openBrace != null && containsEffectInBlock(maskedBody, openBrace, effectRe)) {
+                return true
             }
         }
         return false
+    }
+
+    private fun hasConditionalEffectOrRemember(maskedBody: String): Boolean {
+        val effectRe = Regex("""\b(remember|rememberSaveable|LaunchedEffect|DisposableEffect)\b""")
+        if (hasConditionalParenEffect(maskedBody, effectRe)) return true
+        if (hasEffectInDirectBraceBlocks(maskedBody, Regex("""\bwhen\s*\{"""), effectRe)) return true
+        return hasEffectInDirectBraceBlocks(maskedBody, Regex("""\?\.\s*let\s*\{"""), effectRe)
     }
 
     private fun hasUnrememberedStateCall(maskedBody: String): Boolean {
