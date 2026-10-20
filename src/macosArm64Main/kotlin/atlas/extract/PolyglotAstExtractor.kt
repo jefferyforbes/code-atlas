@@ -3315,11 +3315,13 @@ class PolyglotAstExtractor {
             return Triple(nodes, edges, topLevelCount)
         }
 
-        fun resolveCrossFileEdges(
-            projectId: String,
-            nodes: List<GraphNode>,
-            rawEdges: List<GraphEdge>
-        ): List<GraphEdge> {
+        private class NodeLookupIndex(
+            val byName: Map<String, List<GraphNode>>,
+            val byQName: Map<String, GraphNode>,
+            val byNodeId: Map<String, GraphNode>
+        )
+
+        private fun buildNodeLookupIndex(nodes: List<GraphNode>, projectId: String): NodeLookupIndex {
             val byName = mutableMapOf<String, MutableList<GraphNode>>()
             val byQName = mutableMapOf<String, GraphNode>()
             val byNodeId = mutableMapOf<String, GraphNode>()
@@ -3329,8 +3331,13 @@ class PolyglotAstExtractor {
                 byQName[node.qualifiedName] = node
                 byNodeId[node.nodeId] = node
             }
+            return NodeLookupIndex(byName, byQName, byNodeId)
+        }
 
-            // Collect imported symbols/packages per source fileId for context-aware disambiguation
+        private fun buildImportsByFileMap(
+            rawEdges: List<GraphEdge>,
+            byNodeId: Map<String, GraphNode>
+        ): Map<String, Set<String>> {
             val importsByFile = mutableMapOf<String, MutableSet<String>>()
             for (edge in rawEdges) {
                 if (edge.edgeType == "IMPORTS") {
@@ -3339,74 +3346,133 @@ class PolyglotAstExtractor {
                     importsByFile.getOrPut(srcFileId) { mutableSetOf() }.add(impSym)
                 }
             }
+            return importsByFile
+        }
 
+        private fun extractSymbolReceiver(sym: String): String? = when {
+            sym.contains('.') -> sym.substringBeforeLast('.')
+            sym.contains("::") -> sym.substringBeforeLast("::")
+            else -> null
+        }
+
+        private fun resolveReceiverMatches(
+            candidates: List<GraphNode>,
+            receiver: String?,
+            srcFileId: String,
+            srcNode: GraphNode?
+        ): List<GraphNode> {
+            if (receiver == null) return emptyList()
+            val scored = candidates.map { cand ->
+                cand to scoreReceiverCandidate(cand, receiver, srcFileId, srcNode)
+            }
+            val maxScore = scored.maxOfOrNull { it.second } ?: 0.0
+            if (maxScore <= 0.0) return emptyList()
+            return scored.filter { it.second == maxScore }.map { it.first }
+        }
+
+        private fun isSymbolImported(qn: String, fileImports: Set<String>): Boolean {
+            val pkg = qn.substringBeforeLast('.', "")
+            if (qn in fileImports) return true
+            if ("$pkg.*" in fileImports) return true
+            return fileImports.any { imp -> qn.endsWith(".$imp") }
+        }
+
+        private fun selectCandidatePool(
+            candidatePool: List<GraphNode>,
+            receiverMatches: List<GraphNode>,
+            fallback: List<GraphNode>,
+            srcFileId: String,
+            srcModId: String,
+            fileImports: Set<String>
+        ): List<GraphNode> {
+            val sameFile = candidatePool.filter { it.fileId == srcFileId }
+            if (sameFile.isNotEmpty()) return sameFile
+
+            val imported = candidatePool.filter { isSymbolImported(it.qualifiedName, fileImports) }
+            if (imported.isNotEmpty()) return imported
+
+            if (receiverMatches.isNotEmpty()) return receiverMatches
+
+            if (srcModId.isNotEmpty()) {
+                val sameModule = candidatePool.filter { it.moduleId == srcModId }
+                if (sameModule.isNotEmpty()) return sameModule
+            }
+            return fallback
+        }
+
+        private fun pickBestCandidate(pool: List<GraphNode>): GraphNode =
+            pool.sortedWith(
+                compareByDescending<GraphNode> { it.inDegree }.thenBy { it.nodeId }
+            ).first()
+
+        private data class DisambiguatedTarget(
+            val targetId: String,
+            val confidence: Double
+        )
+
+        private fun disambiguateSymbolTarget(
+            sym: String,
+            initialConf: Double,
+            edge: GraphEdge,
+            index: NodeLookupIndex,
+            importsByFile: Map<String, Set<String>>
+        ): DisambiguatedTarget? {
+            val exact = index.byQName[sym]
+            if (exact != null) {
+                return DisambiguatedTarget(exact.nodeId, initialConf)
+            }
+
+            val shortSym = sym.substringAfterLast('.').substringAfterLast("::")
+            val candidates = index.byName[shortSym]
+            if (candidates.isNullOrEmpty()) return null
+            if (candidates.size == 1) {
+                return DisambiguatedTarget(candidates[0].nodeId, initialConf)
+            }
+
+            val srcNode = index.byNodeId[edge.sourceNodeId]
+            val srcFileId = srcNode?.fileId ?: edge.sourceNodeId.substringBefore("#")
+            val srcModId = srcNode?.moduleId.orEmpty()
+            val fileImports = importsByFile[srcFileId].orEmpty()
+
+            val receiver = extractSymbolReceiver(sym)
+            val receiverMatches = resolveReceiverMatches(candidates, receiver, srcFileId, srcNode)
+            val candidatePool = if (receiverMatches.isNotEmpty()) receiverMatches else candidates
+            val chosenPool = selectCandidatePool(candidatePool, receiverMatches, candidates, srcFileId, srcModId, fileImports)
+            val chosen = pickBestCandidate(chosenPool)
+
+            var conf = initialConf
+            if (chosenPool.size > 1 && edge.provenance.startsWith("INFERRED_CALL")) {
+                conf = minOf(conf, 0.75)
+            }
+            return DisambiguatedTarget(chosen.nodeId, conf)
+        }
+
+        fun resolveCrossFileEdges(
+            projectId: String,
+            nodes: List<GraphNode>,
+            rawEdges: List<GraphEdge>
+        ): List<GraphEdge> {
+            val index = buildNodeLookupIndex(nodes, projectId)
+            val importsByFile = buildImportsByFileMap(rawEdges, index.byNodeId)
             val resolved = mutableListOf<GraphEdge>()
             val seen = mutableSetOf<String>()
 
             for (edge in rawEdges) {
-                var targetId = edge.targetNodeId
-                var conf = edge.confidence
-
-                if (targetId.startsWith("sym:")) {
-                    val sym = targetId.removePrefix("sym:")
-                    val exact = byQName[sym]
-                    if (exact != null) {
-                        targetId = exact.nodeId
-                    } else {
-                        val shortSym = sym.substringAfterLast('.').substringAfterLast("::")
-                        val receiver = if (sym.contains('.')) sym.substringBeforeLast('.') else if (sym.contains("::")) sym.substringBeforeLast("::") else null
-                        val candidates = byName[shortSym]
-                        if (candidates.isNullOrEmpty()) continue
-
-                        if (candidates.size == 1) {
-                            targetId = candidates[0].nodeId
-                        } else {
-                            val srcNode = byNodeId[edge.sourceNodeId]
-                            val srcFileId = srcNode?.fileId ?: edge.sourceNodeId.substringBefore("#")
-                            val srcModId = srcNode?.moduleId ?: ""
-                            val fileImports = importsByFile[srcFileId] ?: emptySet()
-
-                            // Priority 0: Candidate matching receiver via semantic receiver scoring
-                            val scoredCandidates = if (receiver != null) {
-                                candidates.map { cand -> cand to scoreReceiverCandidate(cand, receiver, srcFileId, srcNode) }
-                            } else emptyList()
-
-                            val maxReceiverScore = scoredCandidates.maxOfOrNull { it.second } ?: 0.0
-                            val receiverMatches = if (maxReceiverScore > 0.0) {
-                                scoredCandidates.filter { it.second == maxReceiverScore }.map { it.first }
-                            } else emptyList()
-
-                            val candidatePool = if (receiverMatches.isNotEmpty()) receiverMatches else candidates
-
-                            // Priority 1: Same file
-                            val sameFile = candidatePool.filter { it.fileId == srcFileId }
-                            // Priority 2: Explicitly imported symbol or wildcard package
-                            val imported = candidatePool.filter { cand ->
-                                val qn = cand.qualifiedName
-                                val pkg = qn.substringBeforeLast('.', "")
-                                qn in fileImports || "$pkg.*" in fileImports || fileImports.any { imp -> qn.endsWith(".$imp") }
-                            }
-                            // Priority 3: Same module
-                            val sameModule = if (srcModId.isNotEmpty()) candidatePool.filter { it.moduleId == srcModId } else emptyList()
-
-                            val chosenPool = when {
-                                sameFile.isNotEmpty() -> sameFile
-                                imported.isNotEmpty() -> imported
-                                receiverMatches.isNotEmpty() -> receiverMatches
-                                sameModule.isNotEmpty() -> sameModule
-                                else -> candidates
-                            }
-
-                            val chosen = chosenPool.sortedWith(
-                                compareByDescending<GraphNode> { it.inDegree }.thenBy { it.nodeId }
-                            ).first()
-                            targetId = chosen.nodeId
-
-                            if (chosenPool.size > 1 && edge.provenance.startsWith("INFERRED_CALL")) {
-                                conf = minOf(conf, 0.75)
-                            }
-                        }
-                    }
+                val targetId: String
+                val conf: Double
+                if (edge.targetNodeId.startsWith("sym:")) {
+                    val disambiguated = disambiguateSymbolTarget(
+                        edge.targetNodeId.removePrefix("sym:"),
+                        edge.confidence,
+                        edge,
+                        index,
+                        importsByFile
+                    ) ?: continue
+                    targetId = disambiguated.targetId
+                    conf = disambiguated.confidence
+                } else {
+                    targetId = edge.targetNodeId
+                    conf = edge.confidence
                 }
 
                 if (targetId == edge.sourceNodeId) continue
