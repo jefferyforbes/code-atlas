@@ -1763,7 +1763,7 @@ class AtlasMcpServer(
             }
             putJsonObject("serverInfo") {
                 put("name", "atlas")
-                put("version", "0.6.1")
+                put("version", "0.7.0")
             }
         }
     }
