@@ -12,6 +12,7 @@ import atlas.model.GraphNode
 import atlas.model.LayerInversionViolation
 import atlas.model.PlanCollision
 import atlas.model.SingleDeclarationViolation
+import atlas.model.SkillAuditViolation
 import atlas.util.PlatformFiles
 import kotlin.math.ln
 import kotlin.math.roundToInt
@@ -41,8 +42,12 @@ class ArchitectureAuditor(
         val planCollisions = checkPlan3dCollisions(projectId, normalizedPrefixes)
         val descriptionSuggestions = checkTopLevelDescriptions(projectId, normalizedPrefixes, descriptionMode)
         val complexityViolations = checkComplexityViolations(projectId, pathPrefixes = normalizedPrefixes)
+        val skillViolations = checkSkillViolations(projectId, normalizedPrefixes)
 
-        val passed = singleDeclViolations.isEmpty() && layerInversions.isEmpty() && planCollisions.isEmpty()
+        val passed = singleDeclViolations.isEmpty() &&
+            layerInversions.isEmpty() &&
+            planCollisions.isEmpty() &&
+            skillViolations.isEmpty()
         return AuditReport(
             projectId = projectId,
             passed = passed,
@@ -50,7 +55,8 @@ class ArchitectureAuditor(
             layerInversions = layerInversions,
             plan3dCollisions = planCollisions,
             descriptionSuggestions = descriptionSuggestions,
-            complexityViolations = complexityViolations
+            complexityViolations = complexityViolations,
+            skillViolations = skillViolations
         )
     }
 
@@ -653,6 +659,282 @@ class ArchitectureAuditor(
         if (isExcludedByNameOrKind(node)) return false
         if (isExcludedBySignature(node)) return false
         return true
+    }
+
+    private val MALFORMED_YAML_FOLDING = setOf(">", ">-", ">+", "|", "|-", "|+")
+
+    /**
+     * Audits agent skill repositories and workspaces enforcing SKILL-001 (reference integrity),
+     * SKILL-002 (frontmatter schema and description quality), and SKILL-003 (acyclic dependency DAG).
+     */
+    fun checkSkillViolations(
+        projectId: String,
+        pathPrefixes: List<String>? = null
+    ): List<SkillAuditViolation> {
+        val prefixes = normalizePathPrefixes(pathPrefixes)
+        val broken = checkBrokenSkillReferences(projectId, prefixes)
+        val schema = checkSkillSchemaFrontmatter(projectId, prefixes)
+        val cycles = checkSkillDependencyCycles(projectId, prefixes)
+        return (broken + schema + cycles).sortedWith(compareBy({ it.rule }, { it.skillName }, { it.relPath }))
+    }
+
+    /**
+     * Checks SKILL-001: ensures companion markdown documentation and executed scripts/binaries exist.
+     */
+    fun checkBrokenSkillReferences(
+        projectId: String,
+        pathPrefixes: List<String> = emptyList()
+    ): List<SkillAuditViolation> {
+        val prefixes = normalizePathPrefixes(pathPrefixes)
+        val allNodes = store.listNodes(projectId)
+        val skillNodes = allNodes.filter { it.kind == "skill" }.associateBy { it.nodeId }
+        if (skillNodes.isEmpty()) return emptyList()
+
+        val nodesById = allNodes.associateBy { it.nodeId }
+        val violations = mutableListOf<SkillAuditViolation>()
+        val edges = store.listEdges(
+            projectId,
+            edgeTypes = listOf("REFERENCES_FILE", "EXECUTES_SCRIPT")
+        )
+
+        for (edge in edges) {
+            val skill = skillNodes[edge.sourceNodeId] ?: continue
+            val relPath = skill.fileId.substringAfter(':')
+            if (!matchesAnyPrefix(relPath, prefixes)) continue
+
+            checkBrokenEdge(skill, edge, relPath, nodesById)?.let {
+                violations.add(it)
+            }
+        }
+        return violations
+    }
+
+    private fun checkBrokenEdge(
+        skill: GraphNode,
+        edge: GraphEdge,
+        relPath: String,
+        nodesById: Map<String, GraphNode>
+    ): SkillAuditViolation? {
+        if (edge.provenance == "EXTRACTED_LOCAL_FILE_REF") {
+            val targetName = edge.targetNodeId.substringAfterLast('#').substringAfterLast('/')
+            return SkillAuditViolation(
+                rule = "SKILL-001",
+                skillName = skill.name,
+                relPath = relPath,
+                lineNumber = edge.lineNumber,
+                message = "Skill '${skill.name}' references non-existent companion file or script '$targetName'.",
+                target = edge.targetNodeId
+            )
+        }
+        if (edge.targetNodeId in nodesById) return null
+
+        val rawTarget = edge.targetNodeId.substringAfter(':').substringBefore('#')
+        if (isSkillFileOnDisk(rawTarget)) return null
+
+        val edgeTypeLabel = if (edge.edgeType == "EXECUTES_SCRIPT") "script execution" else "companion file reference"
+        return SkillAuditViolation(
+            rule = "SKILL-001",
+            skillName = skill.name,
+            relPath = relPath,
+            lineNumber = edge.lineNumber,
+            message = "Skill '${skill.name}' declares unresolvable $edgeTypeLabel targeting '$rawTarget'.",
+            target = edge.targetNodeId
+        )
+    }
+
+    private fun isSkillFileOnDisk(rawPath: String): Boolean {
+        if (rawPath.isBlank()) return false
+        val candidates = if (workspaceRoot.isNotEmpty() && workspaceRoot != ".") {
+            listOf(rawPath, "$workspaceRoot/$rawPath")
+        } else {
+            listOf(rawPath)
+        }
+        return candidates.any { PlatformFiles.exists(it) }
+    }
+
+    /**
+     * Checks SKILL-002: verifies presence of name and description with non-empty bodies and minimum length.
+     */
+    fun checkSkillSchemaFrontmatter(
+        projectId: String,
+        pathPrefixes: List<String> = emptyList()
+    ): List<SkillAuditViolation> {
+        val prefixes = normalizePathPrefixes(pathPrefixes)
+        val violations = mutableListOf<SkillAuditViolation>()
+
+        for (node in store.listNodes(projectId)) {
+            if (node.kind != "skill") continue
+            val relPath = node.fileId.substringAfter(':')
+            if (!matchesAnyPrefix(relPath, prefixes)) continue
+
+            checkSingleSkillSchema(node, relPath)?.let {
+                violations.add(it)
+            }
+        }
+        return violations
+    }
+
+    private fun checkSingleSkillSchema(node: GraphNode, relPath: String): SkillAuditViolation? {
+        if (node.name.isBlank()) {
+            return SkillAuditViolation(
+                rule = "SKILL-002",
+                skillName = node.name.ifBlank { "<unnamed>" },
+                relPath = relPath,
+                lineNumber = node.startLine,
+                message = "Skill at '$relPath' is missing a required 'name' in frontmatter."
+            )
+        }
+        val desc = node.description
+        if (desc.isNullOrBlank()) {
+            return SkillAuditViolation(
+                rule = "SKILL-002",
+                skillName = node.name,
+                relPath = relPath,
+                lineNumber = node.startLine,
+                message = "Skill '${node.name}' is missing a required 'description' in frontmatter."
+            )
+        }
+        val trimmedDesc = desc.trim()
+        if (trimmedDesc in MALFORMED_YAML_FOLDING) {
+            return SkillAuditViolation(
+                rule = "SKILL-002",
+                skillName = node.name,
+                relPath = relPath,
+                lineNumber = node.startLine,
+                message = "Skill '${node.name}' has malformed YAML multiline folding marker '$trimmedDesc' with empty description body."
+            )
+        }
+        if (trimmedDesc.length < 20) {
+            return SkillAuditViolation(
+                rule = "SKILL-002",
+                skillName = node.name,
+                relPath = relPath,
+                lineNumber = node.startLine,
+                message = "Skill '${node.name}' description is too short (${trimmedDesc.length} chars; min 20 required for routing)."
+            )
+        }
+        return null
+    }
+
+    /**
+     * Checks SKILL-003: detects circular dependency loops between skills via DEPENDS_ON_SKILL edges.
+     */
+    fun checkSkillDependencyCycles(
+        projectId: String,
+        pathPrefixes: List<String> = emptyList()
+    ): List<SkillAuditViolation> {
+        val prefixes = normalizePathPrefixes(pathPrefixes)
+        val allNodes = store.listNodes(projectId)
+        val skillNodes = allNodes.filter { it.kind == "skill" }
+        if (skillNodes.isEmpty()) return emptyList()
+
+        val skillNodeById = skillNodes.associateBy { it.nodeId }
+        val edges = store.listEdges(projectId, edgeTypes = listOf("DEPENDS_ON_SKILL"))
+        val adj = buildSkillAdjacencyMap(edges, skillNodeById)
+
+        val cycles = detectDependencyCycles(adj)
+        return formatCycleViolations(cycles, skillNodeById, prefixes)
+    }
+
+    private fun buildSkillAdjacencyMap(
+        edges: List<GraphEdge>,
+        skillNodeById: Map<String, GraphNode>
+    ): Map<String, List<String>> {
+        val adj = mutableMapOf<String, MutableList<String>>()
+        for (edge in edges) {
+            if (edge.sourceNodeId in skillNodeById && edge.targetNodeId in skillNodeById) {
+                adj.getOrPut(edge.sourceNodeId) { mutableListOf() }.add(edge.targetNodeId)
+            }
+        }
+        return adj
+    }
+
+    private fun detectDependencyCycles(adj: Map<String, List<String>>): List<List<String>> {
+        val visited = mutableSetOf<String>()
+        val recStack = mutableListOf<String>()
+        val foundCycles = mutableListOf<List<String>>()
+        val reportedSigs = mutableSetOf<String>()
+
+        for (nodeId in adj.keys.sorted()) {
+            if (nodeId !in visited) {
+                dfsCycleFinder(nodeId, adj, visited, recStack, foundCycles, reportedSigs)
+            }
+        }
+        return foundCycles
+    }
+
+    private fun dfsCycleFinder(
+        curr: String,
+        adj: Map<String, List<String>>,
+        visited: MutableSet<String>,
+        recStack: MutableList<String>,
+        foundCycles: MutableList<List<String>>,
+        reportedSigs: MutableSet<String>
+    ) {
+        visited.add(curr)
+        recStack.add(curr)
+
+        val neighbors = adj[curr] ?: emptyList()
+        for (next in neighbors) {
+            processNextNeighbor(next, adj, visited, recStack, foundCycles, reportedSigs)
+        }
+        recStack.removeAt(recStack.size - 1)
+    }
+
+    private fun processNextNeighbor(
+        next: String,
+        adj: Map<String, List<String>>,
+        visited: MutableSet<String>,
+        recStack: MutableList<String>,
+        foundCycles: MutableList<List<String>>,
+        reportedSigs: MutableSet<String>
+    ) {
+        val cycleIdx = recStack.indexOf(next)
+        if (cycleIdx >= 0) {
+            val cycle = recStack.subList(cycleIdx, recStack.size).toList() + next
+            val sig = normalizeCycleSignature(cycle)
+            if (reportedSigs.add(sig)) {
+                foundCycles.add(cycle)
+            }
+        } else if (next !in visited) {
+            dfsCycleFinder(next, adj, visited, recStack, foundCycles, reportedSigs)
+        }
+    }
+
+    private fun normalizeCycleSignature(cycle: List<String>): String {
+        val uniqueNodes = cycle.dropLast(1)
+        if (uniqueNodes.isEmpty()) return ""
+        val minNode = uniqueNodes.minOrNull() ?: ""
+        val minIdx = uniqueNodes.indexOf(minNode)
+        val rotated = uniqueNodes.subList(minIdx, uniqueNodes.size) + uniqueNodes.subList(0, minIdx)
+        return rotated.joinToString("->")
+    }
+
+    private fun formatCycleViolations(
+        cycles: List<List<String>>,
+        skillNodeById: Map<String, GraphNode>,
+        prefixes: List<String>
+    ): List<SkillAuditViolation> {
+        val violations = mutableListOf<SkillAuditViolation>()
+        for (cycle in cycles) {
+            val rootNodeId = cycle.first()
+            val rootNode = skillNodeById[rootNodeId] ?: continue
+            val relPath = rootNode.fileId.substringAfter(':')
+            if (!matchesAnyPrefix(relPath, prefixes)) continue
+
+            val chainStr = cycle.joinToString(" -> ") { skillNodeById[it]?.name ?: it.substringAfter('#') }
+            violations.add(
+                SkillAuditViolation(
+                    rule = "SKILL-003",
+                    skillName = rootNode.name,
+                    relPath = relPath,
+                    lineNumber = rootNode.startLine,
+                    message = "Circular skill dependency detected: $chainStr",
+                    target = chainStr
+                )
+            )
+        }
+        return violations
     }
 }
 

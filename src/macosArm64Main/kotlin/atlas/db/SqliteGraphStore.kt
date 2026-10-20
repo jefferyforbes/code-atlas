@@ -728,7 +728,7 @@ class SqliteGraphStore(val dbPath: String) {
             WHERE project_id = ?
               AND edge_type NOT IN (
                   'PLAN_SCOPES_FILE', 'WIKILINK_REFS', 'CODE_SPAN_REFS', 'URL_REFS',
-                  'TAGGED_WITH', 'TRIGGERS_SKILL', 'DEPENDS_ON_SKILL'
+                  'TAGGED_WITH', 'TRIGGERS_SKILL', 'DEPENDS_ON_SKILL', 'REFERENCES_FILE', 'EXECUTES_SCRIPT'
               );
             """.trimIndent()
         )
@@ -1142,7 +1142,8 @@ class SqliteGraphStore(val dbPath: String) {
                     AND (
                         source_node_id NOT IN (SELECT node_id FROM nodes WHERE project_id = ?)
                         OR (
-                          target_node_id NOT LIKE 'vault_ref#%'
+                          provenance != 'EXTRACTED_LOCAL_FILE_REF'
+                          AND target_node_id NOT LIKE 'vault_ref#%'
                           AND target_node_id NOT LIKE '%:vault_ref#%'
                           AND target_node_id NOT LIKE 'url_ref#%'
                           AND target_node_id NOT LIKE '%:url_ref#%'
