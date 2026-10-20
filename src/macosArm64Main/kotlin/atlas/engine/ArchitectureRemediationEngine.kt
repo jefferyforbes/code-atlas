@@ -844,42 +844,60 @@ class ArchitectureRemediationEngine(
         )
     }
 
-    private fun findExpandedStartLine(lines: List<String>, startLine: Int): Int {
+    private class ExpansionScanner(private val lines: List<String>, startLine: Int) {
         var cur = startLine - 2
         var expanded = startLine
         var inBlockComment = false
-        while (cur >= 0) {
-            val line = lines[cur].trim()
+
+        fun scan(): Int {
+            while (cur >= 0) {
+                if (!step(lines[cur].trim())) break
+            }
+            return expanded
+        }
+
+        private fun isPrefixOrAnnotationLine(line: String): Boolean {
+            return line.startsWith("@") || line.startsWith("//") || line.startsWith("///") || line.startsWith("#")
+        }
+
+        private fun isEligiblePrecedingLine(line: String): Boolean {
+            return line.endsWith("*/") || line.startsWith("*") || isPrefixOrAnnotationLine(line)
+        }
+
+        private fun shouldSkipEmptyGap(cur: Int): Boolean {
+            if (cur <= 0) return false
+            val prev = lines[cur - 1].trim()
+            return isEligiblePrecedingLine(prev)
+        }
+
+        private fun step(line: String): Boolean {
             if (line.endsWith("*/")) {
                 inBlockComment = true
                 expanded = cur + 1
                 cur--
-                continue
+                return true
             }
             if (inBlockComment) {
                 expanded = cur + 1
-                if (line.startsWith("/*")) {
-                    inBlockComment = false
-                }
+                if (line.startsWith("/*")) inBlockComment = false
                 cur--
-                continue
+                return true
             }
-            if (line.startsWith("@") || line.startsWith("//") || line.startsWith("///") || line.startsWith("#")) {
+            if (isPrefixOrAnnotationLine(line)) {
                 expanded = cur + 1
                 cur--
-                continue
+                return true
             }
-            // If line is empty, peek if the line before it is part of doc comment or annotations
-            if (line.isEmpty() && cur > 0) {
-                val prev = lines[cur - 1].trim()
-                if (prev.endsWith("*/") || prev.startsWith("@") || prev.startsWith("//") || prev.startsWith("///") || prev.startsWith("*")) {
-                    cur--
-                    continue
-                }
+            if (line.isEmpty() && shouldSkipEmptyGap(cur)) {
+                cur--
+                return true
             }
-            break
+            return false
         }
-        return expanded
+    }
+
+    private fun findExpandedStartLine(lines: List<String>, startLine: Int): Int {
+        return ExpansionScanner(lines, startLine).scan()
     }
 
     private fun isCommentOrPragma(trimmed: String, lang: String): Boolean = when (lang) {
@@ -889,14 +907,16 @@ class ArchitectureRemediationEngine(
         else -> false
     }
 
-    private fun isAllowedPreamble(trimmed: String, lang: String): Boolean = when (lang) {
-        "kotlin" -> trimmed.startsWith("@file:") || trimmed.startsWith("package ") || trimmed.startsWith("import ")
-        "python" -> trimmed.startsWith("import ") || trimmed.startsWith("from ")
-        "swift" -> trimmed.startsWith("import ")
-        "rust" -> trimmed.startsWith("#![") || trimmed.startsWith("use ")
-        "cpp" -> false
-        "typescript", "javascript" -> trimmed.startsWith("import ") || (trimmed.startsWith("const ") && "require(" in trimmed)
-        else -> trimmed.startsWith("package ") || trimmed.startsWith("import ") || trimmed.startsWith("from ") || trimmed.startsWith("use ")
+    private fun isAllowedPreamble(trimmed: String, lang: String): Boolean {
+        if (trimmed.startsWith("import ")) return lang != "cpp"
+        return when (lang) {
+            "kotlin" -> trimmed.startsWith("@file:") || trimmed.startsWith("package ")
+            "python" -> trimmed.startsWith("from ")
+            "rust" -> trimmed.startsWith("#![") || trimmed.startsWith("use ")
+            "typescript", "javascript" -> trimmed.startsWith("const ") && trimmed.contains("require(")
+            "cpp" -> false
+            else -> trimmed.startsWith("package ") || trimmed.startsWith("from ") || trimmed.startsWith("use ")
+        }
     }
 
     private fun isDeclarationStart(trimmed: String, lang: String): Boolean {
