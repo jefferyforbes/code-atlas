@@ -3,6 +3,7 @@ package atlas.engine
 import atlas.db.SqliteGraphStore
 import atlas.extract.PolyglotAstExtractor
 import atlas.model.ComplexityDoctorReport
+import atlas.model.ComplexityScoreRecord
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
 import kotlin.math.ln
@@ -18,67 +19,62 @@ class ComplexityDoctorEngine(
     private val workspaceRoot: String = "."
 ) {
 
-    fun runDoctor(
+    private fun filterTargetNodes(nodes: List<ComplexityScoreRecord>, target: String?): List<ComplexityScoreRecord> {
+        if (target.isNullOrBlank()) return nodes
+        return nodes.filter {
+            it.nodeId == target || it.name == target || it.qualifiedName == target || it.filePath.contains(target)
+        }
+    }
+
+    private fun resolveSourceText(filePath: String): String? {
+        val root = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
+        val fullPath = if (filePath.startsWith("/")) filePath else "$root/$filePath"
+        if (!PlatformFiles.exists(fullPath)) return null
+        return try {
+            PlatformFiles.readText(fullPath)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun preExtractFileNodes(projectId: String, filePath: String, sourceText: String): List<GraphNode>? {
+        val ext = if (filePath.contains('.')) "." + filePath.substringAfterLast('.') else ""
+        val lang = PolyglotAstExtractor.supportedLanguage(ext)
+        if (lang.isEmpty()) return null
+        return try {
+            PolyglotAstExtractor.extractFile(projectId, filePath, sourceText).first
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun collectFilePrescriptions(
         projectId: String,
-        target: String? = null,
-        limit: Int = 10,
-        minCognitive: Int = 10
-    ): ComplexityDoctorReport {
-        val candidatePrescriptions = mutableListOf<ComplexityDoctorReport.Prescription>()
-        if (store == null) {
-            return ComplexityDoctorReport(
-                project = projectId,
-                totalPrescriptions = 0,
-                prescriptions = emptyList()
+        filePath: String,
+        nodes: List<ComplexityScoreRecord>
+    ): List<ComplexityDoctorReport.Prescription> {
+        val sourceText = resolveSourceText(filePath) ?: return emptyList()
+        val preExtractedNodes = preExtractFileNodes(projectId, filePath, sourceText)
+        val filePrescriptions = mutableListOf<ComplexityDoctorReport.Prescription>()
+        for (node in nodes) {
+            val prescriptions = analyzeSource(
+                filePath = filePath,
+                sourceText = sourceText,
+                nodeId = node.nodeId,
+                inDegree = node.inDegree,
+                projectId = projectId,
+                preExtractedNodes = preExtractedNodes
             )
+            filePrescriptions.addAll(prescriptions)
         }
+        return filePrescriptions
+    }
 
-        val complexNodes = store.queryComplexNodes(projectId, minCognitive = minCognitive, limit = limit * 4)
-            .let { list ->
-                if (!target.isNullOrBlank()) {
-                    list.filter {
-                        it.nodeId == target || it.name == target || it.qualifiedName == target || it.filePath.contains(target)
-                    }
-                } else {
-                    list
-                }
-            }
-
-        val nodesByFile = complexNodes.groupBy { it.filePath }
-        for ((filePath, nodes) in nodesByFile) {
-            val root = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
-            val fullPath = if (filePath.startsWith("/")) filePath else "$root/$filePath"
-            if (!PlatformFiles.exists(fullPath)) continue
-            val sourceText = try {
-                PlatformFiles.readText(fullPath)
-            } catch (_: Exception) {
-                continue
-            }
-
-            val ext = if (filePath.contains('.')) "." + filePath.substringAfterLast('.') else ""
-            val lang = PolyglotAstExtractor.supportedLanguage(ext)
-            val preExtractedNodes = if (lang.isNotEmpty()) {
-                try {
-                    PolyglotAstExtractor.extractFile(projectId, filePath, sourceText).first
-                } catch (_: Exception) {
-                    null
-                }
-            } else null
-
-            for (node in nodes) {
-                val prescriptions = analyzeSource(
-                    filePath = filePath,
-                    sourceText = sourceText,
-                    nodeId = node.nodeId,
-                    inDegree = node.inDegree,
-                    projectId = projectId,
-                    preExtractedNodes = preExtractedNodes
-                )
-                candidatePrescriptions.addAll(prescriptions)
-            }
-        }
-
-        val sorted = candidatePrescriptions
+    private fun rankPrescriptions(
+        prescriptions: List<ComplexityDoctorReport.Prescription>,
+        limit: Int
+    ): List<ComplexityDoctorReport.Prescription> {
+        return prescriptions
             .sortedWith(
                 compareByDescending<ComplexityDoctorReport.Prescription> { it.priorityScore }
                     .thenBy { it.filePath }
@@ -88,12 +84,77 @@ class ComplexityDoctorEngine(
             .mapIndexed { index, p ->
                 p.copy(rank = index + 1)
             }
+    }
 
+    fun runDoctor(
+        projectId: String,
+        target: String? = null,
+        limit: Int = 10,
+        minCognitive: Int = 10
+    ): ComplexityDoctorReport {
+        if (store == null) {
+            return ComplexityDoctorReport(
+                project = projectId,
+                totalPrescriptions = 0,
+                prescriptions = emptyList()
+            )
+        }
+
+        val rawNodes = store.queryComplexNodes(projectId, minCognitive = minCognitive, limit = limit * 4)
+        val complexNodes = filterTargetNodes(rawNodes, target)
+        val candidatePrescriptions = mutableListOf<ComplexityDoctorReport.Prescription>()
+
+        for ((filePath, nodes) in complexNodes.groupBy { it.filePath }) {
+            candidatePrescriptions.addAll(collectFilePrescriptions(projectId, filePath, nodes))
+        }
+
+        val sorted = rankPrescriptions(candidatePrescriptions, limit)
         return ComplexityDoctorReport(
             project = projectId,
             totalPrescriptions = sorted.size,
             prescriptions = sorted
         )
+    }
+
+    private fun isFunctionTargetMatch(func: GraphNode, nodeId: String, sym: String, simpleSym: String): Boolean {
+        if (nodeId.isEmpty() || func.nodeId == nodeId || func.name == nodeId || func.qualifiedName == nodeId) {
+            return true
+        }
+        if (sym.isEmpty()) return false
+        return func.nodeId.substringAfter('#') == sym ||
+            func.name == sym ||
+            func.name == simpleSym ||
+            func.qualifiedName.endsWith(sym)
+    }
+
+    private fun resolveNodesForAnalysis(
+        projectId: String,
+        filePath: String,
+        sourceText: String,
+        preExtractedNodes: List<GraphNode>?
+    ): List<GraphNode> {
+        if (preExtractedNodes != null) return preExtractedNodes
+        return try {
+            PolyglotAstExtractor.extractFile(projectId, filePath, sourceText).first
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun collectFunctionPrescriptions(
+        filePath: String,
+        sourceText: String,
+        func: GraphNode,
+        inDegree: Int,
+        lang: String,
+        projectId: String
+    ): List<ComplexityDoctorReport.Prescription> {
+        val list = mutableListOf<ComplexityDoctorReport.Prescription>()
+        val guard = synthesizeGuardInversion(filePath, sourceText, func, inDegree, lang, projectId)
+        if (guard != null) list.add(guard)
+        val elvis = synthesizeElvisGuard(filePath, sourceText, func, inDegree, lang, projectId)
+        if (elvis != null) list.add(elvis)
+        return list
     }
 
     fun analyzeSource(
@@ -108,52 +169,17 @@ class ComplexityDoctorEngine(
         val lang = PolyglotAstExtractor.supportedLanguage(ext)
         if (lang.isEmpty()) return emptyList()
 
-        val nodes = preExtractedNodes ?: try {
-            PolyglotAstExtractor.extractFile(projectId, filePath, sourceText).first
-        } catch (_: Exception) {
-            return emptyList()
-        }
-
+        val nodes = resolveNodesForAnalysis(projectId, filePath, sourceText, preExtractedNodes)
         val candidatePrescriptions = mutableListOf<ComplexityDoctorReport.Prescription>()
-
-        val funcNodes = nodes.filter { it.kind in setOf("function", "method", "composable") }
         val sym = if (nodeId.contains('#')) nodeId.substringAfter('#') else nodeId
         val simpleSym = sym.substringAfterLast('.')
-        for (func in funcNodes) {
-            val matches = nodeId.isEmpty() ||
-                func.nodeId == nodeId ||
-                func.name == nodeId ||
-                func.qualifiedName == nodeId ||
-                (sym.isNotEmpty() && (func.nodeId.substringAfter('#') == sym || func.name == sym || func.name == simpleSym || func.qualifiedName.endsWith(sym)))
-            if (!matches) {
-                continue
-            }
 
-            // 1. Guard Clause Inversion
-            val guardPrescription = synthesizeGuardInversion(
-                filePath = filePath,
-                sourceText = sourceText,
-                node = func,
-                inDegree = inDegree,
-                lang = lang,
-                projectId = projectId
+        for (func in nodes) {
+            if (func.kind !in setOf("function", "method", "composable")) continue
+            if (!isFunctionTargetMatch(func, nodeId, sym, simpleSym)) continue
+            candidatePrescriptions.addAll(
+                collectFunctionPrescriptions(filePath, sourceText, func, inDegree, lang, projectId)
             )
-            if (guardPrescription != null) {
-                candidatePrescriptions.add(guardPrescription)
-            }
-
-            // 2. Elvis Guard Simplification
-            val elvisPrescription = synthesizeElvisGuard(
-                filePath = filePath,
-                sourceText = sourceText,
-                node = func,
-                inDegree = inDegree,
-                lang = lang,
-                projectId = projectId
-            )
-            if (elvisPrescription != null) {
-                candidatePrescriptions.add(elvisPrescription)
-            }
         }
 
         return candidatePrescriptions
