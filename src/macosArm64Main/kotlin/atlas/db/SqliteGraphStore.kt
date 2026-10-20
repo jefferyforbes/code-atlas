@@ -3681,6 +3681,102 @@ class SqliteGraphStore(val dbPath: String) {
         else -> 1 // STATIC_INFERRED
     }
 
+    private fun queryExistingComposeProvenance(
+        scope: StatementScope,
+        projectSlug: String
+    ): Map<String, Int> {
+        val existingProv = mutableMapOf<String, Int>()
+        val qStmt = scope.prepare("SELECT node_id, provenance FROM compose_nodes WHERE project_slug = ?;")
+        qStmt.bindString(1, projectSlug)
+        while (qStmt.step()) {
+            existingProv[qStmt.columnString(0)] = provenanceRank(qStmt.columnString(1))
+        }
+        return existingProv
+    }
+
+    private fun boolToInt(value: Boolean): Int = if (value) 1 else 0
+
+    private fun bindComposeNodeFlags(stmt: NativeSqliteStatement, n: ComposeNodeRecord) {
+        stmt.bindInt(8, boolToInt(n.isRestartable))
+        stmt.bindInt(9, boolToInt(n.isSkippable))
+        stmt.bindInt(10, boolToInt(n.isReadonly))
+        stmt.bindInt(11, boolToInt(n.isInline))
+        stmt.bindInt(12, boolToInt(n.returnsUnit))
+        stmt.bindInt(13, boolToInt(n.hasModifierParam))
+        stmt.bindInt(14, boolToInt(n.modifierIsFirstOptional))
+        stmt.bindInt(15, boolToInt(n.modifierHasDefault))
+    }
+
+    private fun bindComposeNodeRow(stmt: NativeSqliteStatement, n: ComposeNodeRecord) {
+        stmt.reset()
+        stmt.bindString(1, n.nodeId)
+        stmt.bindString(2, n.projectSlug)
+        stmt.bindString(3, n.fqName)
+        stmt.bindString(4, n.filePath)
+        stmt.bindInt(5, n.startLine)
+        stmt.bindInt(6, n.endLine)
+        stmt.bindString(7, n.sourceSet)
+        bindComposeNodeFlags(stmt, n)
+        stmt.bindInt(16, n.unstableParamCount)
+        stmt.bindInt(17, n.runtimeParamCount)
+        stmt.bindString(18, n.receiverStability)
+        stmt.bindString(19, n.provenance)
+        stmt.bindInt(20, n.violationMask)
+        stmt.step()
+    }
+
+    private fun updateComposeNodeLinesAndMask(stmt: NativeSqliteStatement, n: ComposeNodeRecord) {
+        stmt.reset()
+        stmt.clearBindings()
+        stmt.bindInt(1, n.startLine)
+        stmt.bindInt(2, n.endLine)
+        stmt.bindInt(3, n.violationMask)
+        stmt.bindString(4, n.nodeId)
+        stmt.step()
+    }
+
+    private fun upsertSingleComposeNode(
+        nodeStmt: NativeSqliteStatement,
+        updStmt: NativeSqliteStatement,
+        n: ComposeNodeRecord,
+        existingProv: Map<String, Int>,
+        preserveHigherProvenance: Boolean
+    ) {
+        val prevRank = existingProv[n.nodeId] ?: 0
+        val newRank = provenanceRank(n.provenance)
+        if (preserveHigherProvenance && prevRank > newRank) {
+            updateComposeNodeLinesAndMask(updStmt, n)
+        } else {
+            bindComposeNodeRow(nodeStmt, n)
+        }
+    }
+
+    private fun bindComposeParamRow(stmt: NativeSqliteStatement, p: ComposeParamRecord) {
+        stmt.reset()
+        stmt.bindString(1, p.nodeId)
+        stmt.bindInt(2, p.paramIndex)
+        stmt.bindString(3, p.paramName)
+        stmt.bindString(4, p.typeSignature)
+        stmt.bindString(5, p.stability)
+        stmt.bindString(6, p.stabilityReason)
+        stmt.bindInt(7, if (p.hasDefault) 1 else 0)
+        stmt.bindInt(8, if (p.isUsedInBody) 1 else 0)
+        stmt.bindString(9, p.provenance)
+        stmt.step()
+    }
+
+    private fun upsertSingleComposeParam(
+        paramStmt: NativeSqliteStatement,
+        p: ComposeParamRecord,
+        existingProv: Map<String, Int>,
+        preserveHigherProvenance: Boolean
+    ) {
+        val prevRank = existingProv[p.nodeId] ?: 0
+        val newRank = provenanceRank(p.provenance)
+        if (preserveHigherProvenance && prevRank > newRank) return
+        bindComposeParamRow(paramStmt, p)
+    }
+
     fun upsertComposeNodesAndParams(
         nodes: List<ComposeNodeRecord>,
         params: List<ComposeParamRecord>,
@@ -3690,14 +3786,10 @@ class SqliteGraphStore(val dbPath: String) {
         db.withSavepoint("sp_compose_upsert") {
             val scope = StatementScope(db)
             try {
-                val existingProv = mutableMapOf<String, Int>()
-                if (preserveHigherProvenance && nodes.isNotEmpty()) {
-                    val pSlug = nodes.first().projectSlug
-                    val qStmt = scope.prepare("SELECT node_id, provenance FROM compose_nodes WHERE project_slug = ?;")
-                    qStmt.bindString(1, pSlug)
-                    while (qStmt.step()) {
-                        existingProv[qStmt.columnString(0)] = provenanceRank(qStmt.columnString(1))
-                    }
+                val existingProv = if (preserveHigherProvenance && nodes.isNotEmpty()) {
+                    queryExistingComposeProvenance(scope, nodes.first().projectSlug)
+                } else {
+                    emptyMap()
                 }
 
                 val nodeStmt = scope.prepare(
@@ -3719,40 +3811,7 @@ class SqliteGraphStore(val dbPath: String) {
                     """.trimIndent()
                 )
                 for (n in nodes) {
-                    val prevRank = existingProv[n.nodeId] ?: 0
-                    val newRank = provenanceRank(n.provenance)
-                    if (preserveHigherProvenance && prevRank > newRank) {
-                        updStmt.reset()
-                        updStmt.clearBindings()
-                        updStmt.bindInt(1, n.startLine)
-                        updStmt.bindInt(2, n.endLine)
-                        updStmt.bindInt(3, n.violationMask)
-                        updStmt.bindString(4, n.nodeId)
-                        updStmt.step()
-                        continue
-                    }
-                    nodeStmt.reset()
-                    nodeStmt.bindString(1, n.nodeId)
-                    nodeStmt.bindString(2, n.projectSlug)
-                    nodeStmt.bindString(3, n.fqName)
-                    nodeStmt.bindString(4, n.filePath)
-                    nodeStmt.bindInt(5, n.startLine)
-                    nodeStmt.bindInt(6, n.endLine)
-                    nodeStmt.bindString(7, n.sourceSet)
-                    nodeStmt.bindInt(8, if (n.isRestartable) 1 else 0)
-                    nodeStmt.bindInt(9, if (n.isSkippable) 1 else 0)
-                    nodeStmt.bindInt(10, if (n.isReadonly) 1 else 0)
-                    nodeStmt.bindInt(11, if (n.isInline) 1 else 0)
-                    nodeStmt.bindInt(12, if (n.returnsUnit) 1 else 0)
-                    nodeStmt.bindInt(13, if (n.hasModifierParam) 1 else 0)
-                    nodeStmt.bindInt(14, if (n.modifierIsFirstOptional) 1 else 0)
-                    nodeStmt.bindInt(15, if (n.modifierHasDefault) 1 else 0)
-                    nodeStmt.bindInt(16, n.unstableParamCount)
-                    nodeStmt.bindInt(17, n.runtimeParamCount)
-                    nodeStmt.bindString(18, n.receiverStability)
-                    nodeStmt.bindString(19, n.provenance)
-                    nodeStmt.bindInt(20, n.violationMask)
-                    nodeStmt.step()
+                    upsertSingleComposeNode(nodeStmt, updStmt, n, existingProv, preserveHigherProvenance)
                 }
 
                 val paramStmt = scope.prepare(
@@ -3764,20 +3823,7 @@ class SqliteGraphStore(val dbPath: String) {
                     """.trimIndent()
                 )
                 for (p in params) {
-                    val prevRank = existingProv[p.nodeId] ?: 0
-                    val newRank = provenanceRank(p.provenance)
-                    if (preserveHigherProvenance && prevRank > newRank) continue
-                    paramStmt.reset()
-                    paramStmt.bindString(1, p.nodeId)
-                    paramStmt.bindInt(2, p.paramIndex)
-                    paramStmt.bindString(3, p.paramName)
-                    paramStmt.bindString(4, p.typeSignature)
-                    paramStmt.bindString(5, p.stability)
-                    paramStmt.bindString(6, p.stabilityReason)
-                    paramStmt.bindInt(7, if (p.hasDefault) 1 else 0)
-                    paramStmt.bindInt(8, if (p.isUsedInBody) 1 else 0)
-                    paramStmt.bindString(9, p.provenance)
-                    paramStmt.step()
+                    upsertSingleComposeParam(paramStmt, p, existingProv, preserveHigherProvenance)
                 }
             } finally {
                 scope.closeAll()
