@@ -191,30 +191,26 @@ class ComplexityDoctorEngine(
         )
     }
 
-    private fun synthesizeGuardInversion(
-        filePath: String,
-        sourceText: String,
-        node: GraphNode,
-        inDegree: Int,
-        lang: String,
-        projectId: String
-    ): ComplexityDoctorReport.Prescription? {
-        val lines = sourceText.lines()
-        val startIdx = (node.startLine - 1).coerceAtLeast(0)
-        val endIdx = (node.endLine - 1).coerceAtMost(lines.size - 1)
+    private class OuterIfInfo(val lineIdx: Int, val indent: String, val rawCondition: String)
+
+    private class ElseResolution(val spanEndIdx: Int, val defaultReturn: String)
+
+    private fun findFunctionBodyStart(lines: List<String>, startIdx: Int, endIdx: Int): Int? {
         if (startIdx >= endIdx || startIdx >= lines.size) return null
-
-        var bodyStart = startIdx
-        while (bodyStart <= endIdx && !lines[bodyStart].contains('{')) {
-            bodyStart++
+        for (i in startIdx..endIdx) {
+            if (lines[i].contains('{')) return i
         }
-        if (bodyStart > endIdx) return null
+        return null
+    }
 
-        var ifLineIdx = -1
-        var ifIndent = ""
-        var rawCondition = ""
+    private fun isDeclarationPrefix(trimmed: String): Boolean {
+        return trimmed.startsWith("val ") || trimmed.startsWith("var ") ||
+            trimmed.startsWith("let ") || trimmed.startsWith("const ") ||
+            trimmed.startsWith("final ") || trimmed.startsWith("auto ")
+    }
+
+    private fun findOuterIfLine(lines: List<String>, bodyStart: Int, endIdx: Int): OuterIfInfo? {
         val ifRegex = Regex("""^(\s*)if\s*\((.+)\)\s*\{(?:\s*//.*)?$""")
-
         for (i in (bodyStart + 1)..endIdx) {
             val trimmed = lines[i].trim()
             if (trimmed.isEmpty() || trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) {
@@ -222,95 +218,110 @@ class ComplexityDoctorEngine(
             }
             val m = ifRegex.find(lines[i])
             if (m != null) {
-                ifLineIdx = i
-                ifIndent = m.groupValues[1]
-                rawCondition = m.groupValues[2].trim()
-                break
+                return OuterIfInfo(i, m.groupValues[1], m.groupValues[2].trim())
             }
-            // Allow skipping variable definitions/declarations before the outer if condition
-            if (trimmed.startsWith("val ") || trimmed.startsWith("var ") ||
-                trimmed.startsWith("let ") || trimmed.startsWith("const ") ||
-                trimmed.startsWith("final ") || trimmed.startsWith("auto ")
-            ) {
-                continue
-            }
+            if (isDeclarationPrefix(trimmed)) continue
             break
         }
+        return null
+    }
 
-        if (ifLineIdx < 0 || rawCondition.isEmpty()) return null
-
+    private fun findMatchingIfClose(lines: List<String>, ifLineIdx: Int, endIdx: Int, lang: String): Int? {
         var depth = 0
-        var closeIfIdx = -1
         for (i in ifLineIdx..endIdx) {
             val masked = PolyglotAstExtractor.maskCommentsAndStrings(lines[i], lang)
             depth += masked.count { it == '{' } - masked.count { it == '}' }
-            if (depth == 0) {
-                closeIfIdx = i
-                break
+            if (depth == 0) return i
+        }
+        return null
+    }
+
+    private fun extractReturnExpr(match: MatchResult): String {
+        val retExpr = match.groupValues.getOrNull(1)?.trim() ?: ""
+        return if (retExpr.isNotEmpty()) "return $retExpr" else "return"
+    }
+
+    private fun findMultiLineElseEnd(
+        lines: List<String>,
+        closeIfIdx: Int,
+        endIdx: Int,
+        lang: String,
+        retRegex: Regex
+    ): ElseResolution? {
+        var elseDepth = 1
+        var defaultReturn = "return"
+        for (i in (closeIfIdx + 1)..endIdx) {
+            val rMatch = retRegex.find(lines[i])
+            if (rMatch != null) {
+                defaultReturn = extractReturnExpr(rMatch)
+            }
+            val masked = PolyglotAstExtractor.maskCommentsAndStrings(lines[i], lang)
+            elseDepth += masked.count { it == '{' } - masked.count { it == '}' }
+            if (elseDepth == 0) {
+                return ElseResolution(i, defaultReturn)
             }
         }
-        if (closeIfIdx < 0 || closeIfIdx <= ifLineIdx) return null
+        return null
+    }
 
-        var trailingReturnIdx = -1
-        var defaultReturn = "return"
-        val retRegex = Regex("""^\s*return(?:\s+([^;}\n]+))?;?\s*$""")
-
-        // Check if there is an else block immediately after the if block
-        var elseEndIdx = -1
+    private fun resolveElseBlock(
+        lines: List<String>,
+        closeIfIdx: Int,
+        endIdx: Int,
+        lang: String
+    ): ElseResolution? {
         val elseRegex = Regex("""^\s*\}\s*else\s*\{(?:\s*return(?:\s+([^;}\n]+))?;?\s*\})?\s*$""")
         val elseStartRegex = Regex("""^\s*\}\s*else\s*\{""")
+        val retRegex = Regex("""^\s*return(?:\s+([^;}\n]+))?;?\s*$""")
 
         val closeIfLine = lines[closeIfIdx]
         val elseMatch = elseRegex.find(closeIfLine)
         if (elseMatch != null) {
-            val retExpr = elseMatch.groupValues.getOrNull(1)?.trim() ?: ""
-            defaultReturn = if (retExpr.isNotEmpty()) "return $retExpr" else "return"
-            elseEndIdx = closeIfIdx
-        } else if (elseStartRegex.find(closeIfLine) != null) {
-            var elseDepth = 1
-            for (i in (closeIfIdx + 1)..endIdx) {
-                val rMatch = retRegex.find(lines[i])
-                if (rMatch != null) {
-                    val retExpr = rMatch.groupValues.getOrNull(1)?.trim() ?: ""
-                    defaultReturn = if (retExpr.isNotEmpty()) "return $retExpr" else "return"
-                }
-                val masked = PolyglotAstExtractor.maskCommentsAndStrings(lines[i], lang)
-                elseDepth += masked.count { it == '{' } - masked.count { it == '}' }
-                if (elseDepth == 0) {
-                    elseEndIdx = i
-                    break
-                }
+            return ElseResolution(closeIfIdx, extractReturnExpr(elseMatch))
+        }
+        if (elseStartRegex.find(closeIfLine) != null) {
+            return findMultiLineElseEnd(lines, closeIfIdx, endIdx, lang, retRegex)
+        }
+        return null
+    }
+
+    private fun resolveTrailingReturn(
+        lines: List<String>,
+        closeIfIdx: Int,
+        endIdx: Int
+    ): ElseResolution? {
+        val retRegex = Regex("""^\s*return(?:\s+([^;}\n]+))?;?\s*$""")
+        var candidateRetIdx = -1
+        var defaultReturn = "return"
+        for (i in (closeIfIdx + 1)..endIdx) {
+            val trimmed = lines[i].trim()
+            if (trimmed.isEmpty() || trimmed.startsWith("//")) continue
+            val rMatch = retRegex.find(lines[i])
+            if (rMatch != null) {
+                candidateRetIdx = i
+                defaultReturn = extractReturnExpr(rMatch)
+            } else if (trimmed == "}") {
+                break
+            } else {
+                return null
             }
         }
+        val spanEnd = if (candidateRetIdx > 0) candidateRetIdx else closeIfIdx
+        return ElseResolution(spanEnd, defaultReturn)
+    }
 
-        val spanEndIdx = if (elseEndIdx > 0) {
-            elseEndIdx
-        } else {
-            var candidateRetIdx = -1
-            var hasTrailingStatements = false
-            for (i in (closeIfIdx + 1)..endIdx) {
-                val trimmed = lines[i].trim()
-                if (trimmed.isEmpty() || trimmed.startsWith("//")) continue
-                val rMatch = retRegex.find(lines[i])
-                if (rMatch != null) {
-                    candidateRetIdx = i
-                    val retExpr = rMatch.groupValues.getOrNull(1)?.trim() ?: ""
-                    defaultReturn = if (retExpr.isNotEmpty()) "return $retExpr" else "return"
-                } else if (trimmed == "}") {
-                    break
-                } else {
-                    hasTrailingStatements = true
-                    break
-                }
-            }
-            if (hasTrailingStatements) return null
-            if (candidateRetIdx > 0) candidateRetIdx else closeIfIdx
-        }
+    private fun resolveElseOrTrailingReturn(
+        lines: List<String>,
+        closeIfIdx: Int,
+        endIdx: Int,
+        lang: String
+    ): ElseResolution? {
+        val elseRes = resolveElseBlock(lines, closeIfIdx, endIdx, lang)
+        if (elseRes != null) return elseRes
+        return resolveTrailingReturn(lines, closeIfIdx, endIdx)
+    }
 
-        val invertedCond = invertCondition(rawCondition)
-        val innerLines = lines.subList(ifLineIdx + 1, closeIfIdx)
-        if (innerLines.isEmpty()) return null
-
+    private fun unindentInnerLines(innerLines: List<String>, ifIndent: String): List<String> {
         val firstNonBlankInner = innerLines.firstOrNull { it.isNotBlank() } ?: ""
         val innerIndent = firstNonBlankInner.takeWhile { it.isWhitespace() }
         val indentToRemove = if (innerIndent.startsWith(ifIndent) && innerIndent.length > ifIndent.length) {
@@ -319,25 +330,51 @@ class ComplexityDoctorEngine(
             "    "
         }
 
-        val unindentedInner = innerLines.map { l ->
-            if (l.startsWith(ifIndent + indentToRemove)) {
-                ifIndent + l.substring(ifIndent.length + indentToRemove.length)
-            } else if (l.startsWith(indentToRemove)) {
-                l.substring(indentToRemove.length)
-            } else {
-                l.trimStart()
+        return innerLines.map { l ->
+            when {
+                l.startsWith(ifIndent + indentToRemove) -> ifIndent + l.substring(ifIndent.length + indentToRemove.length)
+                l.startsWith(indentToRemove) -> l.substring(indentToRemove.length)
+                else -> l.trimStart()
             }
         }
+    }
 
-        val beforeSnippet = lines.subList(ifLineIdx, spanEndIdx + 1).joinToString("\n")
+    private fun buildInvertedCandidateText(
+        sourceText: String,
+        lines: List<String>,
+        ifInfo: OuterIfInfo,
+        closeIfIdx: Int,
+        spanEndIdx: Int,
+        defaultReturn: String
+    ): Pair<String, String>? {
+        val innerLines = lines.subList(ifInfo.lineIdx + 1, closeIfIdx)
+        if (innerLines.isEmpty()) return null
+
+        val unindentedInner = unindentInnerLines(innerLines, ifInfo.indent)
+        val invertedCond = invertCondition(ifInfo.rawCondition)
+
+        val beforeSnippet = lines.subList(ifInfo.lineIdx, spanEndIdx + 1).joinToString("\n")
         val afterLines = mutableListOf<String>()
-        afterLines.add("${ifIndent}if ($invertedCond) $defaultReturn")
+        afterLines.add("${ifInfo.indent}if ($invertedCond) $defaultReturn")
         afterLines.addAll(unindentedInner)
         val afterSnippet = afterLines.joinToString("\n")
 
         if (countOccurrences(sourceText, beforeSnippet) != 1) return null
+        return Pair(beforeSnippet, afterSnippet)
+    }
 
-        val candidateText = sourceText.replace(beforeSnippet, afterSnippet)
+    private fun evaluateGuardInversionPrescription(
+        sourceText: String,
+        candidateText: String,
+        beforeSnippet: String,
+        afterSnippet: String,
+        node: GraphNode,
+        ifLineIdx: Int,
+        inDegree: Int,
+        filePath: String,
+        projectId: String,
+        lang: String
+    ): ComplexityDoctorReport.Prescription? {
         val maskedCandidate = PolyglotAstExtractor.maskCommentsAndStrings(candidateText, lang)
         if (!hasBalancedDelimiters(maskedCandidate)) return null
 
@@ -351,13 +388,14 @@ class ComplexityDoctorEngine(
             .filter { it.kind in setOf("function", "method", "composable") && it.name == node.name }
             .minByOrNull { kotlin.math.abs(it.startLine - node.startLine) }
             ?: return null
+
         val cogBefore = node.cognitiveComplexity
         val cogAfter = modNode.cognitiveComplexity
         val diff = cogBefore - cogAfter
+        if (diff < 1) return null
+
         val reductionPct = if (cogBefore > 0) (diff.toDouble() / cogBefore.toDouble()) * 100.0 else 0.0
         val roundedPct = (reductionPct * 10.0).roundToInt() / 10.0
-
-        if (diff < 1) return null
 
         val inDeg = inDegree.coerceAtLeast(node.inDegree).toDouble()
         val riskIndex = cogBefore.toDouble() * (1.0 + ln(1.0 + inDeg))
@@ -378,6 +416,37 @@ class ComplexityDoctorEngine(
             rationale = "Inverting outer conditional guard flattens function body nesting, reducing cognitive complexity from $cogBefore to $cogAfter ($roundedPct% reduction).",
             beforeSnippet = beforeSnippet,
             afterSnippet = afterSnippet
+        )
+    }
+
+    private fun synthesizeGuardInversion(
+        filePath: String,
+        sourceText: String,
+        node: GraphNode,
+        inDegree: Int,
+        lang: String,
+        projectId: String
+    ): ComplexityDoctorReport.Prescription? {
+        val lines = sourceText.lines()
+        val startIdx = (node.startLine - 1).coerceAtLeast(0)
+        val endIdx = (node.endLine - 1).coerceAtMost(lines.size - 1)
+        val bodyStart = findFunctionBodyStart(lines, startIdx, endIdx) ?: return null
+
+        val ifInfo = findOuterIfLine(lines, bodyStart, endIdx) ?: return null
+        if (ifInfo.rawCondition.isEmpty()) return null
+
+        val closeIfIdx = findMatchingIfClose(lines, ifInfo.lineIdx, endIdx, lang) ?: return null
+        if (closeIfIdx <= ifInfo.lineIdx) return null
+
+        val elseRes = resolveElseOrTrailingReturn(lines, closeIfIdx, endIdx, lang) ?: return null
+        val (beforeSnippet, afterSnippet) = buildInvertedCandidateText(
+            sourceText, lines, ifInfo, closeIfIdx, elseRes.spanEndIdx, elseRes.defaultReturn
+        ) ?: return null
+
+        val candidateText = sourceText.replace(beforeSnippet, afterSnippet)
+        return evaluateGuardInversionPrescription(
+            sourceText, candidateText, beforeSnippet, afterSnippet, node,
+            ifInfo.lineIdx, inDegree, filePath, projectId, lang
         )
     }
 
