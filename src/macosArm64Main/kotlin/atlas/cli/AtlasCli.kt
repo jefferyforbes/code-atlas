@@ -16,6 +16,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
@@ -160,6 +161,11 @@ class AtlasCli {
                     target = args.target,
                     threshold = args.thresholdArg,
                     maxCyclomatic = args.maxCyclomaticArg,
+                    warnParams = args.warnParamsArg,
+                    maxParams = args.maxParamsArg,
+                    composeWarnParams = args.composeWarnParamsArg,
+                    composeMaxParams = args.composeMaxParamsArg,
+                    checkParams = args.checkParams,
                     ratchet = args.ratchetArg,
                     highRatchet = args.highRatchetArg,
                     baseline = args.baselineArg,
@@ -1666,6 +1672,14 @@ class AtlasCli {
             return 0
         }
 
+        private fun putIfNotNull(builder: JsonObjectBuilder, key: String, value: Int?) {
+            if (value != null) builder.put(key, value)
+        }
+
+        private fun putIfNotNull(builder: JsonObjectBuilder, key: String, value: String?) {
+            if (value != null) builder.put(key, value)
+        }
+
         private fun buildComplexityAuditToolArgs(
             project: String,
             filterPaths: List<String>,
@@ -1673,18 +1687,28 @@ class AtlasCli {
             maxCyclomatic: Int?,
             effectiveRatchet: Int?,
             highRatchet: Int?,
-            effectiveBaselineFile: String?
+            effectiveBaselineFile: String?,
+            warnParams: Int? = null,
+            maxParams: Int? = null,
+            composeWarnParams: Int? = null,
+            composeMaxParams: Int? = null,
+            checkParams: Boolean = true
         ): JsonObject = buildJsonObject {
             put("action", "audit_complexity")
             put("project", project)
             if (filterPaths.isNotEmpty()) {
                 putJsonArray("targets") { filterPaths.forEach { add(it) } }
             }
-            if (threshold != null) put("threshold", threshold)
-            if (maxCyclomatic != null) put("max_cyclomatic", maxCyclomatic)
-            if (effectiveRatchet != null) put("ratchet", effectiveRatchet)
-            if (highRatchet != null) put("high_ratchet", highRatchet)
-            if (effectiveBaselineFile != null) put("baseline", effectiveBaselineFile)
+            putIfNotNull(this, "threshold", threshold)
+            putIfNotNull(this, "max_cyclomatic", maxCyclomatic)
+            putIfNotNull(this, "warn_params", warnParams)
+            putIfNotNull(this, "max_params", maxParams)
+            putIfNotNull(this, "compose_warn_params", composeWarnParams)
+            putIfNotNull(this, "compose_max_params", composeMaxParams)
+            if (!checkParams) put("check_params", false)
+            putIfNotNull(this, "ratchet", effectiveRatchet)
+            putIfNotNull(this, "high_ratchet", highRatchet)
+            putIfNotNull(this, "baseline", effectiveBaselineFile)
         }
 
         private fun saveComplexityBaselineFile(
@@ -1715,6 +1739,16 @@ class AtlasCli {
             }
         }
 
+        private fun formatRatchetSegment(label: String, ratchet: Int?, delta: Int?): String {
+            if (ratchet == null) return ""
+            val deltaStr = when {
+                delta == null -> "0"
+                delta > 0 -> "+$delta"
+                else -> "$delta"
+            }
+            return " $label=$ratchet (delta=$deltaStr)"
+        }
+
         private fun formatComplexityAuditSummary(
             project: String,
             passed: Boolean,
@@ -1722,30 +1756,16 @@ class AtlasCli {
             total: Int,
             high: Int,
             warn: Int,
+            advisory: Int = 0,
             resolvedRatchet: Int?,
             baselineDelta: Int?,
             resolvedHighRatchet: Int?,
             highDelta: Int?
         ): String {
-            val ratchetStr = if (resolvedRatchet != null) {
-                val deltaStr = when {
-                    baselineDelta == null -> "0"
-                    baselineDelta > 0 -> "+$baselineDelta"
-                    else -> "$baselineDelta"
-                }
-                " ratchet=$resolvedRatchet (delta=$deltaStr)"
-            } else ""
-
-            val highRatchetStr = if (resolvedHighRatchet != null) {
-                val hDeltaStr = when {
-                    highDelta == null -> "0"
-                    highDelta > 0 -> "+$highDelta"
-                    else -> "$highDelta"
-                }
-                " high_ratchet=$resolvedHighRatchet (delta=$hDeltaStr)"
-            } else ""
-
-            return "[Complexity Audit] project=$project passed=$passed threshold=$thresh violations=$total$ratchetStr$highRatchetStr (HIGH=$high, WARNING=$warn)"
+            val ratchetStr = formatRatchetSegment("ratchet", resolvedRatchet, baselineDelta)
+            val highRatchetStr = formatRatchetSegment("high_ratchet", resolvedHighRatchet, highDelta)
+            val advStr = if (advisory > 0) ", ADVISORY=$advisory" else ""
+            return "[Complexity Audit] project=$project passed=$passed threshold=$thresh violations=$total$ratchetStr$highRatchetStr (HIGH=$high, WARNING=$warn$advStr)"
         }
 
         private fun resolveAuditFilterPaths(paths: List<String>, target: String): List<String> =
@@ -1766,8 +1786,9 @@ class AtlasCli {
             val baselineDelta = data["baseline_delta"]?.jsonPrimitive?.intOrNull
             val resolvedHighRatchet = data["high_ratchet"]?.jsonPrimitive?.intOrNull
             val highDelta = data["high_delta"]?.jsonPrimitive?.intOrNull
+            val advisory = data["advisory_count"]?.jsonPrimitive?.intOrNull ?: 0
             return formatComplexityAuditSummary(
-                project, passed, thresh, total, high, warn,
+                project, passed, thresh, total, high, warn, advisory,
                 resolvedRatchet, baselineDelta, resolvedHighRatchet, highDelta
             )
         }
@@ -1779,6 +1800,11 @@ class AtlasCli {
             target: String,
             threshold: Int?,
             maxCyclomatic: Int? = null,
+            warnParams: Int? = null,
+            maxParams: Int? = null,
+            composeWarnParams: Int? = null,
+            composeMaxParams: Int? = null,
+            checkParams: Boolean = true,
             ratchet: Int? = null,
             highRatchet: Int? = null,
             baseline: String? = null,
@@ -1794,7 +1820,8 @@ class AtlasCli {
 
             val toolArgs = buildComplexityAuditToolArgs(
                 project, filterPaths, threshold, maxCyclomatic,
-                effectiveRatchet, highRatchet, effectiveBaselineFile
+                effectiveRatchet, highRatchet, effectiveBaselineFile,
+                warnParams, maxParams, composeWarnParams, composeMaxParams, checkParams
             )
             val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)

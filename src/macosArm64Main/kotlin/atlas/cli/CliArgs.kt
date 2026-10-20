@@ -29,6 +29,11 @@ data class CliArgs(
     var isComplexityFlag: Boolean = false,
     var thresholdArg: Int? = null,
     var maxCyclomaticArg: Int? = null,
+    var warnParamsArg: Int? = null,
+    var maxParamsArg: Int? = null,
+    var composeWarnParamsArg: Int? = null,
+    var composeMaxParamsArg: Int? = null,
+    var checkParams: Boolean = true,
     var ratchetArg: Int? = null,
     var highRatchetArg: Int? = null,
     var baselineArg: String? = null,
@@ -193,6 +198,7 @@ data class CliArgs(
             "--make-private" -> { args.makePrivateBoost003 = true; true }
             "--no-strong-skipping" -> { args.strongSkipping = false; true }
             "--no-description-check", "--no-descriptions" -> { args.descriptionMode = "off"; true }
+            "--no-param-check", "--no-params" -> { args.checkParams = false; true }
             else -> false
         }
 
@@ -294,6 +300,22 @@ data class CliArgs(
             }
             extractOption(argv, idx, "--max-cyclomatic")?.let { (v, next) ->
                 args.maxCyclomaticArg = v.toIntOrNull()
+                return next
+            }
+            extractOption(argv, idx, "--warn-params")?.let { (v, next) ->
+                args.warnParamsArg = v.toIntOrNull()
+                return next
+            }
+            extractOption(argv, idx, "--max-params")?.let { (v, next) ->
+                args.maxParamsArg = v.toIntOrNull()
+                return next
+            }
+            extractOption(argv, idx, "--compose-warn-params")?.let { (v, next) ->
+                args.composeWarnParamsArg = v.toIntOrNull()
+                return next
+            }
+            extractOption(argv, idx, "--compose-max-params")?.let { (v, next) ->
+                args.composeMaxParamsArg = v.toIntOrNull()
                 return next
             }
             return idx

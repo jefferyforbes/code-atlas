@@ -1,6 +1,8 @@
 package atlas.engine
 
 import atlas.db.SqliteGraphStore
+import atlas.extract.ComplexityExtractor
+import atlas.extract.PolyglotAstExtractor
 import atlas.model.AuditReport
 import atlas.model.ComplexityViolation
 import atlas.model.ComposeAuditResult
@@ -10,13 +12,17 @@ import atlas.model.GraphNode
 import atlas.model.LayerInversionViolation
 import atlas.model.PlanCollision
 import atlas.model.SingleDeclarationViolation
+import atlas.util.PlatformFiles
 import kotlin.math.ln
 import kotlin.math.roundToInt
 
 /**
  * AST-backed Architecture Auditor enforcing Clean Architecture layers, BOOST-003, and 3D collision safety.
  */
-class ArchitectureAuditor(private val store: SqliteGraphStore) {
+class ArchitectureAuditor(
+    private val store: SqliteGraphStore,
+    private val workspaceRoot: String = "."
+) {
 
     private val composeEngine = ComposeStabilityEngine(store)
 
@@ -72,30 +78,238 @@ class ArchitectureAuditor(private val store: SqliteGraphStore) {
 
     /**
      * Evaluates function complexity thresholds and reports violating functions with severity
-     * (WARNING for cognitive 11-15, HIGH for cognitive > 15).
+     * (WARNING for cognitive 11-15, HIGH for cognitive > 15) and advisory parameter count violations
+     * (COMPLEXITY-002-PARAMS, warning at warnParams default 5, error at maxParams default 7;
+     * with higher thresholds or exclusion for Compose functions, and excluding data class / primary constructors).
      * Computes the Topological Architectural Risk Index incorporating afferent coupling:
-     * Risk Index = Cognitive Complexity * (1 + ln(1 + inDegree))
+     * Risk Index = Complexity Metric * (1 + ln(1 + inDegree))
+     */
+    data class ComplexityThresholds(
+        val maxCognitive: Int = 10,
+        val maxCyclomatic: Int = 15,
+        val warnParams: Int = 5,
+        val maxParams: Int = 7,
+        val composeWarnParams: Int = 10,
+        val composeMaxParams: Int = 14,
+        val checkParams: Boolean = true
+    )
+
+    /**
+     * Evaluates function complexity thresholds and reports violating functions with severity
+     * (WARNING for cognitive 11-15, HIGH for cognitive > 15) and advisory parameter count violations
+     * (COMPLEXITY-002-PARAMS, warning at warnParams default 5, error at maxParams default 7;
+     * with higher thresholds or exclusion for Compose functions, and excluding data class / primary constructors).
+     * Computes the Topological Architectural Risk Index incorporating afferent coupling:
+     * Risk Index = Complexity Metric * (1 + ln(1 + inDegree))
      */
     fun checkComplexityViolations(
         projectId: String,
         maxCognitive: Int = 10,
         maxCyclomatic: Int = 15,
         pathPrefixes: List<String>? = null
+    ): List<ComplexityViolation> = checkComplexityViolations(
+        projectId,
+        pathPrefixes,
+        ComplexityThresholds(maxCognitive = maxCognitive, maxCyclomatic = maxCyclomatic)
+    )
+
+    fun checkComplexityViolations(
+        projectId: String,
+        pathPrefixes: List<String>?,
+        thresholds: ComplexityThresholds
     ): List<ComplexityViolation> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
         val violations = mutableListOf<ComplexityViolation>()
+        val fileLinesCache = mutableMapOf<String, List<String>?>()
 
         for (node in store.listNodes(projectId)) {
             if (!isComplexityCandidate(node, prefixes)) continue
-            if (node.cognitiveComplexity > maxCognitive || node.cyclomaticComplexity > maxCyclomatic) {
-                violations.add(buildComplexityViolation(node, maxCognitive, maxCyclomatic))
+            checkCognitiveViolation(node, thresholds.maxCognitive, thresholds.maxCyclomatic)?.let {
+                violations.add(it)
+            }
+            checkNodeParamViolation(node, thresholds, fileLinesCache)?.let {
+                violations.add(it)
+            }
+        }
+
+        return sortViolations(violations)
+    }
+
+    private fun checkCognitiveViolation(
+        node: GraphNode,
+        maxCognitive: Int,
+        maxCyclomatic: Int
+    ): ComplexityViolation? {
+        if (node.cognitiveComplexity > maxCognitive || node.cyclomaticComplexity > maxCyclomatic) {
+            return buildComplexityViolation(node, maxCognitive, maxCyclomatic)
+        }
+        return null
+    }
+
+    private fun sortViolations(violations: List<ComplexityViolation>): List<ComplexityViolation> {
+        return violations.sortedWith(
+            compareByDescending<ComplexityViolation> { it.riskIndex }
+                .thenByDescending { it.cognitiveComplexity }
+                .thenByDescending { it.paramCount }
+                .thenBy { it.nodeId }
+        )
+    }
+
+    /**
+     * Checks parameter count complexity violations (COMPLEXITY-002-PARAMS) as an advisory rule.
+     * Recommended defaults: warn at 5, error at 7. Higher threshold for Compose functions (warn at 10, error at 14);
+     * excludes data classes and primary constructors.
+     */
+    fun checkParamCountViolations(
+        projectId: String,
+        pathPrefixes: List<String>? = null,
+        thresholds: ComplexityThresholds = ComplexityThresholds()
+    ): List<ComplexityViolation> {
+        val prefixes = normalizePathPrefixes(pathPrefixes)
+        val violations = mutableListOf<ComplexityViolation>()
+        val fileLinesCache = mutableMapOf<String, List<String>?>()
+
+        for (node in store.listNodes(projectId)) {
+            if (!isComplexityCandidate(node, prefixes)) continue
+            checkNodeParamViolation(node, thresholds, fileLinesCache)?.let {
+                violations.add(it)
             }
         }
 
         return violations.sortedWith(
             compareByDescending<ComplexityViolation> { it.riskIndex }
-                .thenByDescending { it.cognitiveComplexity }
+                .thenByDescending { it.paramCount }
                 .thenBy { it.nodeId }
+        )
+    }
+
+    private val CLASS_DECL_PATTERN = Regex("""\b(?:data\s+class|class|value\s+class|struct)\b""")
+
+    private fun isComposableNode(node: GraphNode, sourceLines: List<String>? = null): Boolean {
+        if (node.kind == "composable" || node.signature.contains("@Composable")) return true
+        if (sourceLines != null && node.startLine > 1) {
+            val checkIdx = minOf(node.startLine - 1, sourceLines.size - 1)
+            val lookbackStart = maxOf(0, checkIdx - 3)
+            for (idx in lookbackStart until checkIdx) {
+                if (sourceLines[idx].contains("@Composable")) return true
+            }
+        }
+        return false
+    }
+
+    private fun checkNodeParamViolation(
+        node: GraphNode,
+        thresholds: ComplexityThresholds,
+        cache: MutableMap<String, List<String>?>
+    ): ComplexityViolation? {
+        if (!thresholds.checkParams || isDataClassOrPrimaryConstructor(node)) return null
+        val lines = resolveNodeSourceLines(node, cache)
+        val isComp = isComposableNode(node, lines)
+        val warn = if (isComp) thresholds.composeWarnParams else thresholds.warnParams
+        val max = if (isComp) thresholds.composeMaxParams else thresholds.maxParams
+        if (warn <= 0) return null
+        val count = computeParamCount(node, cache)
+        if (count < warn) return null
+        return buildParamCountViolation(node, count, warn, max, isComp)
+    }
+
+    private fun isDataClassOrPrimaryConstructor(node: GraphNode): Boolean {
+        if (node.kind == "class" || node.kind == "struct") return true
+        if (node.kind == "primary_constructor") return true
+        val sig = node.signature.trim()
+        return CLASS_DECL_PATTERN.containsMatchIn(sig)
+    }
+
+    private fun resolveCandidatePaths(relPath: String, fileId: String): List<String> {
+        val rootPath = if (workspaceRoot.isNotEmpty() && workspaceRoot != ".") "$workspaceRoot/$relPath" else null
+        return listOfNotNull(relPath, rootPath, fileId).distinct()
+    }
+
+    private fun tryReadFileLines(path: String): List<String>? {
+        if (!PlatformFiles.exists(path)) return null
+        return try {
+            PlatformFiles.readText(path).lines()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun resolveNodeSourceLines(
+        node: GraphNode,
+        cache: MutableMap<String, List<String>?>
+    ): List<String>? {
+        val relPath = node.fileId.substringAfter(':')
+        if (cache.containsKey(relPath)) return cache[relPath]
+
+        for (p in resolveCandidatePaths(relPath, node.fileId)) {
+            val lines = tryReadFileLines(p)
+            if (lines != null) {
+                cache[relPath] = lines
+                return lines
+            }
+        }
+        cache[relPath] = null
+        return null
+    }
+
+    fun computeParamCount(
+        node: GraphNode,
+        fileLinesCache: MutableMap<String, List<String>?> = mutableMapOf()
+    ): Int {
+        if (isDataClassOrPrimaryConstructor(node)) return 0
+
+        val ext = if (node.fileId.contains('.')) "." + node.fileId.substringAfterLast('.') else ""
+        val language = PolyglotAstExtractor.supportedLanguage(ext).ifEmpty { "kotlin" }
+
+        val lines = resolveNodeSourceLines(node, fileLinesCache)
+        if (lines != null && node.startLine > 0 && node.startLine <= lines.size) {
+            val startIdx = (node.startLine - 1).coerceAtLeast(0)
+            val endIdx = minOf(node.endLine, lines.size)
+            if (startIdx < endIdx) {
+                val nodeLines = lines.subList(startIdx, endIdx)
+                val count = ComplexityExtractor.extractParamCount(nodeLines, node.name, language)
+                return count
+            }
+        }
+
+        if (node.signature.isNotBlank()) {
+            return ComplexityExtractor.extractParamCount(listOf(node.signature), node.name, language)
+        }
+
+        return 0
+    }
+
+    private fun buildParamCountViolation(
+        node: GraphNode,
+        paramCount: Int,
+        warnThreshold: Int,
+        errorThreshold: Int,
+        isComp: Boolean = isComposableNode(node)
+    ): ComplexityViolation {
+        val severity = if (paramCount >= errorThreshold) "HIGH" else "WARNING"
+        val lineSpan = if (node.endLine > node.startLine) {
+            "L${node.startLine}-L${node.endLine}"
+        } else {
+            "L${node.startLine}"
+        }
+        val inDeg = node.inDegree.toDouble()
+        val riskIndex = paramCount.toDouble() * (1.0 + ln(1.0 + inDeg))
+        val roundedRisk = (riskIndex * 10.0).roundToInt() / 10.0
+        val kindLabel = if (isComp) "Composable" else "Function"
+        val thresholdVal = if (severity == "HIGH") errorThreshold else warnThreshold
+        val levelLabel = if (severity == "HIGH") "error" else "warning"
+        val message = "$kindLabel '${node.name}' has $paramCount parameters, exceeding $levelLabel threshold ($thresholdVal)."
+
+        return ComplexityViolation(
+            ruleId = "COMPLEXITY-002-PARAMS",
+            severity = severity,
+            message = message,
+            nodeId = node.nodeId,
+            lineSpan = lineSpan,
+            riskIndex = roundedRisk,
+            cognitiveComplexity = node.cognitiveComplexity,
+            cyclomaticComplexity = node.cyclomaticComplexity,
+            paramCount = paramCount
         )
     }
 
