@@ -1493,30 +1493,55 @@ class AtlasMcpServer(
         return json.encodeToJsonElement(result).jsonObject
     }
 
+    private fun extractRawFileKey(args: JsonObject): String {
+        val direct = args["file_key"]?.jsonPrimitive?.content
+        if (direct != null) return direct
+        val camel = args["fileKey"]?.jsonPrimitive?.content
+        if (camel != null) return camel
+        val target = args["target"]?.jsonPrimitive?.content
+        if (target != null) return target
+        val firstTarget = args["targets"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
+        if (firstTarget != null) return firstTarget
+        return ""
+    }
+
+    private fun extractRawSeeds(args: JsonObject): List<String> {
+        val seedsArray = args["seeds"]?.jsonArray?.map { it.jsonPrimitive.content }
+        if (seedsArray != null) return seedsArray
+        val targetsArray = args["targets"]?.jsonArray?.map { it.jsonPrimitive.content }
+        if (targetsArray != null) return targetsArray
+        val singleSeed = args["seed"]?.jsonPrimitive?.content
+        if (singleSeed != null) return listOf(singleSeed)
+        val hasFileKey = args.containsKey("file_key") || args.containsKey("fileKey")
+        if (hasFileKey) {
+            val target = args["target"]?.jsonPrimitive?.content
+            if (target != null) return listOf(target)
+        }
+        return emptyList()
+    }
+
+    private fun normalizeFigmaSeeds(rawSeeds: List<String>, fallbackNodeId: String?): List<String> {
+        if (rawSeeds.isEmpty() && fallbackNodeId != null) {
+            return listOf(fallbackNodeId)
+        }
+        return rawSeeds.map { seed ->
+            val parsedUrl = UrlTargetResolver.parseFigmaUrl(seed)
+            if (parsedUrl?.nodeId != null) parsedUrl.nodeId else UrlTargetResolver.normalizeFigmaNodeId(seed)
+        }
+    }
+
     private fun handleFigmaScope(args: JsonObject): JsonObject {
         val project = args["project"]?.jsonPrimitive?.content ?: "organisation"
-        val rawFileKey = args["file_key"]?.jsonPrimitive?.content
-            ?: args["fileKey"]?.jsonPrimitive?.content
-            ?: args["target"]?.jsonPrimitive?.content
-            ?: (args["targets"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content)
-            ?: ""
+        val rawFileKey = extractRawFileKey(args)
         if (rawFileKey.isEmpty()) {
             return buildJsonObject {
                 put("error", "Missing required 'file_key' parameter for figma_scope")
             }
         }
         val parsedFileUrl = UrlTargetResolver.parseFigmaUrl(rawFileKey)
-        val fileKey = parsedFileUrl?.fileKey ?: rawFileKey
-        val rawSeeds = args["seeds"]?.jsonArray?.map { it.jsonPrimitive.content }
-            ?: args["targets"]?.jsonArray?.map { it.jsonPrimitive.content }
-            ?: listOfNotNull(args["seed"]?.jsonPrimitive?.content ?: if (args.containsKey("file_key") || args.containsKey("fileKey")) args["target"]?.jsonPrimitive?.content else null)
-        val seeds = if (rawSeeds.isEmpty() && parsedFileUrl?.nodeId != null) {
-            listOf(parsedFileUrl.nodeId)
-        } else {
-            rawSeeds.map { seed ->
-                UrlTargetResolver.parseFigmaUrl(seed)?.nodeId ?: UrlTargetResolver.normalizeFigmaNodeId(seed)
-            }
-        }
+        val fileKey = if (parsedFileUrl?.fileKey != null) parsedFileUrl.fileKey else rawFileKey
+        val rawSeeds = extractRawSeeds(args)
+        val seeds = normalizeFigmaSeeds(rawSeeds, parsedFileUrl?.nodeId)
         val scope = figmaAuditor.synthesizeFigmaScope(project, fileKey, seeds)
         return json.encodeToJsonElement(scope).jsonObject
     }
