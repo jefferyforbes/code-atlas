@@ -165,388 +165,458 @@ class PolyglotAstExtractor {
          * to original source lines.
          */
         fun maskCommentsAndStrings(source: String, language: String = "kotlin"): String {
-            val out = CharArray(source.length)
-            val isPy = language == "python"
-            val isRust = language == "rust"
-            val isTsJs = language == "typescript" || language == "javascript"
-            val isKotlin = language == "kotlin"
-            val isSwift = language == "swift"
-            var i = 0
-            val n = source.length
+            val state = MaskState(
+                source = source,
+                out = CharArray(source.length),
+                n = source.length,
+                isPy = language == "python",
+                isRust = language == "rust",
+                isTsJs = language == "typescript" || language == "javascript",
+                isKotlin = language == "kotlin",
+                isSwift = language == "swift"
+            )
 
+            while (state.i < state.n) {
+                processNextToken(state)
+            }
+            return state.out.concatToString()
+        }
+
+        private class MaskState(
+            val source: String,
+            val out: CharArray,
+            val n: Int,
+            val isPy: Boolean,
+            val isRust: Boolean,
+            val isTsJs: Boolean,
+            val isKotlin: Boolean,
+            val isSwift: Boolean,
+            var i: Int = 0
+        ) {
             fun writeSpaceOrNewline(idx: Int) {
                 out[idx] = if (source[idx] == '\n') '\n' else ' '
             }
+        }
 
-            while (i < n) {
-                val c = source[i]
+        private fun processNextToken(state: MaskState) {
+            if (maskComment(state)) return
+            if (maskTripleQuotedString(state)) return
+            if (maskDoubleQuotedString(state)) return
+            if (maskSingleQuotedString(state)) return
+            if (maskJsTemplateLiteral(state)) return
 
-                // Python line comment
-                if (isPy && c == '#') {
-                    while (i < n && source[i] != '\n') {
-                        out[i] = ' '
-                        i++
-                    }
-                    continue
-                }
+            state.out[state.i] = state.source[state.i]
+            state.i++
+        }
 
-                // C-style line comment
-                if (!isPy && c == '/' && i + 1 < n && source[i + 1] == '/') {
-                    while (i < n && source[i] != '\n') {
-                        out[i] = ' '
-                        i++
-                    }
-                    continue
-                }
-
-                // C-style block comment
-                if (!isPy && c == '/' && i + 1 < n && source[i + 1] == '*') {
-                    out[i] = ' '
-                    out[i + 1] = ' '
-                    i += 2
-                    while (i < n) {
-                        if (source[i] == '*' && i + 1 < n && source[i + 1] == '/') {
-                            out[i] = ' '
-                            out[i + 1] = ' '
-                            i += 2
-                            break
-                        }
-                        writeSpaceOrNewline(i)
-                        i++
-                    }
-                    continue
-                }
-
-                // Triple-quoted strings (Kotlin """ or Python """ / ''')
-                if (i + 2 < n && (
-                        (c == '"' && source[i + 1] == '"' && source[i + 2] == '"') ||
-                        (isPy && c == '\'' && source[i + 1] == '\'' && source[i + 2] == '\'')
-                    )
-                ) {
-                    val delim = c
-                    out[i] = delim
-                    out[i + 1] = ' '
-                    out[i + 2] = ' '
-                    i += 3
-                    while (i < n) {
-                        if (i + 2 < n && source[i] == delim && source[i + 1] == delim && source[i + 2] == delim) {
-                            out[i] = ' '
-                            out[i + 1] = ' '
-                            out[i + 2] = delim
-                            i += 3
-                            break
-                        }
-                        if (isKotlin && delim == '"' && source[i] == '$' && i + 1 < n && source[i + 1] == '{') {
-                            out[i] = ' '
-                            out[i + 1] = ' '
-                            i += 2
-                            var depth = 1
-                            while (i < n && depth > 0) {
-                                if (source[i] == '{') {
-                                    depth++
-                                    out[i] = '{'
-                                    i++
-                                } else if (source[i] == '}') {
-                                    depth--
-                                    if (depth == 0) out[i] = ' ' else out[i] = '}'
-                                    i++
-                                } else if (source[i] == '"') {
-                                    out[i] = '"'
-                                    i++
-                                    while (i < n) {
-                                        if (source[i] == '\\' && i + 1 < n) {
-                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
-                                        }
-                                        if (source[i] == '"') {
-                                            out[i] = '"'; i++; break
-                                        }
-                                        if (source[i] == '\n') {
-                                            out[i] = '\n'; i++; break
-                                        }
-                                        writeSpaceOrNewline(i)
-                                        i++
-                                    }
-                                } else {
-                                    out[i] = source[i]
-                                    i++
-                                }
-                            }
-                            continue
-                        }
-                        if (isSwift && delim == '"' && source[i] == '\\' && i + 1 < n && source[i + 1] == '(') {
-                            out[i] = ' '
-                            out[i + 1] = ' '
-                            i += 2
-                            var depth = 1
-                            while (i < n && depth > 0) {
-                                if (source[i] == '(') {
-                                    depth++
-                                    out[i] = '('
-                                    i++
-                                } else if (source[i] == ')') {
-                                    depth--
-                                    if (depth == 0) out[i] = ' ' else out[i] = ')'
-                                    i++
-                                } else if (source[i] == '"') {
-                                    out[i] = '"'
-                                    i++
-                                    while (i < n) {
-                                        if (source[i] == '\\' && i + 1 < n) {
-                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
-                                        }
-                                        if (source[i] == '"') {
-                                            out[i] = '"'; i++; break
-                                        }
-                                        writeSpaceOrNewline(i)
-                                        i++
-                                    }
-                                } else {
-                                    out[i] = source[i]
-                                    i++
-                                }
-                            }
-                            continue
-                        }
-                        writeSpaceOrNewline(i)
-                        i++
-                    }
-                    continue
-                }
-
-                // Double-quoted string
-                if (c == '"') {
-                    out[i] = '"'
-                    i++
-                    while (i < n) {
-                        if (isSwift && source[i] == '\\' && i + 1 < n && source[i + 1] == '(') {
-                            out[i] = ' '
-                            out[i + 1] = ' '
-                            i += 2
-                            var depth = 1
-                            while (i < n && depth > 0) {
-                                if (source[i] == '(') {
-                                    depth++
-                                    out[i] = '('
-                                    i++
-                                } else if (source[i] == ')') {
-                                    depth--
-                                    if (depth == 0) out[i] = ' ' else out[i] = ')'
-                                    i++
-                                } else if (source[i] == '"') {
-                                    out[i] = '"'
-                                    i++
-                                    while (i < n) {
-                                        if (source[i] == '\\' && i + 1 < n) {
-                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
-                                        }
-                                        if (source[i] == '"') {
-                                            out[i] = '"'; i++; break
-                                        }
-                                        writeSpaceOrNewline(i)
-                                        i++
-                                    }
-                                } else {
-                                    out[i] = source[i]
-                                    i++
-                                }
-                            }
-                            continue
-                        }
-                        if (source[i] == '\\' && i + 1 < n) {
-                            writeSpaceOrNewline(i)
-                            writeSpaceOrNewline(i + 1)
-                            i += 2
-                            continue
-                        }
-                        if (isKotlin && source[i] == '$' && i + 1 < n && source[i + 1] == '{') {
-                            out[i] = ' '
-                            out[i + 1] = ' '
-                            i += 2
-                            var depth = 1
-                            while (i < n && depth > 0) {
-                                if (source[i] == '{') {
-                                    depth++
-                                    out[i] = '{'
-                                    i++
-                                } else if (source[i] == '}') {
-                                    depth--
-                                    if (depth == 0) out[i] = ' ' else out[i] = '}'
-                                    i++
-                                } else if (source[i] == '"') {
-                                    out[i] = '"'
-                                    i++
-                                    while (i < n) {
-                                        if (source[i] == '\\' && i + 1 < n) {
-                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
-                                        }
-                                        if (source[i] == '"') {
-                                            out[i] = '"'; i++; break
-                                        }
-                                        if (source[i] == '\n') {
-                                            out[i] = '\n'; i++; break
-                                        }
-                                        writeSpaceOrNewline(i)
-                                        i++
-                                    }
-                                } else {
-                                    out[i] = source[i]
-                                    i++
-                                }
-                            }
-                            continue
-                        }
-                        if (source[i] == '"') {
-                            out[i] = '"'
-                            i++
-                            break
-                        }
-                        if (!isRust && source[i] == '\n') {
-                            out[i] = '\n'
-                            i++
-                            break
-                        }
-                        writeSpaceOrNewline(i)
-                        i++
-                    }
-                    continue
-                }
-
-                // Single-quoted string or char literal (in Rust, avoid eating lifetimes like `'a`)
-                if (c == '\'') {
-                    if (isRust) {
-                        if (i + 2 < n && source[i + 1] != '\\' && source[i + 2] == '\'') {
-                            out[i] = '\''
-                            out[i + 1] = ' '
-                            out[i + 2] = '\''
-                            i += 3
-                            continue
-                        } else if (i + 3 < n && source[i + 1] == '\\' && source[i + 3] == '\'') {
-                            out[i] = '\''
-                            out[i + 1] = ' '
-                            out[i + 2] = ' '
-                            out[i + 3] = '\''
-                            i += 4
-                            continue
-                        } else {
-                            out[i] = c
-                            i++
-                            continue
-                        }
-                    } else {
-                        out[i] = '\''
-                        i++
-                        while (i < n) {
-                            if (source[i] == '\\' && i + 1 < n) {
-                                writeSpaceOrNewline(i)
-                                writeSpaceOrNewline(i + 1)
-                                i += 2
-                                continue
-                            }
-                            if (source[i] == '\'') {
-                                out[i] = '\''
-                                i++
-                                break
-                            }
-                            if (source[i] == '\n') {
-                                out[i] = '\n'
-                                i++
-                                break
-                            }
-                            writeSpaceOrNewline(i)
-                            i++
-                        }
-                        continue
-                    }
-                }
-
-                // Backtick template literal in JS/TS
-                if (isTsJs && c == '`') {
-                    out[i] = '`'
-                    i++
-                    while (i < n) {
-                        if (source[i] == '\\' && i + 1 < n) {
-                            writeSpaceOrNewline(i)
-                            writeSpaceOrNewline(i + 1)
-                            i += 2
-                            continue
-                        }
-                        if (source[i] == '$' && i + 1 < n && source[i + 1] == '{') {
-                            out[i] = ' '
-                            out[i + 1] = ' '
-                            i += 2
-                            var depth = 1
-                            while (i < n && depth > 0) {
-                                if (source[i] == '{') {
-                                    depth++
-                                    out[i] = '{'
-                                    i++
-                                } else if (source[i] == '}') {
-                                    depth--
-                                    if (depth == 0) out[i] = ' ' else out[i] = '}'
-                                    i++
-                                } else if (source[i] == '"' || source[i] == '\'') {
-                                    val strQuote = source[i]
-                                    out[i] = strQuote
-                                    i++
-                                    while (i < n) {
-                                        if (source[i] == '\\' && i + 1 < n) {
-                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
-                                        }
-                                        if (source[i] == strQuote) {
-                                            out[i] = strQuote; i++; break
-                                        }
-                                        if (source[i] == '\n') {
-                                            out[i] = '\n'; i++; break
-                                        }
-                                        writeSpaceOrNewline(i)
-                                        i++
-                                    }
-                                } else if (source[i] == '`') {
-                                    out[i] = '`'
-                                    i++
-                                    var innerDepth = 0
-                                    while (i < n) {
-                                        if (source[i] == '\\' && i + 1 < n) {
-                                            writeSpaceOrNewline(i); writeSpaceOrNewline(i + 1); i += 2; continue
-                                        }
-                                        if (source[i] == '$' && i + 1 < n && source[i + 1] == '{') {
-                                            out[i] = ' '; out[i + 1] = ' '; i += 2
-                                            innerDepth++
-                                            while (i < n && innerDepth > 0) {
-                                                if (source[i] == '{') { innerDepth++; out[i] = '{'; i++ }
-                                                else if (source[i] == '}') { innerDepth--; out[i] = if (innerDepth == 0) ' ' else '}'; i++ }
-                                                else { out[i] = source[i]; i++ }
-                                            }
-                                            continue
-                                        }
-                                        if (source[i] == '`') {
-                                            out[i] = '`'; i++; break
-                                        }
-                                        writeSpaceOrNewline(i)
-                                        i++
-                                    }
-                                } else {
-                                    out[i] = source[i]
-                                    i++
-                                }
-                            }
-                            continue
-                        }
-                        if (source[i] == '`') {
-                            out[i] = '`'
-                            i++
-                            break
-                        }
-                        writeSpaceOrNewline(i)
-                        i++
-                    }
-                    continue
-                }
-
-                out[i] = c
-                i++
+        private fun maskComment(state: MaskState): Boolean {
+            val c = state.source[state.i]
+            if (state.isPy && c == '#') {
+                maskLineCommentToNewline(state)
+                return true
             }
-            return out.concatToString()
+            if (!state.isPy && c == '/' && state.i + 1 < state.n) {
+                val next = state.source[state.i + 1]
+                if (next == '/') {
+                    maskLineCommentToNewline(state)
+                    return true
+                }
+                if (next == '*') {
+                    maskCStyleBlockComment(state)
+                    return true
+                }
+            }
+            return false
+        }
+
+        private fun maskLineCommentToNewline(state: MaskState) {
+            while (state.i < state.n && state.source[state.i] != '\n') {
+                state.out[state.i] = ' '
+                state.i++
+            }
+        }
+
+        private fun maskCStyleBlockComment(state: MaskState) {
+            state.out[state.i] = ' '
+            state.out[state.i + 1] = ' '
+            state.i += 2
+            while (state.i < state.n) {
+                if (state.source[state.i] == '*' && state.i + 1 < state.n && state.source[state.i + 1] == '/') {
+                    state.out[state.i] = ' '
+                    state.out[state.i + 1] = ' '
+                    state.i += 2
+                    return
+                }
+                state.writeSpaceOrNewline(state.i)
+                state.i++
+            }
+        }
+
+        private fun isTripleQuoteStart(state: MaskState, c: Char): Boolean {
+            if (state.i + 2 >= state.n) return false
+            val c1 = state.source[state.i + 1]
+            val c2 = state.source[state.i + 2]
+            if (c == '"' && c1 == '"' && c2 == '"') return true
+            return state.isPy && c == '\'' && c1 == '\'' && c2 == '\''
+        }
+
+        private fun isTripleQuoteEnd(state: MaskState, delim: Char): Boolean {
+            val idx = state.i
+            if (idx + 2 >= state.n) return false
+            val src = state.source
+            return src[idx] == delim && src[idx + 1] == delim && src[idx + 2] == delim
+        }
+
+        private fun isKotlinInterpolationStart(state: MaskState, delim: Char): Boolean {
+            if (!state.isKotlin || delim != '"') return false
+            val idx = state.i
+            return idx + 1 < state.n && state.source[idx] == '$' && state.source[idx + 1] == '{'
+        }
+
+        private fun isSwiftInterpolationStart(state: MaskState, delim: Char): Boolean {
+            if (!state.isSwift || delim != '"') return false
+            val idx = state.i
+            return idx + 1 < state.n && state.source[idx] == '\\' && state.source[idx + 1] == '('
+        }
+
+        private fun maskTripleQuotedString(state: MaskState): Boolean {
+            val c = state.source[state.i]
+            if (!isTripleQuoteStart(state, c)) return false
+
+            val delim = c
+            state.out[state.i] = delim
+            state.out[state.i + 1] = ' '
+            state.out[state.i + 2] = ' '
+            state.i += 3
+
+            while (state.i < state.n) {
+                if (isTripleQuoteEnd(state, delim)) {
+                    state.out[state.i] = ' '
+                    state.out[state.i + 1] = ' '
+                    state.out[state.i + 2] = delim
+                    state.i += 3
+                    return true
+                }
+                if (isKotlinInterpolationStart(state, delim)) {
+                    maskKotlinInterpolation(state)
+                } else if (isSwiftInterpolationStart(state, delim)) {
+                    maskSwiftInterpolation(state)
+                } else {
+                    state.writeSpaceOrNewline(state.i)
+                    state.i++
+                }
+            }
+            return true
+        }
+
+        private fun maskDoubleQuotedString(state: MaskState): Boolean {
+            if (state.source[state.i] != '"') return false
+            state.out[state.i] = '"'
+            state.i++
+            while (state.i < state.n) {
+                if (stepDoubleQuotedChar(state, state.source[state.i])) {
+                    return true
+                }
+            }
+            return true
+        }
+
+        private fun stepDoubleQuotedChar(state: MaskState, ch: Char): Boolean {
+            if (isSwiftInterpolationStart(state, '"')) {
+                maskSwiftInterpolation(state)
+                return false
+            }
+            if (ch == '\\' && state.i + 1 < state.n) {
+                state.writeSpaceOrNewline(state.i)
+                state.writeSpaceOrNewline(state.i + 1)
+                state.i += 2
+                return false
+            }
+            if (isKotlinInterpolationStart(state, '"')) {
+                maskKotlinInterpolation(state)
+                return false
+            }
+            if (ch == '"') {
+                state.out[state.i] = '"'
+                state.i++
+                return true
+            }
+            if (!state.isRust && ch == '\n') {
+                state.out[state.i] = '\n'
+                state.i++
+                return true
+            }
+            state.writeSpaceOrNewline(state.i)
+            state.i++
+            return false
+        }
+
+        private fun maskSingleQuotedString(state: MaskState): Boolean {
+            if (state.source[state.i] != '\'') return false
+            if (state.isRust) {
+                return maskRustCharOrLifetime(state)
+            }
+            state.out[state.i] = '\''
+            state.i++
+            while (state.i < state.n) {
+                val ch = state.source[state.i]
+                if (ch == '\\' && state.i + 1 < state.n) {
+                    state.writeSpaceOrNewline(state.i)
+                    state.writeSpaceOrNewline(state.i + 1)
+                    state.i += 2
+                } else if (ch == '\'') {
+                    state.out[state.i] = '\''
+                    state.i++
+                    return true
+                } else if (ch == '\n') {
+                    state.out[state.i] = '\n'
+                    state.i++
+                    return true
+                } else {
+                    state.writeSpaceOrNewline(state.i)
+                    state.i++
+                }
+            }
+            return true
+        }
+
+        private fun maskRustCharOrLifetime(state: MaskState): Boolean {
+            val idx = state.i
+            val len = state.n
+            val src = state.source
+            if (idx + 2 < len && src[idx + 1] != '\\' && src[idx + 2] == '\'') {
+                state.out[idx] = '\''
+                state.out[idx + 1] = ' '
+                state.out[idx + 2] = '\''
+                state.i += 3
+                return true
+            }
+            if (idx + 3 < len && src[idx + 1] == '\\' && src[idx + 3] == '\'') {
+                state.out[idx] = '\''
+                state.out[idx + 1] = ' '
+                state.out[idx + 2] = ' '
+                state.out[idx + 3] = '\''
+                state.i += 4
+                return true
+            }
+            state.out[idx] = src[idx]
+            state.i++
+            return true
+        }
+
+        private fun maskJsTemplateLiteral(state: MaskState): Boolean {
+            if (!state.isTsJs || state.source[state.i] != '`') return false
+            state.out[state.i] = '`'
+            state.i++
+            while (state.i < state.n) {
+                val ch = state.source[state.i]
+                if (ch == '\\' && state.i + 1 < state.n) {
+                    state.writeSpaceOrNewline(state.i)
+                    state.writeSpaceOrNewline(state.i + 1)
+                    state.i += 2
+                } else if (ch == '$' && state.i + 1 < state.n && state.source[state.i + 1] == '{') {
+                    maskJsTemplateInterpolation(state)
+                } else if (ch == '`') {
+                    state.out[state.i] = '`'
+                    state.i++
+                    return true
+                } else {
+                    state.writeSpaceOrNewline(state.i)
+                    state.i++
+                }
+            }
+            return true
+        }
+
+        private fun maskJsTemplateInterpolation(state: MaskState) {
+            state.out[state.i] = ' '
+            state.out[state.i + 1] = ' '
+            state.i += 2
+            var depth = 1
+            while (state.i < state.n && depth > 0) {
+                depth = handleJsInterpolatedChar(state, state.source[state.i], depth)
+            }
+        }
+
+        private fun handleJsInterpolatedChar(state: MaskState, ch: Char, depth: Int): Int {
+            if (ch == '{') {
+                state.out[state.i] = '{'
+                state.i++
+                return depth + 1
+            }
+            if (ch == '}') {
+                val nextDepth = depth - 1
+                state.out[state.i] = if (nextDepth == 0) ' ' else '}'
+                state.i++
+                return nextDepth
+            }
+            dispatchJsInterpolatedToken(state, ch)
+            return depth
+        }
+
+        private fun dispatchJsInterpolatedToken(state: MaskState, ch: Char) {
+            if (ch == '"' || ch == '\'') {
+                maskJsInterpolatedQuote(state, ch)
+            } else if (ch == '`') {
+                maskJsNestedTemplate(state)
+            } else {
+                state.out[state.i] = ch
+                state.i++
+            }
+        }
+
+        private fun maskJsInterpolatedQuote(state: MaskState, strQuote: Char) {
+            state.out[state.i] = strQuote
+            state.i++
+            while (state.i < state.n) {
+                val ch = state.source[state.i]
+                if (ch == '\\' && state.i + 1 < state.n) {
+                    state.writeSpaceOrNewline(state.i)
+                    state.writeSpaceOrNewline(state.i + 1)
+                    state.i += 2
+                } else if (ch == strQuote) {
+                    state.out[state.i] = strQuote
+                    state.i++
+                    return
+                } else if (ch == '\n') {
+                    state.out[state.i] = '\n'
+                    state.i++
+                    return
+                } else {
+                    state.writeSpaceOrNewline(state.i)
+                    state.i++
+                }
+            }
+        }
+
+        private fun maskJsNestedTemplate(state: MaskState) {
+            state.out[state.i] = '`'
+            state.i++
+            while (state.i < state.n) {
+                val ch = state.source[state.i]
+                if (ch == '\\' && state.i + 1 < state.n) {
+                    state.writeSpaceOrNewline(state.i)
+                    state.writeSpaceOrNewline(state.i + 1)
+                    state.i += 2
+                } else if (ch == '$' && state.i + 1 < state.n && state.source[state.i + 1] == '{') {
+                    state.out[state.i] = ' '
+                    state.out[state.i + 1] = ' '
+                    state.i += 2
+                    maskJsInterpolationBraces(state)
+                } else if (ch == '`') {
+                    state.out[state.i] = '`'
+                    state.i++
+                    return
+                } else {
+                    state.writeSpaceOrNewline(state.i)
+                    state.i++
+                }
+            }
+        }
+
+        private fun maskJsInterpolationBraces(state: MaskState) {
+            var innerDepth = 1
+            while (state.i < state.n && innerDepth > 0) {
+                val ch = state.source[state.i]
+                if (ch == '{') {
+                    innerDepth++
+                    state.out[state.i] = '{'
+                    state.i++
+                } else if (ch == '}') {
+                    innerDepth--
+                    state.out[state.i] = if (innerDepth == 0) ' ' else '}'
+                    state.i++
+                } else {
+                    state.out[state.i] = ch
+                    state.i++
+                }
+            }
+        }
+
+        private fun stepKotlinInterpolation(state: MaskState, ch: Char, depth: Int): Int {
+            if (ch == '{') {
+                state.out[state.i] = '{'
+                state.i++
+                return depth + 1
+            }
+            if (ch == '}') {
+                val nextDepth = depth - 1
+                state.out[state.i] = if (nextDepth == 0) ' ' else '}'
+                state.i++
+                return nextDepth
+            }
+            if (ch == '"') {
+                maskInterpolatedDoubleQuote(state)
+                return depth
+            }
+            state.out[state.i] = ch
+            state.i++
+            return depth
+        }
+
+        private fun maskKotlinInterpolation(state: MaskState) {
+            state.out[state.i] = ' '
+            state.out[state.i + 1] = ' '
+            state.i += 2
+            var depth = 1
+            while (state.i < state.n && depth > 0) {
+                depth = stepKotlinInterpolation(state, state.source[state.i], depth)
+            }
+        }
+
+        private fun stepSwiftInterpolation(state: MaskState, ch: Char, depth: Int): Int {
+            if (ch == '(') {
+                state.out[state.i] = '('
+                state.i++
+                return depth + 1
+            }
+            if (ch == ')') {
+                val nextDepth = depth - 1
+                state.out[state.i] = if (nextDepth == 0) ' ' else ')'
+                state.i++
+                return nextDepth
+            }
+            if (ch == '"') {
+                maskInterpolatedDoubleQuote(state)
+                return depth
+            }
+            state.out[state.i] = ch
+            state.i++
+            return depth
+        }
+
+        private fun maskSwiftInterpolation(state: MaskState) {
+            state.out[state.i] = ' '
+            state.out[state.i + 1] = ' '
+            state.i += 2
+            var depth = 1
+            while (state.i < state.n && depth > 0) {
+                depth = stepSwiftInterpolation(state, state.source[state.i], depth)
+            }
+        }
+
+        private fun maskInterpolatedDoubleQuote(state: MaskState) {
+            state.out[state.i] = '"'
+            state.i++
+            while (state.i < state.n) {
+                val ch = state.source[state.i]
+                if (ch == '\\' && state.i + 1 < state.n) {
+                    state.writeSpaceOrNewline(state.i)
+                    state.writeSpaceOrNewline(state.i + 1)
+                    state.i += 2
+                } else if (ch == '"') {
+                    state.out[state.i] = '"'
+                    state.i++
+                    return
+                } else if (ch == '\n') {
+                    state.out[state.i] = '\n'
+                    state.i++
+                    return
+                } else {
+                    state.writeSpaceOrNewline(state.i)
+                    state.i++
+                }
+            }
         }
 
         private fun dispatchLanguageExtraction(
