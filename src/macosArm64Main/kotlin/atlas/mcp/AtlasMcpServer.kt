@@ -29,6 +29,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
@@ -1620,210 +1621,198 @@ class AtlasMcpServer(
         }
     }
 
+    private class JsonRpcException(
+        val code: Int,
+        override val message: String,
+        val id: JsonPrimitive? = null
+    ) : Exception(message)
+
+    private class JsonRpcRequest(
+        val id: JsonPrimitive?,
+        val hasId: Boolean,
+        val method: String,
+        val params: JsonObject
+    )
+
+    private fun jsonRpcError(id: JsonPrimitive?, code: Int, message: String): String {
+        return json.encodeToString(buildJsonObject {
+            put("jsonrpc", "2.0")
+            put("id", id ?: JsonNull)
+            putJsonObject("error") {
+                put("code", code)
+                put("message", message)
+            }
+        })
+    }
+
+    private fun jsonRpcResult(id: JsonPrimitive?, resultBuilder: JsonObjectBuilder.() -> Unit): JsonObject {
+        return buildJsonObject {
+            put("jsonrpc", "2.0")
+            put("id", id ?: JsonNull)
+            putJsonObject("result", resultBuilder)
+        }
+    }
+
+    private fun validateReqId(req: JsonObject): Pair<JsonPrimitive?, Boolean> {
+        val rawId = req["id"]
+        val hasId = req.containsKey("id")
+        if (hasId && rawId !is JsonPrimitive) {
+            throw JsonRpcException(-32600, "Invalid Request: 'id' must be a primitive string, number, or null")
+        }
+        return Pair(rawId as? JsonPrimitive, hasId)
+    }
+
+    private fun extractMethod(req: JsonObject, hasId: Boolean, reqId: JsonPrimitive?): String? {
+        val methodPrimitive = req["method"] as? JsonPrimitive
+        if (methodPrimitive != null && methodPrimitive.isString) {
+            return methodPrimitive.content
+        }
+        if (!hasId) return null
+        throw JsonRpcException(-32600, "Invalid Request: 'method' must be a string", reqId)
+    }
+
+    private fun extractParams(req: JsonObject, hasId: Boolean, reqId: JsonPrimitive?): JsonObject? {
+        val params = req["params"] ?: return buildJsonObject {}
+        if (params is JsonObject) return params
+        if (!hasId) return null
+        throw JsonRpcException(-32602, "Invalid params: 'params' must be an object", reqId)
+    }
+
+    private fun parseJsonRpcRequest(trimmed: String): JsonRpcRequest? {
+        val reqElement = try {
+            json.parseToJsonElement(trimmed)
+        } catch (_: Throwable) {
+            throw JsonRpcException(-32700, "Parse error")
+        }
+        val req = reqElement as? JsonObject
+            ?: throw JsonRpcException(-32600, "Invalid Request: expected JSON object")
+
+        val (reqId, hasId) = validateReqId(req)
+        val method = extractMethod(req, hasId, reqId) ?: return null
+        val params = extractParams(req, hasId, reqId) ?: return null
+
+        return JsonRpcRequest(reqId, hasId, method, params)
+    }
+
+    private fun handleInitialize(reqId: JsonPrimitive?): JsonObject {
+        return jsonRpcResult(reqId) {
+            put("protocolVersion", "2024-11-05")
+            putJsonObject("capabilities") {
+                putJsonObject("tools") {}
+            }
+            putJsonObject("serverInfo") {
+                put("name", "atlas")
+                put("version", "0.6.1")
+            }
+        }
+    }
+
+    private fun handleToolsList(reqId: JsonPrimitive?): JsonObject {
+        return jsonRpcResult(reqId) {
+            put("tools", json.encodeToJsonElement(toolDefinitions()))
+        }
+    }
+
+    private fun buildToolCallSuccess(reqId: JsonPrimitive?, out: JsonObject): JsonObject {
+        val isToolErr = out.containsKey("error")
+        return jsonRpcResult(reqId) {
+            putJsonArray("content") {
+                addJsonObject {
+                    put("type", "text")
+                    val rawText = out["text"]?.jsonPrimitive?.contentOrNull
+                    put("text", rawText ?: json.encodeToString(out))
+                }
+            }
+            if (isToolErr) {
+                put("isError", true)
+            }
+        }
+    }
+
+    private fun buildToolCallFailure(reqId: JsonPrimitive?, e: Throwable): JsonObject {
+        return jsonRpcResult(reqId) {
+            putJsonArray("content") {
+                addJsonObject {
+                    put("type", "text")
+                    put("text", json.encodeToString(buildJsonObject {
+                        put("error", e.message ?: "Unknown error")
+                    }))
+                }
+            }
+            put("isError", true)
+        }
+    }
+
+    private fun extractToolName(params: JsonObject): String? {
+        val primitive = params["name"] as? JsonPrimitive
+        return if (primitive != null && primitive.isString) primitive.content else null
+    }
+
+    private fun extractToolArgs(params: JsonObject): Pair<JsonObject?, Boolean> {
+        val args = params["arguments"] ?: return Pair(buildJsonObject {}, true)
+        val obj = args as? JsonObject
+        return Pair(obj, obj != null)
+    }
+
+    private fun executeToolCall(tName: String, tArgs: JsonObject, reqId: JsonPrimitive?): String {
+        return try {
+            val out = callTool(tName, tArgs)
+            json.encodeToString(buildToolCallSuccess(reqId, out))
+        } catch (e: Throwable) {
+            json.encodeToString(buildToolCallFailure(reqId, e))
+        }
+    }
+
+    private fun handleToolsCall(reqId: JsonPrimitive?, params: JsonObject, hasId: Boolean): String? {
+        val tName = extractToolName(params)
+        if (tName == null) {
+            if (!hasId) return null
+            return jsonRpcError(reqId, -32602, "Invalid params: 'name' must be a string")
+        }
+
+        val (tArgs, isValidArgs) = extractToolArgs(params)
+        if (!isValidArgs || tArgs == null) {
+            if (!hasId) return null
+            return jsonRpcError(reqId, -32602, "Invalid params: 'arguments' must be an object")
+        }
+
+        if (!hasId) {
+            try { callTool(tName, tArgs) } catch (_: Throwable) {}
+            return null
+        }
+
+        return executeToolCall(tName, tArgs, reqId)
+    }
+
+    private fun dispatchJsonRpcMethod(req: JsonRpcRequest): String? {
+        if (!req.hasId) {
+            if (req.method == "tools/call") {
+                handleToolsCall(null, req.params, hasId = false)
+            }
+            return null
+        }
+
+        return when (req.method) {
+            "initialize" -> json.encodeToString(handleInitialize(req.id))
+            "ping" -> json.encodeToString(jsonRpcResult(req.id) {})
+            "notifications/initialized", "notifications/cancelled" -> null
+            "tools/list" -> json.encodeToString(handleToolsList(req.id))
+            "tools/call" -> handleToolsCall(req.id, req.params, hasId = true)
+            else -> jsonRpcError(req.id, -32601, "Method not found: ${req.method}")
+        }
+    }
+
     fun processJsonRpcMessage(line: String): String? {
         val trimmed = line.trim()
         if (trimmed.isEmpty()) return null
 
         return try {
-            val reqElement = try {
-                json.parseToJsonElement(trimmed)
-            } catch (_: Throwable) {
-                return json.encodeToString(buildJsonObject {
-                    put("jsonrpc", "2.0")
-                    put("id", JsonNull)
-                    putJsonObject("error") {
-                        put("code", -32700)
-                        put("message", "Parse error")
-                    }
-                })
-            }
-
-            val req = reqElement as? JsonObject
-            if (req == null) {
-                return json.encodeToString(buildJsonObject {
-                    put("jsonrpc", "2.0")
-                    put("id", JsonNull)
-                    putJsonObject("error") {
-                        put("code", -32600)
-                        put("message", "Invalid Request: expected JSON object")
-                    }
-                })
-            }
-
-            val rawId = req["id"]
-            val hasId = req.containsKey("id")
-            if (hasId && rawId !is JsonPrimitive) {
-                return json.encodeToString(buildJsonObject {
-                    put("jsonrpc", "2.0")
-                    put("id", JsonNull)
-                    putJsonObject("error") {
-                        put("code", -32600)
-                        put("message", "Invalid Request: 'id' must be a primitive string, number, or null")
-                    }
-                })
-            }
-            val reqId = if (rawId is JsonPrimitive) rawId else null
-
-            val methodElement = req["method"]
-            val methodPrimitive = methodElement as? JsonPrimitive
-            if (methodPrimitive == null || !methodPrimitive.isString) {
-                if (!hasId) return null
-                return json.encodeToString(buildJsonObject {
-                    put("jsonrpc", "2.0")
-                    put("id", reqId ?: JsonNull)
-                    putJsonObject("error") {
-                        put("code", -32600)
-                        put("message", "Invalid Request: 'method' must be a string")
-                    }
-                })
-            }
-            val method = methodPrimitive.content
-
-            val paramsElement = req["params"]
-            if (paramsElement != null && paramsElement !is JsonObject) {
-                if (!hasId) return null
-                return json.encodeToString(buildJsonObject {
-                    put("jsonrpc", "2.0")
-                    put("id", reqId ?: JsonNull)
-                    putJsonObject("error") {
-                        put("code", -32602)
-                        put("message", "Invalid params: 'params' must be an object")
-                    }
-                })
-            }
-            val params = paramsElement ?: buildJsonObject {}
-
-            val resp = when (method) {
-                "initialize" -> {
-                    if (!hasId) null
-                    else buildJsonObject {
-                        put("jsonrpc", "2.0")
-                        put("id", reqId ?: JsonNull)
-                        putJsonObject("result") {
-                            put("protocolVersion", "2024-11-05")
-                            putJsonObject("capabilities") {
-                                putJsonObject("tools") {}
-                            }
-                            putJsonObject("serverInfo") {
-                                put("name", "atlas")
-                                put("version", "0.6.1")
-                            }
-                        }
-                    }
-                }
-                "ping" -> {
-                    if (!hasId) null
-                    else buildJsonObject {
-                        put("jsonrpc", "2.0")
-                        put("id", reqId ?: JsonNull)
-                        putJsonObject("result") {}
-                    }
-                }
-                "notifications/initialized", "notifications/cancelled" -> null
-                "tools/list" -> {
-                    if (!hasId) null
-                    else buildJsonObject {
-                        put("jsonrpc", "2.0")
-                        put("id", reqId ?: JsonNull)
-                        putJsonObject("result") {
-                            put("tools", json.encodeToJsonElement(toolDefinitions()))
-                        }
-                    }
-                }
-                "tools/call" -> {
-                    val nameElement = params["name"]
-                    val namePrimitive = nameElement as? JsonPrimitive
-                    if (namePrimitive == null || !namePrimitive.isString) {
-                        if (!hasId) return null
-                        return json.encodeToString(buildJsonObject {
-                            put("jsonrpc", "2.0")
-                            put("id", reqId ?: JsonNull)
-                            putJsonObject("error") {
-                                put("code", -32602)
-                                put("message", "Invalid params: 'name' must be a string")
-                            }
-                        })
-                    }
-                    val tName = namePrimitive.content
-
-                    val argsElement = params["arguments"]
-                    if (argsElement != null && argsElement !is JsonObject) {
-                        if (!hasId) return null
-                        return json.encodeToString(buildJsonObject {
-                            put("jsonrpc", "2.0")
-                            put("id", reqId ?: JsonNull)
-                            putJsonObject("error") {
-                                put("code", -32602)
-                                put("message", "Invalid params: 'arguments' must be an object")
-                            }
-                        })
-                    }
-                    val tArgs = argsElement ?: buildJsonObject {}
-
-                    try {
-                        val out = callTool(tName, tArgs)
-                        if (!hasId) null
-                        else {
-                            val isToolErr = out.containsKey("error")
-                            buildJsonObject {
-                                put("jsonrpc", "2.0")
-                                put("id", reqId ?: JsonNull)
-                                putJsonObject("result") {
-                                    putJsonArray("content") {
-                                        addJsonObject {
-                                            put("type", "text")
-                                            val rawText = out["text"]?.jsonPrimitive?.contentOrNull
-                                            put("text", rawText ?: json.encodeToString(out))
-                                        }
-                                    }
-                                    if (isToolErr) {
-                                        put("isError", true)
-                                    }
-                                }
-                            }
-                        }
-                    } catch (e: Throwable) {
-                        if (!hasId) null
-                        else buildJsonObject {
-                            put("jsonrpc", "2.0")
-                            put("id", reqId ?: JsonNull)
-                            putJsonObject("result") {
-                                putJsonArray("content") {
-                                    addJsonObject {
-                                        put("type", "text")
-                                        put("text", json.encodeToString(buildJsonObject {
-                                            put("error", e.message ?: "Unknown error")
-                                        }))
-                                    }
-                                }
-                                put("isError", true)
-                            }
-                        }
-                    }
-                }
-                else -> {
-                    if (!hasId) return null
-                    buildJsonObject {
-                        put("jsonrpc", "2.0")
-                        put("id", reqId ?: JsonNull)
-                        putJsonObject("error") {
-                            put("code", -32601)
-                            put("message", "Method not found: $method")
-                        }
-                    }
-                }
-            }
-
-            if (!hasId || resp == null) null else json.encodeToString(resp)
+            val req = parseJsonRpcRequest(trimmed) ?: return null
+            dispatchJsonRpcMethod(req)
+        } catch (e: JsonRpcException) {
+            jsonRpcError(e.id, e.code, e.message)
         } catch (e: Throwable) {
-            json.encodeToString(buildJsonObject {
-                put("jsonrpc", "2.0")
-                put("id", JsonNull)
-                putJsonObject("error") {
-                    put("code", -32603)
-                    put("message", "Internal error: ${e.message ?: "Unexpected error"}")
-                }
-            })
+            jsonRpcError(null, -32603, "Internal error: ${e.message ?: "Unexpected error"}")
         }
     }
 
