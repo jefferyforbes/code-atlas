@@ -352,63 +352,71 @@ class FigmaSnapshotExtractor {
         }
     }
 
+    private fun resolveFallbackSizing(
+        align: String?,
+        primarySizing: String?,
+        counterSizing: String?,
+        layoutMode: String,
+        targetMode: String,
+        counterMode: String
+    ): String = when {
+        align == "STRETCH" && layoutMode == counterMode -> "FILL"
+        layoutMode == targetMode && primarySizing == "AUTO" -> "HUG"
+        layoutMode == counterMode && counterSizing == "AUTO" -> "HUG"
+        else -> "FIXED"
+    }
+
+    private fun extractLayoutSizing(
+        nodeObj: JsonObject,
+        primaryKey: String,
+        aliasKey: String,
+        layoutMode: String,
+        targetMode: String,
+        counterMode: String
+    ): String {
+        val explicit = nodeObj[primaryKey].asString()?.uppercase()
+            ?: nodeObj[aliasKey].asString()?.uppercase()
+        if (explicit != null) {
+            return if (explicit in VALID_SIZINGS) explicit else "FIXED"
+        }
+        val align = nodeObj["layoutAlign"].asString()?.uppercase()
+        val primarySizing = nodeObj["primaryAxisSizingMode"].asString()?.uppercase()
+        val counterSizing = nodeObj["counterAxisSizingMode"].asString()?.uppercase()
+        val fallback = resolveFallbackSizing(align, primarySizing, counterSizing, layoutMode, targetMode, counterMode)
+        return if (fallback in VALID_SIZINGS) fallback else "FIXED"
+    }
+
+    private fun extractSidePadding(
+        nodeObj: JsonObject,
+        sideKey: String,
+        axisFallback: Double?,
+        allFallback: Double
+    ): Double = nodeObj[sideKey].asDouble() ?: axisFallback ?: allFallback
+
     private fun extractAutoLayout(nodeObj: JsonObject): AutoLayoutFlex {
         val layoutMode = nodeObj["layoutMode"].asString()?.uppercase() ?: "NONE"
-
-        var sizingH = nodeObj["layoutSizingHorizontal"].asString()?.uppercase()
-            ?: nodeObj["sizingHorizontal"].asString()?.uppercase()
-        if (sizingH == null) {
-            val align = nodeObj["layoutAlign"].asString()?.uppercase()
-            val primarySizing = nodeObj["primaryAxisSizingMode"].asString()?.uppercase()
-            val counterSizing = nodeObj["counterAxisSizingMode"].asString()?.uppercase()
-            sizingH = when {
-                align == "STRETCH" && layoutMode == "VERTICAL" -> "FILL"
-                layoutMode == "HORIZONTAL" && primarySizing == "AUTO" -> "HUG"
-                layoutMode == "VERTICAL" && counterSizing == "AUTO" -> "HUG"
-                else -> "FIXED"
-            }
-        }
-        if (sizingH !in VALID_SIZINGS) sizingH = "FIXED"
-
-        var sizingV = nodeObj["layoutSizingVertical"].asString()?.uppercase()
-            ?: nodeObj["sizingVertical"].asString()?.uppercase()
-        if (sizingV == null) {
-            val align = nodeObj["layoutAlign"].asString()?.uppercase()
-            val primarySizing = nodeObj["primaryAxisSizingMode"].asString()?.uppercase()
-            val counterSizing = nodeObj["counterAxisSizingMode"].asString()?.uppercase()
-            sizingV = when {
-                align == "STRETCH" && layoutMode == "HORIZONTAL" -> "FILL"
-                layoutMode == "VERTICAL" && primarySizing == "AUTO" -> "HUG"
-                layoutMode == "HORIZONTAL" && counterSizing == "AUTO" -> "HUG"
-                else -> "FIXED"
-            }
-        }
-        if (sizingV !in VALID_SIZINGS) sizingV = "FIXED"
-
+        val sizingH = extractLayoutSizing(
+            nodeObj, "layoutSizingHorizontal", "sizingHorizontal", layoutMode, "HORIZONTAL", "VERTICAL"
+        )
+        val sizingV = extractLayoutSizing(
+            nodeObj, "layoutSizingVertical", "sizingVertical", layoutMode, "VERTICAL", "HORIZONTAL"
+        )
         val textAutoResize = nodeObj["textAutoResize"].asString()?.uppercase() ?: "NONE"
 
-        val padH = nodeObj["horizontalPadding"].asDouble()
-            ?: nodeObj["paddingHorizontal"].asDouble()
-        val padV = nodeObj["verticalPadding"].asDouble()
-            ?: nodeObj["paddingVertical"].asDouble()
+        val padH = nodeObj["horizontalPadding"].asDouble() ?: nodeObj["paddingHorizontal"].asDouble()
+        val padV = nodeObj["verticalPadding"].asDouble() ?: nodeObj["paddingVertical"].asDouble()
         val padAll = nodeObj["padding"].asDouble() ?: 0.0
-
-        val paddingLeft = nodeObj["paddingLeft"].asDouble() ?: padH ?: padAll
-        val paddingRight = nodeObj["paddingRight"].asDouble() ?: padH ?: padAll
-        val paddingTop = nodeObj["paddingTop"].asDouble() ?: padV ?: padAll
-        val paddingBottom = nodeObj["paddingBottom"].asDouble() ?: padV ?: padAll
-        val itemSpacing = nodeObj["itemSpacing"].asDouble() ?: 0.0
 
         return AutoLayoutFlex(
             layoutMode = layoutMode,
             sizingHorizontal = sizingH,
             sizingVertical = sizingV,
             textAutoResize = textAutoResize,
-            paddingLeft = paddingLeft,
-            paddingRight = paddingRight,
-            paddingTop = paddingTop,
-            paddingBottom = paddingBottom,
-            itemSpacing = itemSpacing
+            paddingLeft = extractSidePadding(nodeObj, "paddingLeft", padH, padAll),
+            paddingRight = extractSidePadding(nodeObj, "paddingRight", padH, padAll),
+            paddingTop = extractSidePadding(nodeObj, "paddingTop", padV, padAll),
+            paddingBottom = extractSidePadding(nodeObj, "paddingBottom", padV, padAll),
+            itemSpacing = nodeObj["itemSpacing"].asDouble() ?: 0.0
         )
     }
 
