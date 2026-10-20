@@ -71,26 +71,8 @@ class WorkspaceIndexer(
         return patterns
     }
 
-    fun indexWorkspace(
-        projectId: String,
-        subpaths: List<String>? = null,
-        stabilityConfigPath: String? = null,
-        forceComposeReindex: Boolean = false,
-        force: Boolean = false
-    ): JsonObject {
-        val root = PlatformFiles.canonicalPath(workspaceRoot)
-        val normalizedSubpaths = subpaths
-            ?.map { normalizeSubpath(it, root) }
-            ?.filter { it.isNotEmpty() }
-
-        val stabilityPatterns = discoverStabilityPatterns(root, stabilityConfigPath)
-        val (modNodes, modEdges, knownModules) = ModuleBoundaryDetector.extractModuleGraph(root, projectId)
-        val cachedFiles = store.getFileRecordsMap(projectId)
-        val filesWithRawEdges = store.filesWithRawSymbolEdges(projectId)
-        val storedVersion = store.getProjectMetadata(projectId, "extractor_version")
-        val versionMismatch = storedVersion != PolyglotAstExtractor.EXTRACTOR_VERSION
-        val effectiveForce = force || forceComposeReindex || versionMismatch
-
+    private class ScanCollector {
+        val validDiskFiles = mutableSetOf<String>()
         val changedNodes = mutableListOf<GraphNode>()
         val markdownQueue = mutableListOf<Pair<String, String>>()
         val unchangedMarkdownQueue = mutableListOf<Pair<String, String>>()
@@ -99,107 +81,168 @@ class WorkspaceIndexer(
         var codeFilesIndexed = 0
         var filesIndexed = 0
         var filesSkipped = 0
+    }
 
-        val allFiles = PlatformFiles.listFilesRecursively(root) { dirName ->
-            dirName in SKIP_DIRS || dirName.startsWith(".venv")
-        }
-        val validDiskFiles = mutableSetOf<String>()
-        for (filePath in allFiles) {
-            val relStr = filePath.removePrefix(root).removePrefix("/").replace('\\', '/')
-            val parts = relStr.split('/')
-            if (parts.any { it in SKIP_DIRS || it.startsWith(".venv") }) continue
+    private data class WorkspaceScanContext(
+        val root: String,
+        val projectId: String,
+        val normalizedSubpaths: List<String>?,
+        val effectiveForce: Boolean,
+        val knownModules: List<String>,
+        val cachedFiles: Map<String, Pair<String, Double>>,
+        val filesWithRawEdges: Set<String>
+    )
 
-            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
-                val matchesSubpath = normalizedSubpaths.any { cleanSp ->
-                    relStr == cleanSp || relStr.startsWith("$cleanSp/")
-                }
-                if (!matchesSubpath) continue
-            }
+    private fun isPathSkipped(relStr: String): Boolean {
+        val parts = relStr.split('/')
+        return parts.any { it in SKIP_DIRS || it.startsWith(".venv") }
+    }
 
-            val ext = if (relStr.contains('.')) "." + relStr.substringAfterLast('.') else ""
-            val lang = PolyglotAstExtractor.supportedLanguage(ext)
+    private fun matchesSubpaths(relStr: String, subpaths: List<String>?): Boolean {
+        if (subpaths.isNullOrEmpty()) return true
+        return subpaths.any { cleanSp -> relStr == cleanSp || relStr.startsWith("$cleanSp/") }
+    }
 
-            if (lang.isEmpty() && ext != ".md") continue
-
-            validDiskFiles.add(relStr)
-
-            val mtime = PlatformFiles.mtime(filePath)
-            val cached = cachedFiles[relStr]
-            val mtimeUnchanged = cached != null && abs(cached.second - mtime) < 1e-6
-            val rawBytes: ByteArray by lazy { PlatformFiles.readBytes(filePath) }
-            val sha256 = if (cached != null && abs(cached.second - mtime) < 1e-6) cached.first else Sha256.digest(rawBytes)
-            val isUnchanged = !effectiveForce && (mtimeUnchanged || (cached != null && cached.first == sha256))
-
-            if (ext == ".md") {
-                if (!isUnchanged) {
-                    val sourceText = rawBytes.decodeToString()
-                    markdownQueue.add(Pair(relStr, sourceText))
-                    store.upsertFileRecord(
-                        projectId = projectId,
-                        relPath = relStr,
-                        language = "markdown",
-                        moduleId = if (relStr.startsWith("plans/")) "plans" else "vault",
-                        sourceSet = "docs",
-                        semioticLayer = if (relStr.startsWith("plans/")) "syntactic" else "semantic",
-                        archLayer = "infrastructure",
-                        sha256 = sha256,
-                        mtime = mtime,
-                        loc = sourceText.lines().size,
-                        topLevelDeclCount = 1
-                    )
-                    filesIndexed++
-                } else {
-                    unchangedMarkdownQueue.add(Pair(relStr, filePath))
-                    filesSkipped++
-                }
-                continue
-            }
-
-            val fileId = "$projectId:$relStr"
-            if (isUnchanged && fileId in filesWithRawEdges) {
-                filesSkipped++
-                continue
-            }
-
+    private fun processMarkdownFile(
+        relStr: String,
+        filePath: String,
+        isUnchanged: Boolean,
+        sha256: String,
+        mtime: Double,
+        rawBytes: ByteArray,
+        projectId: String,
+        scan: ScanCollector
+    ) {
+        if (!isUnchanged) {
             val sourceText = rawBytes.decodeToString()
-            val (fNodes, fEdges, topDeclCount) = PolyglotAstExtractor.extractFile(
-                projectId, relStr, sourceText, knownModules
-            )
-            val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
-            val modId = ModuleBoundaryDetector.resolveModuleId(relStr, knownModules)
-            val srcSet = SemioticLayerClassifier.detectSourceSet(relStr)
-
+            scan.markdownQueue.add(Pair(relStr, sourceText))
             store.upsertFileRecord(
                 projectId = projectId,
                 relPath = relStr,
-                language = lang,
-                moduleId = modId,
-                sourceSet = srcSet,
-                semioticLayer = semLayer,
-                archLayer = archLayer,
+                language = "markdown",
+                moduleId = if (relStr.startsWith("plans/")) "plans" else "vault",
+                sourceSet = "docs",
+                semioticLayer = if (relStr.startsWith("plans/")) "syntactic" else "semantic",
+                archLayer = "infrastructure",
                 sha256 = sha256,
                 mtime = mtime,
                 loc = sourceText.lines().size,
-                topLevelDeclCount = topDeclCount
+                topLevelDeclCount = 1
             )
-            if (lang == "kotlin") {
-                pendingKotlinComposeFiles.add(Triple(relStr, sourceText, fEdges))
-            } else {
-                pendingRawEdges[fileId] = fEdges
-            }
-            changedNodes.addAll(fNodes)
-            codeFilesIndexed++
-            filesIndexed++
+            scan.filesIndexed++
+        } else {
+            scan.unchangedMarkdownQueue.add(Pair(relStr, filePath))
+            scan.filesSkipped++
+        }
+    }
+
+    private fun processCodeFile(
+        relStr: String,
+        lang: String,
+        isUnchanged: Boolean,
+        sha256: String,
+        mtime: Double,
+        rawBytes: ByteArray,
+        ctx: WorkspaceScanContext,
+        scan: ScanCollector
+    ) {
+        val fileId = "${ctx.projectId}:$relStr"
+        if (isUnchanged && fileId in ctx.filesWithRawEdges) {
+            scan.filesSkipped++
+            return
         }
 
+        val sourceText = rawBytes.decodeToString()
+        val (fNodes, fEdges, topDeclCount) = PolyglotAstExtractor.extractFile(
+            ctx.projectId, relStr, sourceText, ctx.knownModules
+        )
+        val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
+        val modId = ModuleBoundaryDetector.resolveModuleId(relStr, ctx.knownModules)
+        val srcSet = SemioticLayerClassifier.detectSourceSet(relStr)
+
+        store.upsertFileRecord(
+            projectId = ctx.projectId,
+            relPath = relStr,
+            language = lang,
+            moduleId = modId,
+            sourceSet = srcSet,
+            semioticLayer = semLayer,
+            archLayer = archLayer,
+            sha256 = sha256,
+            mtime = mtime,
+            loc = sourceText.lines().size,
+            topLevelDeclCount = topDeclCount
+        )
+        if (lang == "kotlin") {
+            scan.pendingKotlinComposeFiles.add(Triple(relStr, sourceText, fEdges))
+        } else {
+            scan.pendingRawEdges[fileId] = fEdges
+        }
+        scan.changedNodes.addAll(fNodes)
+        scan.codeFilesIndexed++
+        scan.filesIndexed++
+    }
+
+    private fun processDiscoveredFile(
+        filePath: String,
+        relStr: String,
+        ext: String,
+        lang: String,
+        ctx: WorkspaceScanContext,
+        scan: ScanCollector
+    ) {
+        val mtime = PlatformFiles.mtime(filePath)
+        val cached = ctx.cachedFiles[relStr]
+        val mtimeUnchanged = cached != null && abs(cached.second - mtime) < 1e-6
+        val rawBytes: ByteArray by lazy { PlatformFiles.readBytes(filePath) }
+        val sha256 = if (mtimeUnchanged) cached.first else Sha256.digest(rawBytes)
+        val isUnchanged = !ctx.effectiveForce && (mtimeUnchanged || (cached != null && cached.first == sha256))
+
+        if (ext == ".md") {
+            processMarkdownFile(relStr, filePath, isUnchanged, sha256, mtime, rawBytes, ctx.projectId, scan)
+        } else {
+            processCodeFile(relStr, lang, isUnchanged, sha256, mtime, rawBytes, ctx, scan)
+        }
+    }
+
+    private fun resolveFileLangOrNull(relStr: String): Pair<String, String>? {
+        val ext = if (relStr.contains('.')) "." + relStr.substringAfterLast('.') else ""
+        val lang = PolyglotAstExtractor.supportedLanguage(ext)
+        if (lang.isEmpty() && ext != ".md") return null
+        return Pair(ext, lang)
+    }
+
+    private fun isCandidateFile(relStr: String, subpaths: List<String>?): Boolean {
+        return !isPathSkipped(relStr) && matchesSubpaths(relStr, subpaths)
+    }
+
+    private fun scanWorkspaceFiles(ctx: WorkspaceScanContext): ScanCollector {
+        val scan = ScanCollector()
+        val allFiles = PlatformFiles.listFilesRecursively(ctx.root) { dirName ->
+            dirName in SKIP_DIRS || dirName.startsWith(".venv")
+        }
+        for (filePath in allFiles) {
+            val relStr = filePath.removePrefix(ctx.root).removePrefix("/").replace('\\', '/')
+            if (!isCandidateFile(relStr, ctx.normalizedSubpaths)) continue
+            val (ext, lang) = resolveFileLangOrNull(relStr) ?: continue
+            scan.validDiskFiles.add(relStr)
+            processDiscoveredFile(filePath, relStr, ext, lang, ctx, scan)
+        }
+        return scan
+    }
+
+    private fun purgeDeletedFiles(
+        projectId: String,
+        root: String,
+        cachedFiles: Map<String, Pair<String, Double>>,
+        validDiskFiles: Set<String>,
+        normalizedSubpaths: List<String>?
+    ): Int {
         var filesDeleted = 0
         for (indexedRel in cachedFiles.keys) {
             if (indexedRel == "__endpoints__") continue
-            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
-                val matchesSubpath = normalizedSubpaths.any { cleanSp ->
-                    indexedRel == cleanSp || indexedRel.startsWith("$cleanSp/")
-                }
-                if (!matchesSubpath && PlatformFiles.exists("$root/$indexedRel")) continue
+            if (!matchesSubpaths(indexedRel, normalizedSubpaths) && PlatformFiles.exists("$root/$indexedRel")) {
+                continue
             }
             if (indexedRel !in validDiskFiles) {
                 store.deleteFileRecord(projectId, indexedRel, recomputeDegrees = false)
@@ -207,35 +250,145 @@ class WorkspaceIndexer(
                 filesDeleted++
             }
         }
+        return filesDeleted
+    }
 
-        // BUG-12: Short-circuit no-op runs when zero files were indexed or deleted and project already has nodes
-        if (!effectiveForce && filesIndexed == 0 && filesDeleted == 0 && cachedFiles.isNotEmpty()) {
-            val stats = store.getStats(projectId)
-            val composeNodes = store.listComposeNodes(projectId)
-            return buildJsonObject {
-                put("project_id", stats.projectId)
-                put("files", stats.files)
-                put("nodes", stats.nodes)
-                put("edges", stats.edges)
-                put("compose_nodes", composeNodes.size)
-                put("files_indexed", 0)
-                put("files_skipped", filesSkipped)
-                putJsonObject("provenance_breakdown") {
-                    stats.provenanceBreakdown.forEach { (k, v) -> put(k, v) }
+    private fun buildStatsResponse(projectId: String, filesIndexed: Int, filesSkipped: Int): JsonObject {
+        val stats = store.getStats(projectId)
+        val composeNodes = store.listComposeNodes(projectId)
+        return buildJsonObject {
+            put("project_id", stats.projectId)
+            put("files", stats.files)
+            put("nodes", stats.nodes)
+            put("edges", stats.edges)
+            put("compose_nodes", composeNodes.size)
+            put("files_indexed", filesIndexed)
+            put("files_skipped", filesSkipped)
+            putJsonObject("provenance_breakdown") {
+                stats.provenanceBreakdown.forEach { (k, v) -> put(k, v) }
+            }
+        }
+    }
+
+    private fun isComposeSourceFile(
+        bundle: ComposeStabilityExtractor.ExtractionBundle,
+        sourceText: String
+    ): Boolean {
+        if (bundle.nodes.isNotEmpty()) return true
+        if (bundle.edges.any { it.edgeType in setOf("PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "OBSERVES_STATE") }) return true
+        return sourceText.lineSequence().any { line ->
+            val t = line.trim()
+            t.startsWith("import androidx.compose") ||
+            t.startsWith("import org.jetbrains.compose") ||
+            t.startsWith("@Composable") ||
+            t.contains(" @Composable ")
+        }
+    }
+
+    private fun syncComposeNodeRecords(
+        bundleNodes: List<ComposeNodeRecord>,
+        projectId: String,
+        fileId: String,
+        modId: String,
+        semLayer: String,
+        archLayer: String,
+        mergedNodeMap: MutableMap<String, GraphNode>,
+        changedNodes: MutableList<GraphNode>
+    ) {
+        for (cn in bundleNodes) {
+            val shortName = cn.fqName.substringAfterLast('.')
+            val existing = mergedNodeMap[cn.nodeId]
+            val compGraphNode = if (existing != null) {
+                existing.copy(kind = "composable", sourceSet = cn.sourceSet)
+            } else {
+                GraphNode(
+                    nodeId = cn.nodeId,
+                    projectId = projectId,
+                    fileId = fileId,
+                    name = shortName,
+                    qualifiedName = cn.fqName,
+                    kind = "composable",
+                    signature = "@Composable fun $shortName",
+                    startLine = cn.startLine,
+                    endLine = cn.endLine,
+                    moduleId = modId,
+                    sourceSet = cn.sourceSet,
+                    semioticLayer = semLayer,
+                    archLayer = archLayer,
+                    isTestDouble = false
+                )
+            }
+            mergedNodeMap[cn.nodeId] = compGraphNode
+            changedNodes.add(compGraphNode)
+        }
+    }
+
+    private fun syncComposeEdgeEntities(
+        bundleEdges: List<GraphEdge>,
+        projectId: String,
+        fileId: String,
+        relStr: String,
+        modId: String,
+        semLayer: String,
+        archLayer: String,
+        mergedNodeMap: MutableMap<String, GraphNode>,
+        changedNodes: MutableList<GraphNode>
+    ) {
+        for (ce in bundleEdges) {
+            if (ce.sourceNodeId.endsWith("#file") && ce.sourceNodeId !in mergedNodeMap) {
+                val fileNode = GraphNode(
+                    nodeId = ce.sourceNodeId,
+                    projectId = projectId,
+                    fileId = fileId,
+                    name = relStr.substringAfterLast('/'),
+                    qualifiedName = relStr,
+                    kind = "file_scope",
+                    signature = relStr,
+                    startLine = 1,
+                    endLine = 1,
+                    moduleId = modId,
+                    sourceSet = SemioticLayerClassifier.detectSourceSet(relStr),
+                    semioticLayer = semLayer,
+                    archLayer = archLayer
+                )
+                mergedNodeMap[fileNode.nodeId] = fileNode
+                changedNodes.add(fileNode)
+            }
+            if (ce.edgeType in setOf("MUTATES_PROPERTY", "PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "OBSERVES_STATE")) {
+                val symName = ce.targetNodeId.removePrefix("sym:")
+                if (mergedNodeMap.values.none { it.name == symName }) {
+                    val syntheticId = "$fileId#$symName"
+                    val synNode = GraphNode(
+                        nodeId = syntheticId,
+                        projectId = projectId,
+                        fileId = fileId,
+                        name = symName,
+                        qualifiedName = symName,
+                        kind = "variable",
+                        signature = symName,
+                        startLine = ce.lineNumber,
+                        endLine = ce.lineNumber,
+                        moduleId = modId,
+                        sourceSet = SemioticLayerClassifier.detectSourceSet(relStr),
+                        semioticLayer = semLayer,
+                        archLayer = archLayer
+                    )
+                    mergedNodeMap[syntheticId] = synNode
+                    changedNodes.add(synNode)
                 }
             }
         }
+    }
 
-        val existingNodes = store.listNodes(projectId)
-        val mergedNodeMap = existingNodes.associateBy { it.nodeId }.toMutableMap()
-        for (n in modNodes) {
-            mergedNodeMap[n.nodeId] = n
-        }
-        for (n in changedNodes) {
-            mergedNodeMap[n.nodeId] = n
-        }
-
-        // Execute Dual-Mode Compose extraction across changed Kotlin files using the full workspace node table
+    private fun processComposeFiles(
+        projectId: String,
+        stabilityPatterns: List<Regex>,
+        pendingKotlinComposeFiles: List<Triple<String, String, List<GraphEdge>>>,
+        mergedNodeMap: MutableMap<String, GraphNode>,
+        changedNodes: MutableList<GraphNode>,
+        knownModules: List<String>,
+        pendingRawEdges: MutableMap<String, List<GraphEdge>>
+    ): Pair<List<ComposeNodeRecord>, List<ComposeParamRecord>> {
         val workspaceNodesSnapshot = mergedNodeMap.values.toList()
         val precomputedStability = mutableMapOf<String, Pair<String, String>>()
         for ((_, sourceText, _) in pendingKotlinComposeFiles) {
@@ -256,220 +409,207 @@ class WorkspaceIndexer(
                 workspaceNodes = workspaceNodesSnapshot,
                 precomputedClassStability = precomputedStability
             )
-            val isComposeFile = bundle.nodes.isNotEmpty() ||
-                bundle.edges.any { it.edgeType in setOf("PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "OBSERVES_STATE") } ||
-                sourceText.lineSequence().any { line ->
-                    val t = line.trim()
-                    (t.startsWith("import androidx.compose") || t.startsWith("import org.jetbrains.compose")) ||
-                    t.startsWith("@Composable") || t.contains(" @Composable ")
-                }
-
-            if (isComposeFile) {
+            if (isComposeSourceFile(bundle, sourceText)) {
                 allNewComposeNodes.addAll(bundle.nodes)
                 allNewComposeParams.addAll(bundle.params)
 
                 val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
                 val modId = ModuleBoundaryDetector.resolveModuleId(relStr, knownModules)
 
-                // Ensure every ComposeNodeRecord and mutated property/CompositionLocal has a GraphNode in `nodes`
-                // so `sweepOrphanEdges` preserves all semantic Compose edges.
-                for (cn in bundle.nodes) {
-                    val shortName = cn.fqName.substringAfterLast('.')
-                    val existing = mergedNodeMap[cn.nodeId]
-                    val compGraphNode = if (existing != null) {
-                        existing.copy(kind = "composable", sourceSet = cn.sourceSet)
-                    } else {
-                        GraphNode(
-                            nodeId = cn.nodeId,
-                            projectId = projectId,
-                            fileId = fileId,
-                            name = shortName,
-                            qualifiedName = cn.fqName,
-                            kind = "composable",
-                            signature = "@Composable fun $shortName",
-                            startLine = cn.startLine,
-                            endLine = cn.endLine,
-                            moduleId = modId,
-                            sourceSet = cn.sourceSet,
-                            semioticLayer = semLayer,
-                            archLayer = archLayer,
-                            isTestDouble = false
-                        )
-                    }
-                    mergedNodeMap[cn.nodeId] = compGraphNode
-                    changedNodes.add(compGraphNode)
-                }
-
-                for (ce in bundle.edges) {
-                    if (ce.sourceNodeId.endsWith("#file") && ce.sourceNodeId !in mergedNodeMap) {
-                        val fileNode = GraphNode(
-                            nodeId = ce.sourceNodeId,
-                            projectId = projectId,
-                            fileId = fileId,
-                            name = relStr.substringAfterLast('/'),
-                            qualifiedName = relStr,
-                            kind = "file_scope",
-                            signature = relStr,
-                            startLine = 1,
-                            endLine = 1,
-                            moduleId = modId,
-                            sourceSet = SemioticLayerClassifier.detectSourceSet(relStr),
-                            semioticLayer = semLayer,
-                            archLayer = archLayer
-                        )
-                        mergedNodeMap[fileNode.nodeId] = fileNode
-                        changedNodes.add(fileNode)
-                    }
-                    if (ce.edgeType in setOf("MUTATES_PROPERTY", "PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "OBSERVES_STATE")) {
-                        val symName = ce.targetNodeId.removePrefix("sym:")
-                        val anyExisting = mergedNodeMap.values.any { it.name == symName }
-                        if (!anyExisting) {
-                            val syntheticId = "$fileId#$symName"
-                            val synNode = GraphNode(
-                                nodeId = syntheticId,
-                                projectId = projectId,
-                                fileId = fileId,
-                                name = symName,
-                                qualifiedName = symName,
-                                kind = "variable",
-                                signature = symName,
-                                startLine = ce.lineNumber,
-                                endLine = ce.lineNumber,
-                                moduleId = modId,
-                                sourceSet = SemioticLayerClassifier.detectSourceSet(relStr),
-                                semioticLayer = semLayer,
-                                archLayer = archLayer
-                            )
-                            mergedNodeMap[syntheticId] = synNode
-                            changedNodes.add(synNode)
-                        }
-                    }
-                }
+                syncComposeNodeRecords(bundle.nodes, projectId, fileId, modId, semLayer, archLayer, mergedNodeMap, changedNodes)
+                syncComposeEdgeEntities(bundle.edges, projectId, fileId, relStr, modId, semLayer, archLayer, mergedNodeMap, changedNodes)
 
                 pendingRawEdges[fileId] = baseEdges + bundle.edges
             } else {
                 pendingRawEdges[fileId] = baseEdges
             }
         }
+        return Pair(allNewComposeNodes, allNewComposeParams)
+    }
 
+    private fun resolveWorkspaceEdges(
+        projectId: String,
+        combinedNodes: List<GraphNode>,
+        pendingRawEdges: Map<String, List<GraphEdge>>,
+        allNewComposeNodes: List<ComposeNodeRecord>,
+        allNewComposeParams: List<ComposeParamRecord>
+    ): Pair<List<GraphEdge>, List<GraphEdge>> {
         if (pendingRawEdges.isNotEmpty()) {
             store.replaceBatchRawSymbolEdges(projectId, pendingRawEdges)
         }
-
         if (allNewComposeNodes.isNotEmpty() || allNewComposeParams.isNotEmpty()) {
             store.upsertComposeNodesAndParams(allNewComposeNodes, allNewComposeParams)
         }
-
-        val combinedNodes = mergedNodeMap.values.toList()
-
-        // When code files were incrementally re-indexed or deleted, purge all previous resolved AST edges
-        // (and MODULE_DEPENDS_ON / EXPECT_ACTUAL edges) before re-inserting freshly resolved edges from
-        // `raw_symbol_edges`, so deleted callees or changed imports never leave stale resolved edges behind.
         store.deleteAllResolvedCodeEdges(projectId)
-
-        // BUG-01: Resolve all persisted raw symbol edges across the entire project so unchanged callers
-        // link to newly added or modified callees.
         val allPersistedRawEdges = store.listRawSymbolEdges(projectId)
-        val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(
-            projectId, combinedNodes, allPersistedRawEdges
-        )
-        val kmpEdges = ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(
-            projectId, combinedNodes
-        )
+        val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(projectId, combinedNodes, allPersistedRawEdges)
+        val kmpEdges = ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(projectId, combinedNodes)
+        return Pair(resolvedEdges, kmpEdges)
+    }
 
-        // When code files were incrementally re-indexed or deleted, also re-evaluate markdown files
-        // so PLAN_SCOPES_FILE, codespan, and wikilink edges link against newly added or updated code symbols.
-        if (codeFilesIndexed > 0 || filesDeleted > 0) {
-            val queuedRels = markdownQueue.mapTo(mutableSetOf()) { it.first }
-            for ((relMd, filePath) in unchangedMarkdownQueue) {
-                queueMarkdownIfReadable(projectId, relMd, filePath, queuedRels, markdownQueue)
-            }
-            if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
-                for (indexedRel in cachedFiles.keys) {
-                    if (indexedRel.endsWith(".md")) {
-                        queueMarkdownIfReadable(projectId, indexedRel, "$root/$indexedRel", queuedRels, markdownQueue)
-                    }
+    private fun reevaluateMarkdownFiles(
+        projectId: String,
+        root: String,
+        markdownQueue: MutableList<Pair<String, String>>,
+        unchangedMarkdownQueue: List<Pair<String, String>>,
+        cachedFiles: Map<String, Pair<String, Double>>,
+        normalizedSubpaths: List<String>?,
+        reEvaluate: Boolean
+    ) {
+        if (!reEvaluate) return
+        val queuedRels = markdownQueue.mapTo(mutableSetOf()) { it.first }
+        for ((relMd, filePath) in unchangedMarkdownQueue) {
+            queueMarkdownIfReadable(projectId, relMd, filePath, queuedRels, markdownQueue)
+        }
+        if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
+            for (indexedRel in cachedFiles.keys) {
+                if (indexedRel.endsWith(".md")) {
+                    queueMarkdownIfReadable(projectId, indexedRel, "$root/$indexedRel", queuedRels, markdownQueue)
                 }
             }
         }
+    }
+
+    private fun collectActiveEndpointTargets(
+        endpointPrefix: String,
+        projectId: String,
+        resolvedEdges: List<GraphEdge>,
+        docEdges: List<GraphEdge>
+    ): Set<String> {
+        val targets = LinkedHashSet<String>()
+        val allCandidateEdges = resolvedEdges + docEdges + store.listEdges(projectId, listOf("URL_REFS"))
+        for (edge in allCandidateEdges) {
+            if (edge.targetNodeId.startsWith(endpointPrefix)) {
+                targets.add(edge.targetNodeId)
+            }
+        }
+        return targets
+    }
+
+    private fun extractEndpoints(
+        projectId: String,
+        resolvedEdges: List<GraphEdge>,
+        docEdges: List<GraphEdge>
+    ): List<GraphNode> {
+        val endpointPrefix = "$projectId:endpoint#"
+        val activeEndpointTargets = collectActiveEndpointTargets(endpointPrefix, projectId, resolvedEdges, docEdges)
+        if (activeEndpointTargets.isEmpty()) return emptyList()
+
+        store.ensureVirtualFileRecord(projectId, "__endpoints__")
+        val virtualFileId = "$projectId:__endpoints__"
+        val endpointNodes = mutableListOf<GraphNode>()
+        for (epNodeId in activeEndpointTargets) {
+            val canonicalRoute = epNodeId.removePrefix(endpointPrefix)
+            if (canonicalRoute.isEmpty()) continue
+            endpointNodes.add(
+                GraphNode(
+                    nodeId = epNodeId,
+                    projectId = projectId,
+                    fileId = virtualFileId,
+                    name = canonicalRoute,
+                    qualifiedName = canonicalRoute,
+                    kind = "endpoint",
+                    signature = "endpoint $canonicalRoute",
+                    startLine = 1,
+                    endLine = 1,
+                    moduleId = "endpoints",
+                    sourceSet = "main",
+                    semioticLayer = "syntactic",
+                    archLayer = "interface",
+                    isTestDouble = false,
+                    isTopLevel = false
+                )
+            )
+        }
+        return endpointNodes
+    }
+
+    fun indexWorkspace(
+        projectId: String,
+        subpaths: List<String>? = null,
+        stabilityConfigPath: String? = null,
+        forceComposeReindex: Boolean = false,
+        force: Boolean = false
+    ): JsonObject {
+        val root = PlatformFiles.canonicalPath(workspaceRoot)
+        val normalizedSubpaths = subpaths
+            ?.map { normalizeSubpath(it, root) }
+            ?.filter { it.isNotEmpty() }
+
+        val stabilityPatterns = discoverStabilityPatterns(root, stabilityConfigPath)
+        val (modNodes, modEdges, knownModules) = ModuleBoundaryDetector.extractModuleGraph(root, projectId)
+        val cachedFiles = store.getFileRecordsMap(projectId)
+        val filesWithRawEdges = store.filesWithRawSymbolEdges(projectId)
+        val storedVersion = store.getProjectMetadata(projectId, "extractor_version")
+        val effectiveForce = force || forceComposeReindex || (storedVersion != PolyglotAstExtractor.EXTRACTOR_VERSION)
+
+        val scanCtx = WorkspaceScanContext(
+            root = root,
+            projectId = projectId,
+            normalizedSubpaths = normalizedSubpaths,
+            effectiveForce = effectiveForce,
+            knownModules = knownModules,
+            cachedFiles = cachedFiles,
+            filesWithRawEdges = filesWithRawEdges
+        )
+        val scan = scanWorkspaceFiles(scanCtx)
+        val filesDeleted = purgeDeletedFiles(projectId, root, cachedFiles, scan.validDiskFiles, normalizedSubpaths)
+
+        if (!effectiveForce && scan.filesIndexed == 0 && filesDeleted == 0 && cachedFiles.isNotEmpty()) {
+            return buildStatsResponse(projectId, 0, scan.filesSkipped)
+        }
+
+        val mergedNodeMap = store.listNodes(projectId).associateBy { it.nodeId }.toMutableMap()
+        for (n in modNodes) mergedNodeMap[n.nodeId] = n
+        for (n in scan.changedNodes) mergedNodeMap[n.nodeId] = n
+
+        val (allNewComposeNodes, allNewComposeParams) = processComposeFiles(
+            projectId = projectId,
+            stabilityPatterns = stabilityPatterns,
+            pendingKotlinComposeFiles = scan.pendingKotlinComposeFiles,
+            mergedNodeMap = mergedNodeMap,
+            changedNodes = scan.changedNodes,
+            knownModules = knownModules,
+            pendingRawEdges = scan.pendingRawEdges
+        )
+
+        val combinedNodes = mergedNodeMap.values.toList()
+        val (resolvedEdges, kmpEdges) = resolveWorkspaceEdges(
+            projectId = projectId,
+            combinedNodes = combinedNodes,
+            pendingRawEdges = scan.pendingRawEdges,
+            allNewComposeNodes = allNewComposeNodes,
+            allNewComposeParams = allNewComposeParams
+        )
+
+        reevaluateMarkdownFiles(
+            projectId = projectId,
+            root = root,
+            markdownQueue = scan.markdownQueue,
+            unchangedMarkdownQueue = scan.unchangedMarkdownQueue,
+            cachedFiles = cachedFiles,
+            normalizedSubpaths = normalizedSubpaths,
+            reEvaluate = scan.codeFilesIndexed > 0 || filesDeleted > 0
+        )
 
         val docNodes = mutableListOf<GraphNode>()
         val docEdges = mutableListOf<GraphEdge>()
-        for ((relMd, mdText) in markdownQueue) {
-            val (dNodes, dEdges) = VaultPlanBridge.extractMarkdownAndPlans(
-                projectId, relMd, mdText, combinedNodes
-            )
+        for ((relMd, mdText) in scan.markdownQueue) {
+            val (dNodes, dEdges) = VaultPlanBridge.extractMarkdownAndPlans(projectId, relMd, mdText, combinedNodes)
             docNodes.addAll(dNodes)
             docEdges.addAll(dEdges)
         }
 
-        val endpointNodes = mutableListOf<GraphNode>()
-        val endpointPrefix = "$projectId:endpoint#"
-        val activeEndpointTargets = LinkedHashSet<String>()
-        for (edge in resolvedEdges) {
-            if (edge.targetNodeId.startsWith(endpointPrefix)) {
-                activeEndpointTargets.add(edge.targetNodeId)
-            }
-        }
-        for (edge in docEdges) {
-            if (edge.targetNodeId.startsWith(endpointPrefix)) {
-                activeEndpointTargets.add(edge.targetNodeId)
-            }
-        }
-        for (edge in store.listEdges(projectId, listOf("URL_REFS"))) {
-            if (edge.targetNodeId.startsWith(endpointPrefix)) {
-                activeEndpointTargets.add(edge.targetNodeId)
-            }
-        }
-        if (activeEndpointTargets.isNotEmpty()) {
-            store.ensureVirtualFileRecord(projectId, "__endpoints__")
-            val virtualFileId = "$projectId:__endpoints__"
-            for (epNodeId in activeEndpointTargets) {
-                val canonicalRoute = epNodeId.removePrefix(endpointPrefix)
-                if (canonicalRoute.isEmpty()) continue
-                endpointNodes.add(
-                    GraphNode(
-                        nodeId = epNodeId,
-                        projectId = projectId,
-                        fileId = virtualFileId,
-                        name = canonicalRoute,
-                        qualifiedName = canonicalRoute,
-                        kind = "endpoint",
-                        signature = "endpoint $canonicalRoute",
-                        startLine = 1,
-                        endLine = 1,
-                        moduleId = "endpoints",
-                        sourceSet = "main",
-                        semioticLayer = "syntactic",
-                        archLayer = "interface",
-                        isTestDouble = false,
-                        isTopLevel = false
-                    )
-                )
-            }
-        }
+        val endpointNodes = extractEndpoints(projectId, resolvedEdges, docEdges)
 
         store.upsertNodesAndEdges(
             projectId = projectId,
-            nodes = modNodes + changedNodes.distinctBy { it.nodeId } + docNodes.distinctBy { it.nodeId } + endpointNodes,
+            nodes = modNodes + scan.changedNodes.distinctBy { it.nodeId } + docNodes.distinctBy { it.nodeId } + endpointNodes,
             edges = modEdges + resolvedEdges + kmpEdges + docEdges
         )
         store.setProjectMetadata(projectId, "extractor_version", PolyglotAstExtractor.EXTRACTOR_VERSION)
 
-        val stats = store.getStats(projectId)
-        val composeNodes = store.listComposeNodes(projectId)
-        return buildJsonObject {
-            put("project_id", stats.projectId)
-            put("files", stats.files)
-            put("nodes", stats.nodes)
-            put("edges", stats.edges)
-            put("compose_nodes", composeNodes.size)
-            put("files_indexed", filesIndexed)
-            put("files_skipped", filesSkipped)
-            putJsonObject("provenance_breakdown") {
-                stats.provenanceBreakdown.forEach { (k, v) -> put(k, v) }
-            }
-        }
+        return buildStatsResponse(projectId, scan.filesIndexed, scan.filesSkipped)
     }
 
     /**
