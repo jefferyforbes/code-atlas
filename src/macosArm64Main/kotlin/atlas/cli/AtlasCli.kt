@@ -6,7 +6,9 @@ import atlas.engine.WorkspaceInitEngine
 import atlas.extract.FigmaSnapshotExtractor
 import atlas.extract.UrlTargetResolver
 import atlas.mcp.AtlasMcpServer
+import atlas.model.FigmaNode
 import atlas.model.FigmaSpatialBounds
+import atlas.model.FigmaVariable
 import atlas.util.PlatformFiles
 import kotlin.math.roundToInt
 import kotlinx.serialization.encodeToString
@@ -824,6 +826,287 @@ class AtlasCli {
             }
         }
 
+        private fun resolveFigmaFileKey(
+            server: AtlasMcpServer,
+            fileKeyArg: String?,
+            parsedFromFileArg: UrlTargetResolver.FigmaDeepLink?,
+            parsedFromTarget: UrlTargetResolver.FigmaDeepLink?,
+            parsedSeedUrls: List<UrlTargetResolver.FigmaDeepLink>
+        ): String {
+            return parsedFromFileArg?.fileKey
+                ?: parsedFromTarget?.fileKey
+                ?: parsedSeedUrls.firstOrNull()?.fileKey
+                ?: fileKeyArg
+                ?: server.store.getLatestFigmaFileKey()
+                ?: "default"
+        }
+
+        private fun resolveFigmaSeeds(
+            seeds: List<String>,
+            normTarget: String,
+            fileArgNodeId: String?
+        ): List<String> {
+            if (seeds.isNotEmpty()) {
+                return seeds.map { s -> UrlTargetResolver.parseFigmaUrl(s)?.nodeId ?: UrlTargetResolver.normalizeFigmaNodeId(s) }
+            }
+            if (normTarget.isNotEmpty()) {
+                return listOf(normTarget)
+            }
+            if (fileArgNodeId != null) {
+                return listOf(fileArgNodeId)
+            }
+            return emptyList()
+        }
+
+        private fun readFigmaAstJson(isStdin: Boolean, snapshotPath: String?): String? {
+            if (isStdin) return readStdin()
+            if (snapshotPath != null) {
+                if (!PlatformFiles.exists(snapshotPath)) {
+                    println("Error: Snapshot file not found at $snapshotPath")
+                    return null
+                }
+                return PlatformFiles.readText(snapshotPath)
+            }
+            println("Error: atlas figma index requires --snapshot <path> or --stdin")
+            return null
+        }
+
+        private fun runFigmaIndexSubcommand(
+            server: AtlasMcpServer,
+            project: String,
+            fileKey: String,
+            snapshotPath: String?,
+            tokensPath: String?,
+            isStdin: Boolean,
+            isJson: Boolean
+        ): Int {
+            val astJson = readFigmaAstJson(isStdin, snapshotPath) ?: return 1
+            val tokensJson = if (tokensPath != null && PlatformFiles.exists(tokensPath)) {
+                PlatformFiles.readText(tokensPath)
+            } else null
+
+            val extractor = FigmaSnapshotExtractor()
+            val snapshot = extractor.ingest(server.store, fileKey, astJson, tokensJson)
+
+            if (isJson) {
+                val resObj = buildJsonObject {
+                    put("file_key", fileKey)
+                    put("nodes_indexed", snapshot.nodes.size)
+                    put("variables_indexed", snapshot.variables.size)
+                    put("edges_indexed", snapshot.edges.size)
+                    put("document_name", snapshot.document.name)
+                }
+                println(jsonPretty.encodeToString(resObj))
+            } else {
+                val text = "[Atlas Figma] Indexed project=$project fileKey=$fileKey nodes=${snapshot.nodes.size} variables=${snapshot.variables.size} edges=${snapshot.edges.size}"
+                println(truncateSummary(text, false))
+            }
+            return 0
+        }
+
+        private fun renderFigmaSymbolOutput(
+            fileKey: String,
+            normTarget: String,
+            nodes: List<FigmaNode>,
+            variable: FigmaVariable?,
+            isJson: Boolean
+        ) {
+            if (isJson) {
+                val jsonElement = buildJsonObject {
+                    put("file_key", fileKey)
+                    put("target", normTarget)
+                    putJsonArray("nodes") {
+                        nodes.forEach { n -> add(jsonCompact.parseToJsonElement(jsonCompact.encodeToString(n))) }
+                    }
+                    if (variable != null) {
+                        put("variable", jsonCompact.parseToJsonElement(jsonCompact.encodeToString(variable)))
+                    }
+                }
+                println(jsonPretty.encodeToString(jsonElement))
+                return
+            }
+            val hasVar = if (variable != null) 1 else 0
+            val count = nodes.size + hasVar
+            val names = nodes.map { it.name } + listOfNotNull(variable?.name)
+            val text = "[Figma Query: symbol] target=$normTarget found=$count matches=[${names.take(3).joinToString(", ")}]"
+            println(truncateSummary(text, false))
+        }
+
+        private fun queryFigmaSymbol(server: AtlasMcpServer, fileKey: String, normTarget: String, isJson: Boolean): Int {
+            val node = server.store.queryFigmaNodeById(fileKey, normTarget)
+            val nodes = if (node != null) listOf(node) else server.store.queryFigmaNodesByName(fileKey, normTarget)
+            val variable = if (nodes.isEmpty()) server.store.queryFigmaVariableByName(fileKey, normTarget) ?: server.store.queryFigmaVariableById(fileKey, normTarget) else null
+            renderFigmaSymbolOutput(fileKey, normTarget, nodes, variable, isJson)
+            return 0
+        }
+
+        private fun queryFigmaCallers(server: AtlasMcpServer, fileKey: String, normTarget: String, depth: Int, isJson: Boolean): Int {
+            val callers = server.store.queryFigmaCallers(fileKey, normTarget, depth)
+            if (isJson) {
+                println(jsonPretty.encodeToString(callers))
+            } else {
+                val names = callers.map { it.name }
+                val text = "[Figma Query: callers] target=$normTarget callers=${callers.size} instances=[${names.take(3).joinToString(", ")}]"
+                println(truncateSummary(text, false))
+            }
+            return 0
+        }
+
+        private fun queryFigmaImpact(server: AtlasMcpServer, fileKey: String, normTarget: String, depth: Int, isJson: Boolean): Int {
+            val impact = server.store.resolveVariableBlastRadius(fileKey, normTarget, depth)
+            if (isJson) {
+                println(jsonPretty.encodeToString(impact))
+            } else {
+                val vars = impact.impactedVariables.map { it.name }
+                val bound = impact.boundNodes.map { it.name }
+                val text = "[Figma Query: impact] target=$normTarget impacted_vars=${vars.size} bound_nodes=${bound.size} vars=[${vars.take(3).joinToString(", ")}]"
+                println(truncateSummary(text, false))
+            }
+            return 0
+        }
+
+        private fun parseSpatialBounds(server: AtlasMcpServer, fileKey: String, normTarget: String, boundsArg: String?): FigmaSpatialBounds {
+            if (boundsArg != null) {
+                val parts = boundsArg.split(',').map { it.trim().toDoubleOrNull() ?: 0.0 }
+                if (parts.size >= 4) {
+                    return FigmaSpatialBounds(parts[0], parts[1], parts[2], parts[3])
+                }
+                return FigmaSpatialBounds(0.0, 0.0, 0.0, 0.0)
+            }
+            val targetNode = server.store.queryFigmaNodeById(fileKey, normTarget)
+                ?: server.store.queryFigmaNodesByName(fileKey, normTarget).firstOrNull()
+            return targetNode?.spatialBounds ?: FigmaSpatialBounds(0.0, 0.0, 0.0, 0.0)
+        }
+
+        private fun queryFigmaSpatial(server: AtlasMcpServer, fileKey: String, normTarget: String, boundsArg: String?, isJson: Boolean): Int {
+            val bounds = parseSpatialBounds(server, fileKey, normTarget, boundsArg)
+            val intersecting = server.store.queryFigmaSpatialIntersection(fileKey, bounds)
+            if (isJson) {
+                println(jsonPretty.encodeToString(intersecting))
+            } else {
+                val names = intersecting.map { it.name }
+                val text = "[Figma Query: spatial] bounds=[${bounds.minX.toInt()}..${bounds.maxX.toInt()}, ${bounds.minY.toInt()}..${bounds.maxY.toInt()}] nodes=${intersecting.size} items=[${names.take(3).joinToString(", ")}]"
+                println(truncateSummary(text, false))
+            }
+            return 0
+        }
+
+        private fun queryFigmaGodNodes(server: AtlasMcpServer, fileKey: String, isJson: Boolean): Int {
+            val godNodes = server.store.queryFigmaGodNodes(fileKey, limit = 10)
+            if (isJson) {
+                val arr = buildJsonArray {
+                    for ((node, count) in godNodes) {
+                        add(buildJsonObject {
+                            put("node_id", node.nodeId)
+                            put("name", node.name)
+                            put("type", node.nodeType)
+                            put("references", count)
+                        })
+                    }
+                }
+                println(jsonPretty.encodeToString(arr))
+            } else {
+                val items = godNodes.map { "${it.first.name} (${it.second} refs)" }
+                val text = "[Figma Query: god_nodes] fileKey=$fileKey top_nodes=${godNodes.size} nodes=[${items.take(3).joinToString(", ")}]"
+                println(truncateSummary(text, false))
+            }
+            return 0
+        }
+
+        private fun queryFigmaShortestPath(server: AtlasMcpServer, fileKey: String, normTarget: String, normSecondaryTarget: String, depth: Int, isJson: Boolean): Int {
+            val path = server.store.findFigmaShortestPath(fileKey, normTarget, normSecondaryTarget, depth = maxOf(depth, 10))
+            if (isJson) {
+                println(jsonPretty.encodeToString(path))
+            } else {
+                val names = path.map { it.name }
+                val text = "[Figma Query: shortest_path] fileKey=$fileKey from=$normTarget to=$normSecondaryTarget hops=${maxOf(0, path.size - 1)} path=[${names.joinToString(" -> ")}]"
+                println(truncateSummary(text, false))
+            }
+            return 0
+        }
+
+        private fun runFigmaQuerySubcommand(
+            server: AtlasMcpServer,
+            fileKey: String,
+            figmaAction: String,
+            normTarget: String,
+            normSecondaryTarget: String,
+            depth: Int,
+            boundsArg: String?,
+            isJson: Boolean
+        ): Int {
+            return when (figmaAction) {
+                "symbol" -> queryFigmaSymbol(server, fileKey, normTarget, isJson)
+                "callers" -> queryFigmaCallers(server, fileKey, normTarget, depth, isJson)
+                "impact" -> queryFigmaImpact(server, fileKey, normTarget, depth, isJson)
+                "spatial" -> queryFigmaSpatial(server, fileKey, normTarget, boundsArg, isJson)
+                "god_nodes" -> queryFigmaGodNodes(server, fileKey, isJson)
+                "shortest_path" -> queryFigmaShortestPath(server, fileKey, normTarget, normSecondaryTarget, depth, isJson)
+                else -> {
+                    println("Unknown figma query action: $figmaAction. Valid: symbol, callers, impact, spatial, god_nodes, shortest_path")
+                    1
+                }
+            }
+        }
+
+        private fun runFigmaAuditSubcommand(server: AtlasMcpServer, project: String, fileKey: String, isJson: Boolean): Int {
+            val auditor = FigmaDesignAuditor(server.store)
+            val result = auditor.audit(fileKey)
+            if (isJson) {
+                println(jsonPretty.encodeToString(result))
+            } else {
+                val violationSnippets = if (result.violations.isNotEmpty()) {
+                    " violations=[${result.violations.take(3).joinToString("; ") { "${it.rule}: ${it.nodeName}" }}]"
+                } else ""
+                val text = "[Figma Audit] project=$project file=$fileKey passed=${result.passed} score=${result.maturityScore.toInt()}/100 violations=${result.violations.size} polish_delta=${result.polishDelta.size}$violationSnippets"
+                println(truncateSummary(text, false))
+            }
+            return if (result.passed) 0 else 1
+        }
+
+        private fun runFigmaScopeSubcommand(server: AtlasMcpServer, project: String, fileKey: String, normSeeds: List<String>, isJson: Boolean): Int {
+            val auditor = FigmaDesignAuditor(server.store)
+            val scope = auditor.synthesizeFigmaScope(project, fileKey, normSeeds)
+            if (isJson) {
+                println(jsonPretty.encodeToString(scope))
+            } else {
+                val collisionSnippets = if (scope.potentialCollisions.isNotEmpty()) {
+                    " collisions=${scope.potentialCollisions.size}"
+                } else ""
+                val text = "[Figma 3D Scope] project=$project file=$fileKey bounds=[${scope.spatialBounds.minX.toInt()}..${scope.spatialBounds.maxX.toInt()}, ${scope.spatialBounds.minY.toInt()}..${scope.spatialBounds.maxY.toInt()}] nodes=${scope.scopedNodesCount} shared_components=${scope.sharedMasterComponents.size} tokens=${scope.tokenLayers.size}$collisionSnippets"
+                println(truncateSummary(text, false))
+            }
+            return 0
+        }
+
+        private fun resolveNormTarget(
+            target: String,
+            parsedFromTarget: UrlTargetResolver.FigmaDeepLink?,
+            parsedFromFileArg: UrlTargetResolver.FigmaDeepLink?
+        ): String {
+            if (parsedFromTarget?.nodeId != null) return parsedFromTarget.nodeId
+            if (target.isEmpty()) return parsedFromFileArg?.nodeId ?: ""
+            return UrlTargetResolver.normalizeFigmaNodeId(target)
+        }
+
+        private fun resolveNormSecondaryTarget(
+            secondaryTarget: String,
+            parsedFromSecondary: UrlTargetResolver.FigmaDeepLink?
+        ): String {
+            return parsedFromSecondary?.nodeId ?: UrlTargetResolver.normalizeFigmaNodeId(secondaryTarget)
+        }
+
+        private fun printCliVersion(isJson: Boolean) {
+            if (isJson) {
+                println(jsonPretty.encodeToString(buildJsonObject {
+                    put("name", "atlas")
+                    put("version", VERSION)
+                }))
+            } else {
+                println("atlas $VERSION")
+            }
+        }
+
         private fun runFigmaCommand(
             server: AtlasMcpServer,
             command: String,
@@ -844,212 +1127,19 @@ class AtlasCli {
             val parsedFromTarget = UrlTargetResolver.parseFigmaUrl(target)
             val parsedFromSecondary = UrlTargetResolver.parseFigmaUrl(secondaryTarget)
             val parsedSeedUrls = seeds.mapNotNull { UrlTargetResolver.parseFigmaUrl(it) }
-            val fileKey = parsedFromFileArg?.fileKey
-                ?: parsedFromTarget?.fileKey
-                ?: parsedSeedUrls.firstOrNull()?.fileKey
-                ?: fileKeyArg
-                ?: server.store.getLatestFigmaFileKey()
-                ?: "default"
-            val normTarget = parsedFromTarget?.nodeId
-                ?: (if (target.isEmpty()) parsedFromFileArg?.nodeId ?: "" else UrlTargetResolver.normalizeFigmaNodeId(target))
-            val normSecondaryTarget = parsedFromSecondary?.nodeId
-                ?: UrlTargetResolver.normalizeFigmaNodeId(secondaryTarget)
-            val normSeeds = if (seeds.isNotEmpty()) {
-                seeds.map { s -> UrlTargetResolver.parseFigmaUrl(s)?.nodeId ?: UrlTargetResolver.normalizeFigmaNodeId(s) }
-            } else if (normTarget.isNotEmpty()) {
-                listOf(normTarget)
-            } else if (parsedFromFileArg?.nodeId != null) {
-                listOf(parsedFromFileArg.nodeId)
-            } else {
-                emptyList()
-            }
+            val fileKey = resolveFigmaFileKey(server, fileKeyArg, parsedFromFileArg, parsedFromTarget, parsedSeedUrls)
+            val normTarget = resolveNormTarget(target, parsedFromTarget, parsedFromFileArg)
+            val normSecondaryTarget = resolveNormSecondaryTarget(secondaryTarget, parsedFromSecondary)
+            val normSeeds = resolveFigmaSeeds(seeds, normTarget, parsedFromFileArg?.nodeId)
             val figmaAction = if (action == "search") "symbol" else action
 
             when (command) {
-                "index" -> {
-                    val astJson = when {
-                        isStdin -> readStdin()
-                        snapshotPath != null -> {
-                            if (!PlatformFiles.exists(snapshotPath)) {
-                                println("Error: Snapshot file not found at $snapshotPath")
-                                return 1
-                            }
-                            PlatformFiles.readText(snapshotPath)
-                        }
-                        else -> {
-                            println("Error: atlas figma index requires --snapshot <path> or --stdin")
-                            return 1
-                        }
-                    }
-                    val tokensJson = if (tokensPath != null && PlatformFiles.exists(tokensPath)) {
-                        PlatformFiles.readText(tokensPath)
-                    } else null
-
-                    val extractor = FigmaSnapshotExtractor()
-                    val snapshot = extractor.ingest(server.store, fileKey, astJson, tokensJson)
-
-                    if (isJson) {
-                        val resObj = buildJsonObject {
-                            put("file_key", fileKey)
-                            put("nodes_indexed", snapshot.nodes.size)
-                            put("variables_indexed", snapshot.variables.size)
-                            put("edges_indexed", snapshot.edges.size)
-                            put("document_name", snapshot.document.name)
-                        }
-                        println(jsonPretty.encodeToString(resObj))
-                    } else {
-                        val text = "[Atlas Figma] Indexed project=$project fileKey=$fileKey nodes=${snapshot.nodes.size} variables=${snapshot.variables.size} edges=${snapshot.edges.size}"
-                        println(truncateSummary(text, false))
-                    }
-                    return 0
-                }
-                "query" -> {
-                    when (figmaAction) {
-                        "symbol" -> {
-                            val node = server.store.queryFigmaNodeById(fileKey, normTarget)
-                            val nodes = if (node != null) listOf(node) else server.store.queryFigmaNodesByName(fileKey, normTarget)
-                            val variable = if (nodes.isEmpty()) server.store.queryFigmaVariableByName(fileKey, normTarget) ?: server.store.queryFigmaVariableById(fileKey, normTarget) else null
-                            if (isJson) {
-                                val jsonElement = buildJsonObject {
-                                    put("file_key", fileKey)
-                                    put("target", normTarget)
-                                    putJsonArray("nodes") {
-                                        nodes.forEach { n -> add(jsonCompact.parseToJsonElement(jsonCompact.encodeToString(n))) }
-                                    }
-                                    if (variable != null) {
-                                        put("variable", jsonCompact.parseToJsonElement(jsonCompact.encodeToString(variable)))
-                                    }
-                                }
-                                println(jsonPretty.encodeToString(jsonElement))
-                            } else {
-                                val count = nodes.size + (if (variable != null) 1 else 0)
-                                val names = nodes.map { it.name } + listOfNotNull(variable?.name)
-                                val text = "[Figma Query: symbol] target=$normTarget found=$count matches=[${names.take(3).joinToString(", ")}]"
-                                println(truncateSummary(text, false))
-                            }
-                            return 0
-                        }
-                        "callers" -> {
-                            val callers = server.store.queryFigmaCallers(fileKey, normTarget, depth)
-                            if (isJson) {
-                                println(jsonPretty.encodeToString(callers))
-                            } else {
-                                val names = callers.map { it.name }
-                                val text = "[Figma Query: callers] target=$normTarget callers=${callers.size} instances=[${names.take(3).joinToString(", ")}]"
-                                println(truncateSummary(text, false))
-                            }
-                            return 0
-                        }
-                        "impact" -> {
-                            val impact = server.store.resolveVariableBlastRadius(fileKey, normTarget, depth)
-                            if (isJson) {
-                                println(jsonPretty.encodeToString(impact))
-                            } else {
-                                val vars = impact.impactedVariables.map { it.name }
-                                val bound = impact.boundNodes.map { it.name }
-                                val text = "[Figma Query: impact] target=$normTarget impacted_vars=${vars.size} bound_nodes=${bound.size} vars=[${vars.take(3).joinToString(", ")}]"
-                                println(truncateSummary(text, false))
-                            }
-                            return 0
-                        }
-                        "spatial" -> {
-                            val bounds = if (boundsArg != null) {
-                                val parts = boundsArg.split(',').map { it.trim().toDoubleOrNull() ?: 0.0 }
-                                if (parts.size >= 4) {
-                                    FigmaSpatialBounds(parts[0], parts[1], parts[2], parts[3])
-                                } else {
-                                    FigmaSpatialBounds(0.0, 0.0, 0.0, 0.0)
-                                }
-                            } else {
-                                val targetNode = server.store.queryFigmaNodeById(fileKey, normTarget)
-                                    ?: server.store.queryFigmaNodesByName(fileKey, normTarget).firstOrNull()
-                                targetNode?.spatialBounds ?: FigmaSpatialBounds(0.0, 0.0, 0.0, 0.0)
-                            }
-                            val intersecting = server.store.queryFigmaSpatialIntersection(fileKey, bounds)
-                            if (isJson) {
-                                println(jsonPretty.encodeToString(intersecting))
-                            } else {
-                                val names = intersecting.map { it.name }
-                                val text = "[Figma Query: spatial] bounds=[${bounds.minX.toInt()}..${bounds.maxX.toInt()}, ${bounds.minY.toInt()}..${bounds.maxY.toInt()}] nodes=${intersecting.size} items=[${names.take(3).joinToString(", ")}]"
-                                println(truncateSummary(text, false))
-                            }
-                            return 0
-                        }
-                        "god_nodes" -> {
-                            val godNodes = server.store.queryFigmaGodNodes(fileKey, limit = 10)
-                            if (isJson) {
-                                val arr = buildJsonArray {
-                                    for ((node, count) in godNodes) {
-                                        add(buildJsonObject {
-                                            put("node_id", node.nodeId)
-                                            put("name", node.name)
-                                            put("type", node.nodeType)
-                                            put("references", count)
-                                        })
-                                    }
-                                }
-                                println(jsonPretty.encodeToString(arr))
-                            } else {
-                                val items = godNodes.map { "${it.first.name} (${it.second} refs)" }
-                                val text = "[Figma Query: god_nodes] fileKey=$fileKey top_nodes=${godNodes.size} nodes=[${items.take(3).joinToString(", ")}]"
-                                println(truncateSummary(text, false))
-                            }
-                            return 0
-                        }
-                        "shortest_path" -> {
-                            val path = server.store.findFigmaShortestPath(fileKey, normTarget, normSecondaryTarget, depth = maxOf(depth, 10))
-                            if (isJson) {
-                                println(jsonPretty.encodeToString(path))
-                            } else {
-                                val names = path.map { it.name }
-                                val text = "[Figma Query: shortest_path] fileKey=$fileKey from=$normTarget to=$normSecondaryTarget hops=${maxOf(0, path.size - 1)} path=[${names.joinToString(" -> ")}]"
-                                println(truncateSummary(text, false))
-                            }
-                            return 0
-                        }
-                        else -> {
-                            println("Unknown figma query action: $figmaAction. Valid: symbol, callers, impact, spatial, god_nodes, shortest_path")
-                            return 1
-                        }
-                    }
-                }
-                "audit" -> {
-                    val auditor = FigmaDesignAuditor(server.store)
-                    val result = auditor.audit(fileKey)
-                    if (isJson) {
-                        println(jsonPretty.encodeToString(result))
-                    } else {
-                        val violationSnippets = if (result.violations.isNotEmpty()) {
-                            " violations=[${result.violations.take(3).joinToString("; ") { "${it.rule}: ${it.nodeName}" }}]"
-                        } else ""
-                        val text = "[Figma Audit] project=$project file=$fileKey passed=${result.passed} score=${result.maturityScore.toInt()}/100 violations=${result.violations.size} polish_delta=${result.polishDelta.size}$violationSnippets"
-                        println(truncateSummary(text, false))
-                    }
-                    return if (result.passed) 0 else 1
-                }
-                "synthesize-scope" -> {
-                    val auditor = FigmaDesignAuditor(server.store)
-                    val scope = auditor.synthesizeFigmaScope(project, fileKey, normSeeds)
-                    if (isJson) {
-                        println(jsonPretty.encodeToString(scope))
-                    } else {
-                        val collisionSnippets = if (scope.potentialCollisions.isNotEmpty()) {
-                            " collisions=${scope.potentialCollisions.size}"
-                        } else ""
-                        val text = "[Figma 3D Scope] project=$project file=$fileKey bounds=[${scope.spatialBounds.minX.toInt()}..${scope.spatialBounds.maxX.toInt()}, ${scope.spatialBounds.minY.toInt()}..${scope.spatialBounds.maxY.toInt()}] nodes=${scope.scopedNodesCount} shared_components=${scope.sharedMasterComponents.size} tokens=${scope.tokenLayers.size}$collisionSnippets"
-                        println(truncateSummary(text, false))
-                    }
-                    return 0
-                }
+                "index" -> return runFigmaIndexSubcommand(server, project, fileKey, snapshotPath, tokensPath, isStdin, isJson)
+                "query" -> return runFigmaQuerySubcommand(server, fileKey, figmaAction, normTarget, normSecondaryTarget, depth, boundsArg, isJson)
+                "audit" -> return runFigmaAuditSubcommand(server, project, fileKey, isJson)
+                "synthesize-scope" -> return runFigmaScopeSubcommand(server, project, fileKey, normSeeds, isJson)
                 "version" -> {
-                    if (isJson) {
-                        println(jsonPretty.encodeToString(buildJsonObject {
-                            put("name", "atlas")
-                            put("version", VERSION)
-                        }))
-                    } else {
-                        println("atlas $VERSION")
-                    }
+                    printCliVersion(isJson)
                     return 0
                 }
                 else -> {
