@@ -2523,6 +2523,232 @@ class PolyglotAstExtractor {
             return startLine
         }
 
+        private val ALLOWED_PYTHON_DUNDERS = setOf(
+            "__init__", "__enter__", "__exit__", "__call__", "__str__", "__repr__",
+            "__getitem__", "__setitem__", "__len__", "__iter__", "__next__", "__contains__",
+            "__aenter__", "__aexit__", "__eq__", "__hash__"
+        )
+
+        private fun isAllowedPythonDeclaration(name: String): Boolean {
+            if (!name.startsWith("_")) return true
+            val isDunder = name.startsWith("__") && name.endsWith("__")
+            return isDunder && name in ALLOWED_PYTHON_DUNDERS
+        }
+
+        private fun extractPythonImports(maskedText: String): List<Pair<String, Int>> {
+            return PY_IMP_RE.findAll(maskedText).map { match ->
+                val mod = match.groupValues[1].ifEmpty { match.groupValues[2] }
+                Pair(mod, maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
+            }.toList()
+        }
+
+        private fun buildPythonNodeIdentifiers(
+            fileId: String,
+            relPath: String,
+            name: String,
+            scopeStack: List<ScopeEntry>
+        ): Pair<String, String> {
+            val prefix = scopeStack.joinToString(".") { it.name }
+            return if (prefix.isNotEmpty()) {
+                Pair("$fileId#$prefix.$name", "$relPath:$prefix.$name")
+            } else {
+                Pair("$fileId#$name", "$relPath:$name")
+            }
+        }
+
+        private fun buildPythonNode(
+            nodeId: String,
+            qualifiedName: String,
+            name: String,
+            kw: String,
+            startLine: Int,
+            endLine: Int,
+            isTopLevel: Boolean,
+            lines: List<String>,
+            maskedLines: List<String>,
+            fileId: String,
+            relPath: String,
+            projectId: String,
+            moduleId: String,
+            sourceSet: String
+        ): GraphNode {
+            val sigLine = buildPythonHeaderSignature(lines, maskedLines, startLine, endLine)
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
+            val headerEndLine = findPythonHeaderEndLine(maskedLines, startLine, endLine)
+            val description = if (isTopLevel) {
+                extractPythonDocDescription(lines, startLine, headerEndLine, endLine)
+            } else null
+            val kind = if ("class" in kw) "class" else "function"
+            val (cVec, cScore) = computeComplexityMetrics(
+                kind = kind,
+                startLine = startLine,
+                endLine = endLine,
+                maskedLines = maskedLines,
+                lines = lines,
+                language = "python",
+                functionName = name
+            )
+
+            return GraphNode(
+                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                qualifiedName = qualifiedName, kind = kind,
+                signature = sigLine, startLine = startLine, endLine = endLine,
+                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                archLayer = arch, isTestDouble = isTd,
+                description = description, isTopLevel = isTopLevel,
+                cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
+                maxNestingDepth = cVec.maxNesting, complexityScore = cScore
+            )
+        }
+
+        private fun buildPythonImportEdges(
+            nodeId: String,
+            projectId: String,
+            imports: List<Pair<String, Int>>
+        ): List<GraphEdge> {
+            return imports.map { (impTarget, impLine) ->
+                GraphEdge(
+                    edgeId = "$nodeId:imp:$impTarget:$impLine",
+                    projectId = projectId,
+                    sourceNodeId = nodeId,
+                    targetNodeId = "sym:$impTarget",
+                    edgeType = "IMPORTS",
+                    lineNumber = impLine
+                )
+            }
+        }
+
+        private fun isAllowedPythonCallee(callee: String, nodeName: String, receiver: String?): Boolean {
+            val isSelfCall = callee == nodeName && (receiver.isNullOrEmpty() || receiver == "self")
+            return !isSelfCall && callee !in CALL_STOPWORDS && !callee.startsWith("_")
+        }
+
+        private fun pruneScopeStack(scopeStack: MutableList<ScopeEntry>, startLine: Int) {
+            while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
+                scopeStack.removeAt(scopeStack.size - 1)
+            }
+        }
+
+        private fun getGroupName(match: MatchResult): String? {
+            val name = match.groups["name"]?.value
+            return if (name != null && isAllowedPythonDeclaration(name)) name else null
+        }
+
+        private fun extractDeclHeader(match: MatchResult): Triple<String, String, String>? {
+            val name = getGroupName(match) ?: return null
+            val groups = match.groups
+            val indent = groups["indent"]?.value ?: ""
+            val kw = groups["kw"]?.value ?: "def"
+            return Triple(indent, kw, name)
+        }
+
+        private fun appendScopeIfBlock(kw: String, name: String, startLine: Int, endLine: Int, scopeStack: MutableList<ScopeEntry>) {
+            if ("class" in kw || "def" in kw) {
+                scopeStack.add(ScopeEntry(name, startLine, endLine))
+            }
+        }
+
+        private fun recordNodeAndEdges(
+            node: GraphNode,
+            isTopLevel: Boolean,
+            nodeId: String,
+            projectId: String,
+            imports: List<Pair<String, Int>>,
+            nodes: MutableList<GraphNode>,
+            edges: MutableList<GraphEdge>
+        ) {
+            nodes.add(node)
+            if (isTopLevel) {
+                edges.addAll(buildPythonImportEdges(nodeId, projectId, imports))
+            }
+        }
+
+        private fun processPythonDeclaration(
+            match: MatchResult,
+            maskedText: String,
+            lines: List<String>,
+            maskedLines: List<String>,
+            scopeStack: MutableList<ScopeEntry>,
+            fileId: String,
+            relPath: String,
+            projectId: String,
+            moduleId: String,
+            sourceSet: String,
+            imports: List<Pair<String, Int>>,
+            nodes: MutableList<GraphNode>,
+            edges: MutableList<GraphEdge>
+        ): Boolean {
+            val (indent, kw, name) = extractDeclHeader(match) ?: return false
+            val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
+            val endLine = findPythonBlockEndLine(lines, maskedLines, startLine)
+
+            pruneScopeStack(scopeStack, startLine)
+            val (nodeId, qualifiedName) = buildPythonNodeIdentifiers(fileId, relPath, name, scopeStack)
+            val isTopLevel = indent.isEmpty() && scopeStack.isEmpty()
+
+            val node = buildPythonNode(
+                nodeId = nodeId, qualifiedName = qualifiedName, name = name, kw = kw,
+                startLine = startLine, endLine = endLine, isTopLevel = isTopLevel,
+                lines = lines, maskedLines = maskedLines, fileId = fileId,
+                relPath = relPath, projectId = projectId, moduleId = moduleId,
+                sourceSet = sourceSet
+            )
+            recordNodeAndEdges(node, isTopLevel, nodeId, projectId, imports, nodes, edges)
+            appendScopeIfBlock(kw, name, startLine, endLine, scopeStack)
+            return isTopLevel
+        }
+
+        private fun buildChildRanges(nodes: List<GraphNode>, parent: GraphNode): List<IntRange> {
+            return nodes.filter { child ->
+                child.nodeId != parent.nodeId &&
+                    child.startLine >= parent.startLine &&
+                    child.endLine <= parent.endLine &&
+                    (child.startLine > parent.startLine || child.endLine < parent.endLine)
+            }.map { it.startLine..it.endLine }
+        }
+
+        private fun parseCallEdge(
+            callMatch: MatchResult,
+            node: GraphNode,
+            scanStartLine: Int,
+            body: String,
+            seenCallees: MutableSet<String>,
+            projectId: String
+        ): GraphEdge? {
+            val receiver = callMatch.groups["receiver"]?.value?.trim()
+            val callee = callMatch.groups["callee"]?.value ?: return null
+            val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
+            if (!isAllowedPythonCallee(callee, node.name, receiver) || !seenCallees.add(targetSym)) {
+                return null
+            }
+            val callLine = scanStartLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+            return GraphEdge(
+                edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
+                sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
+                provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
+            )
+        }
+
+        private fun extractNodeCallEdges(
+            node: GraphNode,
+            nodes: List<GraphNode>,
+            maskedLines: List<String>,
+            projectId: String
+        ): List<GraphEdge> {
+            val childRanges = buildChildRanges(nodes, node)
+            val headerEndLine = findPythonHeaderEndLine(maskedLines, node.startLine, node.endLine)
+            val scanStartLine = if (headerEndLine < node.endLine) headerEndLine + 1 else node.startLine
+            val body = maskChildLineRanges(maskedLines, scanStartLine, node.endLine, childRanges)
+            val seenCallees = mutableSetOf<String>()
+            val edges = mutableListOf<GraphEdge>()
+
+            for (callMatch in CALL_RE.findAll(body)) {
+                val edge = parseCallEdge(callMatch, node, scanStartLine, body, seenCallees, projectId)
+                if (edge != null) edges.add(edge)
+            }
+            return edges
+        }
+
         private fun extractPython(
             projectId: String, relPath: String, sourceText: String, moduleId: String, sourceSet: String,
             precomputedMaskedText: String? = null
@@ -2534,110 +2760,19 @@ class PolyglotAstExtractor {
             val maskedText = precomputedMaskedText ?: maskCommentsAndStrings(sourceText, "python")
             val maskedLines = maskedText.lines()
             val scopeStack = mutableListOf<ScopeEntry>()
-
-            val imports = PY_IMP_RE.findAll(maskedText).map { match ->
-                val mod = match.groupValues[1].ifEmpty { match.groupValues[2] }
-                Pair(mod, maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
-            }.toList()
+            val imports = extractPythonImports(maskedText)
 
             var topLevelCount = 0
             for (match in PY_DECL_RE.findAll(maskedText)) {
-                val indent = match.groups["indent"]?.value ?: ""
-                val kw = match.groups["kw"]?.value ?: "def"
-                val name = match.groups["name"]?.value ?: continue
-                val isDunder = name.startsWith("__") && name.endsWith("__")
-                val isAllowedDunder = isDunder && name in setOf(
-                    "__init__", "__enter__", "__exit__", "__call__", "__str__", "__repr__",
-                    "__getitem__", "__setitem__", "__len__", "__iter__", "__next__", "__contains__",
-                    "__aenter__", "__aexit__", "__eq__", "__hash__"
+                val isTop = processPythonDeclaration(
+                    match, maskedText, lines, maskedLines, scopeStack,
+                    fileId, relPath, projectId, moduleId, sourceSet, imports, nodes, edges
                 )
-                if (name.startsWith("_") && !isAllowedDunder) continue
-
-                val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-                val endLine = findPythonBlockEndLine(lines, maskedLines, startLine)
-
-                while (scopeStack.isNotEmpty() && scopeStack.last().endLine < startLine) {
-                    scopeStack.removeAt(scopeStack.size - 1)
-                }
-                val enclosingPrefix = scopeStack.joinToString(".") { it.name }
-                val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
-                    Pair("$fileId#$enclosingPrefix.$name", "$relPath:$enclosingPrefix.$name")
-                } else {
-                    Pair("$fileId#$name", "$relPath:$name")
-                }
-
-                val isTopLevel = indent.isEmpty() && scopeStack.isEmpty()
-                if (isTopLevel) topLevelCount++
-
-                val sigLine = buildPythonHeaderSignature(lines, maskedLines, startLine, endLine)
-                val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-
-                val headerEndLine = findPythonHeaderEndLine(maskedLines, startLine, endLine)
-                val description = if (isTopLevel) {
-                    extractPythonDocDescription(lines, startLine, headerEndLine, endLine)
-                } else null
-
-                val kind = if ("class" in kw) "class" else "function"
-                val (cVec, cScore) = computeComplexityMetrics(
-                    kind = kind,
-                    startLine = startLine,
-                    endLine = endLine,
-                    maskedLines = maskedLines,
-                    lines = lines,
-                    language = "python",
-                    functionName = name
-                )
-
-                nodes.add(
-                    GraphNode(
-                        nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
-                        qualifiedName = qualifiedName, kind = kind,
-                        signature = sigLine, startLine = startLine, endLine = endLine,
-                        moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
-                        archLayer = arch, isTestDouble = isTd,
-                        description = description, isTopLevel = isTopLevel,
-                        cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
-                        maxNestingDepth = cVec.maxNesting, complexityScore = cScore
-                    )
-                )
-
-                if (isTopLevel) {
-                    for ((impTarget, impLine) in imports) {
-                        edges.add(GraphEdge(
-                            edgeId = "$nodeId:imp:$impTarget:$impLine", projectId = projectId,
-                            sourceNodeId = nodeId, targetNodeId = "sym:$impTarget", edgeType = "IMPORTS",
-                            lineNumber = impLine
-                        ))
-                    }
-                }
-
-                if ("class" in kw || "def" in kw) {
-                    scopeStack.add(ScopeEntry(name, startLine, endLine))
-                }
+                if (isTop) topLevelCount++
             }
 
             for (node in nodes) {
-                val childRanges = nodes
-                    .filter { it.nodeId != node.nodeId && it.startLine >= node.startLine && it.endLine <= node.endLine && (it.startLine > node.startLine || it.endLine < node.endLine) }
-                    .map { it.startLine..it.endLine }
-                val headerEndLine = findPythonHeaderEndLine(maskedLines, node.startLine, node.endLine)
-                val scanStartLine = if (headerEndLine < node.endLine) headerEndLine + 1 else node.startLine
-                val body = maskChildLineRanges(maskedLines, scanStartLine, node.endLine, childRanges)
-                val seenCallees = mutableSetOf<String>()
-                for (callMatch in CALL_RE.findAll(body)) {
-                    val receiver = callMatch.groups["receiver"]?.value?.trim()
-                    val callee = callMatch.groups["callee"]?.value ?: continue
-                    val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
-                    val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "self")
-                    if (!isSelfCall && callee !in CALL_STOPWORDS && !callee.startsWith("_") && seenCallees.add(targetSym)) {
-                        val callLine = scanStartLine + body.substring(0, callMatch.range.first).count { it == '\n' }
-                        edges.add(GraphEdge(
-                            edgeId = "${node.nodeId}:call:$targetSym:$callLine", projectId = projectId,
-                            sourceNodeId = node.nodeId, targetNodeId = "sym:$targetSym", edgeType = "CALLS",
-                            provenance = "INFERRED_CALL", confidence = 0.85, lineNumber = callLine
-                        ))
-                    }
-                }
+                edges.addAll(extractNodeCallEdges(node, nodes, maskedLines, projectId))
             }
             return Triple(nodes, edges, topLevelCount)
         }
