@@ -203,6 +203,7 @@ class AtlasMcpServer(
                         add("complexity_doctor")
                         add("migrate_tools")
                         add("architect_context")
+                        add("audit_skills")
                     }
                     put("description", "Audit, synthesis, Compose compliance, complexity audit, learning, or indexing action to execute.")
                 }
@@ -1111,6 +1112,7 @@ class AtlasMcpServer(
             "record_memory" -> handleAuditRecordMemory(args, project, targets)
             "remedy_architecture", "fix_architecture", "fix", "remedy" -> handleAuditRemedyArchitecture(args, project, targets)
             "migrate_tools", "check_legacy_tools" -> handleAuditMigrateTools(args, targets)
+            "audit_skills" -> handleAuditSkills(project, targets)
             else -> throw IllegalArgumentException("Unsupported atlas_audit action: $action")
         }
     }
@@ -1196,6 +1198,17 @@ class AtlasMcpServer(
             put("mode", descMode)
             put("total_suggestions", suggestions.size)
             put("suggestions", json.encodeToJsonElement(suggestions))
+        }
+    }
+
+    private fun handleAuditSkills(project: String, targets: List<String>): JsonObject {
+        val violations = auditor.checkSkillViolations(project, if (targets.isNotEmpty()) targets else null)
+        val passed = violations.isEmpty()
+        return buildJsonObject {
+            put("project", project)
+            put("passed", passed)
+            put("violations_count", violations.size)
+            put("violations", json.encodeToJsonElement(violations))
         }
     }
 

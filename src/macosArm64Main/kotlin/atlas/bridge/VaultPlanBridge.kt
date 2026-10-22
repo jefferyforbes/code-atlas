@@ -657,7 +657,7 @@ object VaultPlanBridge {
         val fmText = extractFrontmatterText(markdownText) ?: return ""
         val pattern = Regex("""(?m)^\s*${Regex.escape(key)}\s*:\s*(.+)$""")
         val match = pattern.find(fmText) ?: return ""
-        return match.groupValues[1].trim().trim('\'', '"')
+        return match.groupValues[1].substringBefore('#').trim().trim('\'', '"')
     }
 
     private class ScopedFilesState {

@@ -376,6 +376,9 @@ class AtlasCli {
             if (args.action == "architect_context" || args.action == "architect-context") {
                 return runAuditArchitectContext(server, args.project, filterPaths, args.depth, args.isJson)
             }
+            if (args.ruleIdArg?.startsWith("SKILL") == true) {
+                return runAuditSkills(server, args.project, filterPaths, args.ruleIdArg, args.isJson)
+            }
             return runAuditArchitecture(server, args.project, filterPaths, args.descriptionMode, args.outcome, args.note, args.isJson)
         }
 
@@ -422,10 +425,58 @@ class AtlasCli {
             return arr?.size ?: 0
         }
 
-        private fun isArchitectureAuditPassed(data: JsonObject, bViolations: Int, lInversions: Int, pCollisions: Int, cViolations: Int): Boolean {
+        private fun isArchitectureAuditPassed(
+            data: JsonObject,
+            bViolations: Int,
+            lInversions: Int,
+            pCollisions: Int,
+            cViolations: Int,
+            sViolations: Int = 0
+        ): Boolean {
             val explicit = data["passed"]?.jsonPrimitive?.booleanOrNull
             if (explicit != null) return explicit
-            return bViolations == 0 && lInversions == 0 && pCollisions == 0 && cViolations == 0
+            return bViolations == 0 && lInversions == 0 && pCollisions == 0 && cViolations == 0 && sViolations == 0
+        }
+
+        private fun runAuditSkills(
+            server: AtlasMcpServer,
+            project: String,
+            filterPaths: List<String>,
+            ruleId: String?,
+            isJson: Boolean
+        ): Int {
+            val toolArgs = buildJsonObject {
+                put("action", "audit_skills")
+                put("project", project)
+                if (filterPaths.isNotEmpty()) {
+                    putJsonArray("targets") { filterPaths.forEach { add(it) } }
+                }
+            }
+            val res = server.callTool("atlas_audit", toolArgs)
+            val data = loadSpilledData(res)
+            val rawViolations = data["violations"]?.jsonArray ?: JsonArray(emptyList())
+            val filteredViolations = if (ruleId.isNullOrBlank() || ruleId == "SKILL") {
+                rawViolations
+            } else {
+                JsonArray(rawViolations.filter { it.jsonObject["rule"]?.jsonPrimitive?.content == ruleId })
+            }
+            val passed = filteredViolations.isEmpty()
+            val text = if (isJson) {
+                buildJsonObject {
+                    put("project", project)
+                    put("passed", passed)
+                    put("rule", ruleId ?: "ALL")
+                    put("violations_count", filteredViolations.size)
+                    put("violations", filteredViolations)
+                }.let { jsonPretty.encodeToString(it) }
+            } else {
+                val count001 = filteredViolations.count { it.jsonObject["rule"]?.jsonPrimitive?.content == "SKILL-001" }
+                val count002 = filteredViolations.count { it.jsonObject["rule"]?.jsonPrimitive?.content == "SKILL-002" }
+                val count003 = filteredViolations.count { it.jsonObject["rule"]?.jsonPrimitive?.content == "SKILL-003" }
+                "[Audit] project=$project passed=$passed skill_violations=${filteredViolations.size} (SKILL-001: $count001, SKILL-002: $count002, SKILL-003: $count003)"
+            }
+            println(truncateSummary(text, isJson))
+            return if (passed) 0 else 1
         }
 
         private fun runAuditArchitecture(
@@ -456,11 +507,12 @@ class AtlasCli {
             val pCollisions = extractAuditArraySize(data, "plan_3d_collisions", "plan3dCollisions")
             val dSuggestions = extractAuditArraySize(data, "description_suggestions", "descriptionSuggestions")
             val cViolations = extractAuditArraySize(data, "complexity_violations", "complexityViolations")
-            val passed = isArchitectureAuditPassed(data, bViolations, lInversions, pCollisions, cViolations)
+            val sViolations = extractAuditArraySize(data, "skill_violations", "skillViolations")
+            val passed = isArchitectureAuditPassed(data, bViolations, lInversions, pCollisions, cViolations, sViolations)
             val text = if (isJson) {
                 jsonPretty.encodeToString(data)
             } else {
-                "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions complexity_violations=$cViolations description_suggestions=$dSuggestions"
+                "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions skill_violations=$sViolations complexity_violations=$cViolations description_suggestions=$dSuggestions"
             }
             println(truncateSummary(text, isJson))
             return if (passed) 0 else 1

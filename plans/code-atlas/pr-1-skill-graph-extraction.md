@@ -6,7 +6,7 @@ contract:
   task: pr-1-skill-graph-extraction
   objective: Deepen skill graph extraction in VaultPlanBridge to parse companion markdown links, script references, and binary executions, emitting typed edges and tracking unresolvable references.
 
-status: review_pending # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: merged
 
 size:
   complexity: small

@@ -2473,5 +2473,197 @@ class EngineAndMcpTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testSkillAuditInvariantsSkill001BrokenReferences() {
+        val dbPath = "/tmp/test_atlas_skill_001_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val skillNode = GraphNode(
+                nodeId = "proj:skill#android",
+                projectId = "proj",
+                fileId = "proj:skills/android/SKILL.md",
+                name = "android",
+                qualifiedName = "android",
+                kind = "skill",
+                description = "Modern Android engineering, architecture, and Jetpack Compose routing hub."
+            )
+            val brokenEdge = GraphEdge(
+                edgeId = "proj:e1",
+                projectId = "proj",
+                sourceNodeId = "proj:skill#android",
+                targetNodeId = "proj:missing/path.md",
+                edgeType = "REFERENCES_FILE",
+                provenance = "EXTRACTED_LOCAL_FILE_REF",
+                lineNumber = 14
+            )
+            store.upsertNodesAndEdges("proj", listOf(skillNode), listOf(brokenEdge))
+
+            val allNodes = store.listNodes("proj")
+            val rawEdges = store.listEdges("proj")
+            val typedEdges = store.listEdges("proj", listOf("REFERENCES_FILE", "EXECUTES_SCRIPT"))
+            assertEquals(1, allNodes.size, "allNodes should have 1 node")
+            assertEquals(1, rawEdges.size, "rawEdges should have 1 edge")
+            assertEquals(1, typedEdges.size, "typedEdges should have 1 edge")
+
+            val auditor = ArchitectureAuditor(store)
+            val violations = auditor.checkBrokenSkillReferences("proj")
+            assertEquals(1, violations.size)
+            assertEquals("SKILL-001", violations[0].rule)
+            assertEquals("android", violations[0].skillName)
+            assertEquals(14, violations[0].lineNumber)
+            assertTrue(violations[0].message.contains("references non-existent"))
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testSkillAuditInvariantsSkill002FrontmatterSchema() {
+        val dbPath = "/tmp/test_atlas_skill_002_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val validSkill = GraphNode(
+                nodeId = "proj:skill#valid",
+                projectId = "proj",
+                fileId = "proj:skills/valid/SKILL.md",
+                name = "valid",
+                qualifiedName = "valid",
+                kind = "skill",
+                description = "This is a valid long description exceeding 20 characters for routing."
+            )
+            val missingDesc = GraphNode(
+                nodeId = "proj:skill#no-desc",
+                projectId = "proj",
+                fileId = "proj:skills/no-desc/SKILL.md",
+                name = "no-desc",
+                qualifiedName = "no-desc",
+                kind = "skill",
+                description = null
+            )
+            val foldedDesc = GraphNode(
+                nodeId = "proj:skill#folded",
+                projectId = "proj",
+                fileId = "proj:skills/folded/SKILL.md",
+                name = "folded",
+                qualifiedName = "folded",
+                kind = "skill",
+                description = ">-"
+            )
+            val shortDesc = GraphNode(
+                nodeId = "proj:skill#short",
+                projectId = "proj",
+                fileId = "proj:skills/short/SKILL.md",
+                name = "short",
+                qualifiedName = "short",
+                kind = "skill",
+                description = "too short"
+            )
+            store.upsertNodesAndEdges("proj", listOf(validSkill, missingDesc, foldedDesc, shortDesc), emptyList())
+
+            val auditor = ArchitectureAuditor(store)
+            val violations = auditor.checkSkillSchemaFrontmatter("proj")
+            assertEquals(3, violations.size)
+            val names = violations.map { it.skillName }.toSet()
+            assertTrue(names.contains("no-desc"))
+            assertTrue(names.contains("folded"))
+            assertTrue(names.contains("short"))
+            assertFalse(names.contains("valid"))
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testSkillAuditInvariantsSkill003CircularDependencyDAG() {
+        val dbPath = "/tmp/test_atlas_skill_003_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val skillA = GraphNode(
+                nodeId = "proj:skill#alpha",
+                projectId = "proj",
+                fileId = "proj:skills/alpha/SKILL.md",
+                name = "alpha",
+                qualifiedName = "alpha",
+                kind = "skill",
+                description = "Alpha skill for test operations exceeding 20 characters."
+            )
+            val skillB = GraphNode(
+                nodeId = "proj:skill#beta",
+                projectId = "proj",
+                fileId = "proj:skills/beta/SKILL.md",
+                name = "beta",
+                qualifiedName = "beta",
+                kind = "skill",
+                description = "Beta skill for test operations exceeding 20 characters."
+            )
+            val edgeAB = GraphEdge(
+                edgeId = "proj:e1",
+                projectId = "proj",
+                sourceNodeId = "proj:skill#alpha",
+                targetNodeId = "proj:skill#beta",
+                edgeType = "DEPENDS_ON_SKILL"
+            )
+            val edgeBA = GraphEdge(
+                edgeId = "proj:e2",
+                projectId = "proj",
+                sourceNodeId = "proj:skill#beta",
+                targetNodeId = "proj:skill#alpha",
+                edgeType = "DEPENDS_ON_SKILL"
+            )
+            store.upsertNodesAndEdges("proj", listOf(skillA, skillB), listOf(edgeAB, edgeBA))
+
+            val auditor = ArchitectureAuditor(store)
+            val violations = auditor.checkSkillDependencyCycles("proj")
+            assertEquals(1, violations.size)
+            assertEquals("SKILL-003", violations[0].rule)
+            assertTrue(violations[0].message.contains("alpha -> beta -> alpha") || violations[0].message.contains("beta -> alpha -> beta"))
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testFullAuditAndMcpActionIncludesSkillViolations() {
+        val dbPath = "/tmp/test_atlas_skill_mcp_${getpid()}.db"
+        PlatformFiles.delete(dbPath)
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val skill = GraphNode(
+                nodeId = "proj:skill#bad",
+                projectId = "proj",
+                fileId = "proj:skills/bad/SKILL.md",
+                name = "bad",
+                qualifiedName = "bad",
+                kind = "skill",
+                description = ">"
+            )
+            store.upsertNodesAndEdges("proj", listOf(skill), emptyList())
+
+            val auditor = ArchitectureAuditor(store)
+            val fullReport = auditor.runFullAudit("proj")
+            assertFalse(fullReport.passed, "AuditReport.passed must be false when skill violations exist")
+            assertEquals(1, fullReport.skillViolations.size)
+            assertEquals("SKILL-002", fullReport.skillViolations[0].rule)
+
+            val server = AtlasMcpServer(workspaceRoot = ".", customDbPath = dbPath)
+            val toolRes = server.callTool("atlas_audit", buildJsonObject {
+                put("action", "audit_skills")
+                put("project", "proj")
+            })
+            val resObj = toolRes.jsonObject
+            assertFalse(resObj["passed"]!!.jsonPrimitive.boolean)
+            assertEquals(1, resObj["violations_count"]!!.jsonPrimitive.int)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }
 
