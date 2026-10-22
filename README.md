@@ -6,7 +6,7 @@
 
 *Sub-15ms Cold-Start &middot; Ahead-Of-Time Native Binary &middot; Zero Runtime Dependencies &middot; Model Context Protocol (MCP)*
 
-[![Version](https://img.shields.io/badge/version-0.6.0-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
+[![Version](https://img.shields.io/badge/version-0.7.0-blue.svg)](https://github.com/jefferyforbes/code-atlas/releases)
 [![Changelog](https://img.shields.io/badge/changelog-Keep%20a%20Changelog-orange.svg)](CHANGELOG.md)
 [![Kotlin](https://img.shields.io/badge/Kotlin_Native-2.2.0-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/native-overview.html)
 [![macOS](https://img.shields.io/badge/macOS-Apple_Silicon_(arm64)-000000?logo=apple&logoColor=white)](https://apple.com)
@@ -169,6 +169,14 @@ flowchart TD
 - **Privatization (`--make-private`)**: Converts unreferenced secondary declarations to private.
 - **Tool Migration Engine (`atlas migrate-tools`)**: Recursively scans and migrates legacy `codegraph_*` calls to `atlas_*` across code, plans, and prompts.
 
+### 7. Agent Skill Graph & Invariant Audits
+- **Agent Skill Topology**: Indexes `SKILL.md` manifests across repositories, plugins, and workspaces, capturing `DEPENDS_ON_SKILL` dependencies, companion documentation links (`REFERENCES_FILE`), and script executions (`EXECUTES_SCRIPT`).
+- **3 Deterministic Skill Invariants (`SKILL-001/002/003`)**:
+  - `SKILL-001`: Flags broken companion documentation links, missing playbooks, or non-existent script execution paths.
+  - `SKILL-002`: Enforces frontmatter schema integrity (required `name`, actionable descriptions $\ge 20$ chars, catching broken YAML multiline foldings `>` / `>-`).
+  - `SKILL-003`: Evaluates the directed dependency graph for circular dependency cycles, outputting canonical directed loop chains.
+- **Skill Blast Radius**: Run `atlas query --action impact --target <file-or-script>` to identify all downstream agent skills and workflows affected before refactoring shared scripts or documentation.
+
 ---
 
 ## CLI Command Matrix
@@ -182,6 +190,7 @@ flowchart TD
 | `atlas query --url` | `--url <url> [--project <p>]` | Resolve HTTP routes, Figma deep links, or code line spans. |
 | `atlas synthesize-scope` | `[--project <p>] --paths <f1>...` or `--target <sym>` | Synthesizes 3D Concurrency Boundary (`files`, `modules`, `architecture`). |
 | `atlas audit` | `[--project <p>] [--paths <p1>...] [--descriptions <m>]` | Enforce Clean Architecture layers and BOOST-003. Exits 0/1. |
+| `atlas audit --rule SKILL` | `[--project <p>] [--rule SKILL-001\|002\|003] [--json]` | Audit agent skills for broken references, schema violations, and DAG cycles. |
 | `atlas fix` | `[--project <p>] [--apply] [--make-private] [--test-cmd <cmd>]` | Autonomously plans, verifies, and applies AST splitting diffs. |
 | `atlas dead-code` | `[--project <p>]` | Detect unreferenced top-level declarations with zero callers. |
 | `atlas migrate-tools` | `[--path <dir>] [--apply] [--json]` | Detects and migrates deprecated `codegraph_*` tool calls to `atlas_*`. |
@@ -312,6 +321,14 @@ When MCP response payloads exceed **32,768 bytes** (32 KB), Atlas automatically 
 | `AD_HOC_DETACHED_SPECIMEN` | Gym | Detached static frames in Generative Gym bays instead of live `INSTANCE` nodes. |
 | `CANVAS_SPATIAL_TOPOLOGY` | Canvas | Top-level canvas sections violating the 2D orthogonal matrix grid topology. |
 | `WCAG_CONTRAST` | WCAG | Text nodes with color contrast ratio $< 4.5:1$ against immediate background. |
+
+### 3 Deterministic Agent Skill Invariants
+
+| Rule ID | Category | Severity | Description |
+| :--- | :--- | :--- | :--- |
+| `SKILL-001` | Reference Integrity | `ERROR` | Broken companion documentation links (`REFERENCES_FILE`) or missing script/binary executions (`EXECUTES_SCRIPT`). |
+| `SKILL-002` | Schema & Quality | `ERROR` | Missing frontmatter `name`, blank/missing `description`, malformed YAML folding (`>`, `>-`), or description $< 20$ chars. |
+| `SKILL-003` | Graph Topology | `ERROR` | Circular dependency cycles in the directed skill DAG (`DEPENDS_ON_SKILL`). |
 
 </details>
 
