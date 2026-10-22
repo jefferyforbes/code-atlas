@@ -6,7 +6,7 @@ contract:
   task: pr-2-skill-audit-invariants
   objective: Implement SKILL-001, SKILL-002, and SKILL-003 architectural audit invariants in ArchitectureAuditor to detect broken references, invalid frontmatter schema, and circular dependency cycles.
 
-status: review_pending # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: merged # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
 
 size:
   complexity: medium
