@@ -377,7 +377,7 @@ src/macosArm64Main/kotlin/atlas/
 
 ## Testing
 
-Atlas is backed by an automated native test suite executing 210+ assertions across parsers, spatial geometry, SQLite transactions, cyclic BFS path finding, Compose stability lattices, and MCP server communication:
+Atlas is backed by an automated native test suite executing 280+ assertions across parsers, spatial geometry, SQLite transactions, cyclic BFS path finding, Compose stability lattices, and MCP server communication:
 
 ```bash
 # Run all native unit and integration tests
