@@ -155,8 +155,6 @@ object PlatformFiles {
         return res.trim('.', '_').ifEmpty { "unnamed" }
     }
 
-    fun sanitizePathSegment(segment: String): String = sanitizeFileName(segment)
-
     fun logWarning(tag: String, message: String) {
         platform.posix.fputs("[$tag] Warning: $message\n", platform.posix.stderr)
         platform.posix.fflush(platform.posix.stderr)

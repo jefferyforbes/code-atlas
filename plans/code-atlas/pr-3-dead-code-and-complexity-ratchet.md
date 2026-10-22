@@ -6,7 +6,7 @@ contract:
   task: pr-3-dead-code-and-complexity-ratchet
   objective: Eliminate unreferenced dead code (PlatformFiles.sanitizePathSegment), decompose DDL table migration routines in SqliteGraphStore, and ratchet down cognitive complexity warnings from 23 to 22.
 
-status: ready # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: review_pending # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
 
 size:
   complexity: small

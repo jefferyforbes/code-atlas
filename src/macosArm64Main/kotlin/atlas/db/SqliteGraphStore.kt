@@ -333,25 +333,31 @@ class SqliteGraphStore(val dbPath: String) {
         }
     }
 
+    private fun queryTableColumns(tableName: String): Set<String> {
+        val cols = mutableSetOf<String>()
+        val stmt = db.prepare("PRAGMA table_info($tableName);")
+        try {
+            while (stmt.step()) {
+                cols.add(stmt.columnString(1))
+            }
+        } finally {
+            stmt.close()
+        }
+        return cols
+    }
+
+    private fun addMissingColumn(tableName: String, cols: Set<String>, column: String, definition: String) {
+        if (column !in cols) {
+            db.exec("ALTER TABLE $tableName ADD COLUMN $column $definition;")
+        }
+    }
+
     fun migrateComposeSchema() {
         try {
-            val cols = mutableSetOf<String>()
-            val stmt = db.prepare("PRAGMA table_info(compose_nodes);")
-            try {
-                while (stmt.step()) {
-                    cols.add(stmt.columnString(1))
-                }
-            } finally {
-                stmt.close()
-            }
-            if (cols.isNotEmpty()) {
-                if ("source_set" !in cols) {
-                    db.exec("ALTER TABLE compose_nodes ADD COLUMN source_set TEXT NOT NULL DEFAULT 'commonMain';")
-                }
-                if ("violation_mask" !in cols) {
-                    db.exec("ALTER TABLE compose_nodes ADD COLUMN violation_mask INTEGER NOT NULL DEFAULT 0;")
-                }
-            }
+            val cols = queryTableColumns("compose_nodes")
+            if (cols.isEmpty()) return
+            addMissingColumn("compose_nodes", cols, "source_set", "TEXT NOT NULL DEFAULT 'commonMain'")
+            addMissingColumn("compose_nodes", cols, "violation_mask", "INTEGER NOT NULL DEFAULT 0")
         } catch (e: Exception) {
             PlatformFiles.logWarning("SqliteGraphStore", "compose nodes schema migration failed: ${e.message}")
         }
@@ -359,36 +365,15 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun migrateNodesSchema() {
         try {
-            val cols = mutableSetOf<String>()
-            val stmt = db.prepare("PRAGMA table_info(nodes);")
-            try {
-                while (stmt.step()) {
-                    cols.add(stmt.columnString(1))
-                }
-            } finally {
-                stmt.close()
-            }
-            if (cols.isNotEmpty()) {
-                if ("description" !in cols) {
-                    db.exec("ALTER TABLE nodes ADD COLUMN description TEXT DEFAULT NULL;")
-                }
-                if ("is_top_level" !in cols) {
-                    db.exec("ALTER TABLE nodes ADD COLUMN is_top_level INTEGER NOT NULL DEFAULT 1;")
-                }
-                if ("cyclomatic_complexity" !in cols) {
-                    db.exec("ALTER TABLE nodes ADD COLUMN cyclomatic_complexity INTEGER NOT NULL DEFAULT 1;")
-                }
-                if ("cognitive_complexity" !in cols) {
-                    db.exec("ALTER TABLE nodes ADD COLUMN cognitive_complexity INTEGER NOT NULL DEFAULT 0;")
-                }
-                if ("max_nesting_depth" !in cols) {
-                    db.exec("ALTER TABLE nodes ADD COLUMN max_nesting_depth INTEGER NOT NULL DEFAULT 0;")
-                }
-                if ("complexity_score" !in cols) {
-                    db.exec("ALTER TABLE nodes ADD COLUMN complexity_score REAL NOT NULL DEFAULT 100.0;")
-                }
-                db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_complexity ON nodes(project_id, cognitive_complexity) WHERE cognitive_complexity >= 10;")
-            }
+            val cols = queryTableColumns("nodes")
+            if (cols.isEmpty()) return
+            addMissingColumn("nodes", cols, "description", "TEXT DEFAULT NULL")
+            addMissingColumn("nodes", cols, "is_top_level", "INTEGER NOT NULL DEFAULT 1")
+            addMissingColumn("nodes", cols, "cyclomatic_complexity", "INTEGER NOT NULL DEFAULT 1")
+            addMissingColumn("nodes", cols, "cognitive_complexity", "INTEGER NOT NULL DEFAULT 0")
+            addMissingColumn("nodes", cols, "max_nesting_depth", "INTEGER NOT NULL DEFAULT 0")
+            addMissingColumn("nodes", cols, "complexity_score", "REAL NOT NULL DEFAULT 100.0")
+            db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_complexity ON nodes(project_id, cognitive_complexity) WHERE cognitive_complexity >= 10;")
         } catch (e: Exception) {
             PlatformFiles.logWarning("SqliteGraphStore", "nodes schema migration failed: ${e.message}")
         }
