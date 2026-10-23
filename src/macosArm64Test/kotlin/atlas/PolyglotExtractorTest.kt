@@ -751,6 +751,77 @@ $tq
     }
 
     @Test
+    fun testLexicalScopeCallDisambiguationInSameFile() {
+        val src = """
+            package com.example.service
+
+            class ScannerA {
+                fun processLine(): Boolean = true
+                fun scan() {
+                    processLine()
+                }
+            }
+
+            class ScannerB {
+                fun processLine(): Boolean = false
+                fun scan() {
+                    processLine()
+                }
+            }
+        """.trimIndent()
+
+        val (nodes, rawEdges, _) = PolyglotAstExtractor.extractFile("proj", "src/Scanners.kt", src)
+        val resolved = PolyglotAstExtractor.resolveCrossFileEdges("proj", nodes, rawEdges)
+
+        val scanA = nodes.first { it.qualifiedName == "com.example.service.ScannerA.scan" }
+        val processA = nodes.first { it.qualifiedName == "com.example.service.ScannerA.processLine" }
+        val scanB = nodes.first { it.qualifiedName == "com.example.service.ScannerB.scan" }
+        val processB = nodes.first { it.qualifiedName == "com.example.service.ScannerB.processLine" }
+
+        val callA = resolved.filter { it.sourceNodeId == scanA.nodeId && it.edgeType == "CALLS" }
+        val callB = resolved.filter { it.sourceNodeId == scanB.nodeId && it.edgeType == "CALLS" }
+
+        assertTrue(callA.any { it.targetNodeId == processA.nodeId }, "ScannerA.scan must resolve to ScannerA.processLine")
+        assertFalse(callA.any { it.targetNodeId == processB.nodeId }, "ScannerA.scan must NOT resolve to ScannerB.processLine")
+
+        assertTrue(callB.any { it.targetNodeId == processB.nodeId }, "ScannerB.scan must resolve to ScannerB.processLine")
+        assertFalse(callB.any { it.targetNodeId == processB.nodeId && it.sourceNodeId == scanA.nodeId })
+
+        assertTrue(callB.any { it.targetNodeId == processB.nodeId }, "ScannerB.scan must resolve to ScannerB.processLine")
+        assertFalse(callB.any { it.targetNodeId == processA.nodeId }, "ScannerB.scan must NOT resolve to ScannerA.processLine")
+    }
+
+    @Test
+    fun testOuterLexicalScopeCallDisambiguation() {
+        val src = """
+            package com.example.service
+
+            class Container {
+                fun helper(): String = "outer"
+
+                class Inner {
+                    fun run(): String = helper()
+                }
+            }
+
+            class OtherContainer {
+                fun helper(): String = "other"
+            }
+        """.trimIndent()
+
+        val (nodes, rawEdges, _) = PolyglotAstExtractor.extractFile("proj", "src/Container.kt", src)
+        val resolved = PolyglotAstExtractor.resolveCrossFileEdges("proj", nodes, rawEdges)
+
+        val runNode = nodes.first { it.qualifiedName == "com.example.service.Container.Inner.run" }
+        val helperOuter = nodes.first { it.qualifiedName == "com.example.service.Container.helper" }
+        val helperOther = nodes.first { it.qualifiedName == "com.example.service.OtherContainer.helper" }
+
+        val runCalls = resolved.filter { it.sourceNodeId == runNode.nodeId && it.edgeType == "CALLS" }
+        assertTrue(runCalls.any { it.targetNodeId == helperOuter.nodeId }, "Container.Inner.run must resolve to Container.helper")
+        assertFalse(runCalls.any { it.targetNodeId == helperOther.nodeId }, "Container.Inner.run must NOT resolve to OtherContainer.helper")
+    }
+
+    @Test
     fun testInfixFunctionCallRecognition() {
         val src = """
             package com.example.crypto

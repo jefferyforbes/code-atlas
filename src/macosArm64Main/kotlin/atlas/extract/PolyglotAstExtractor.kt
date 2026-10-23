@@ -3724,27 +3724,60 @@ class PolyglotAstExtractor {
             return fileImports.any { imp -> qn.endsWith(".$imp") }
         }
 
+        private fun filterByLexicalScope(pool: List<GraphNode>, srcNode: GraphNode?): List<GraphNode> {
+            if (pool.size <= 1 || srcNode == null) return pool
+            val srcScope = srcNode.qualifiedName.substringBeforeLast('.', "")
+            if (srcScope.isEmpty()) return pool
+
+            val exactScope = pool.filter { it.qualifiedName.substringBeforeLast('.', "") == srcScope }
+            if (exactScope.isNotEmpty()) return exactScope
+
+            val companionScope = pool.filter { cand ->
+                cand.qualifiedName.substringBeforeLast('.', "") == "$srcScope.Companion"
+            }
+            if (companionScope.isNotEmpty()) return companionScope
+
+            val outerScope = pool.filter { cand ->
+                val candScope = cand.qualifiedName.substringBeforeLast('.', "")
+                candScope.isNotEmpty() && srcScope.startsWith("$candScope.")
+            }
+            if (outerScope.isNotEmpty()) {
+                val maxLen = outerScope.maxOf { it.qualifiedName.substringBeforeLast('.', "").length }
+                return outerScope.filter { it.qualifiedName.substringBeforeLast('.', "").length == maxLen }
+            }
+
+            val topLevel = pool.filter { it.isTopLevel }
+            if (topLevel.isNotEmpty()) return topLevel
+
+            return pool
+        }
+
+        private data class DisambiguationContext(
+            val srcNode: GraphNode?,
+            val srcFileId: String,
+            val srcModId: String,
+            val fileImports: Set<String>
+        )
+
         private fun selectCandidatePool(
             candidatePool: List<GraphNode>,
             receiverMatches: List<GraphNode>,
             fallback: List<GraphNode>,
-            srcFileId: String,
-            srcModId: String,
-            fileImports: Set<String>
+            ctx: DisambiguationContext
         ): List<GraphNode> {
-            val sameFile = candidatePool.filter { it.fileId == srcFileId }
-            if (sameFile.isNotEmpty()) return sameFile
+            val sameFile = candidatePool.filter { it.fileId == ctx.srcFileId }
+            if (sameFile.isNotEmpty()) return filterByLexicalScope(sameFile, ctx.srcNode)
 
-            val imported = candidatePool.filter { isSymbolImported(it.qualifiedName, fileImports) }
-            if (imported.isNotEmpty()) return imported
+            val imported = candidatePool.filter { isSymbolImported(it.qualifiedName, ctx.fileImports) }
+            if (imported.isNotEmpty()) return filterByLexicalScope(imported, ctx.srcNode)
 
             if (receiverMatches.isNotEmpty()) return receiverMatches
 
-            if (srcModId.isNotEmpty()) {
-                val sameModule = candidatePool.filter { it.moduleId == srcModId }
-                if (sameModule.isNotEmpty()) return sameModule
+            if (ctx.srcModId.isNotEmpty()) {
+                val sameModule = candidatePool.filter { it.moduleId == ctx.srcModId }
+                if (sameModule.isNotEmpty()) return filterByLexicalScope(sameModule, ctx.srcNode)
             }
-            return fallback
+            return filterByLexicalScope(fallback, ctx.srcNode)
         }
 
         private fun pickBestCandidate(pool: List<GraphNode>): GraphNode =
@@ -3780,11 +3813,12 @@ class PolyglotAstExtractor {
             val srcFileId = srcNode?.fileId ?: edge.sourceNodeId.substringBefore("#")
             val srcModId = srcNode?.moduleId.orEmpty()
             val fileImports = importsByFile[srcFileId].orEmpty()
+            val ctx = DisambiguationContext(srcNode, srcFileId, srcModId, fileImports)
 
             val receiver = extractSymbolReceiver(sym)
             val receiverMatches = resolveReceiverMatches(candidates, receiver, srcFileId, srcNode)
             val candidatePool = if (receiverMatches.isNotEmpty()) receiverMatches else candidates
-            val chosenPool = selectCandidatePool(candidatePool, receiverMatches, candidates, srcFileId, srcModId, fileImports)
+            val chosenPool = selectCandidatePool(candidatePool, receiverMatches, candidates, ctx)
             val chosen = pickBestCandidate(chosenPool)
 
             var conf = initialConf
