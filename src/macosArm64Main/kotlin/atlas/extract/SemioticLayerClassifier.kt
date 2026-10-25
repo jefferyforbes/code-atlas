@@ -15,7 +15,7 @@ class SemioticLayerClassifier {
         )
 
         fun detectSourceSet(relPath: String): String {
-            val parts = relPath.replace('\\', '/').split('/')
+            val parts = relPath.replace('\\', '/').split('/').filter { it.isNotBlank() }
             for (ss in KMP_SOURCE_SETS) {
                 if (ss in parts) return ss
             }
@@ -36,7 +36,7 @@ class SemioticLayerClassifier {
         ): Triple<String, String, Boolean> {
             val normPath = relPath.replace('\\', '/').lowercase()
             val checkPath = if (normPath.startsWith("/")) normPath else "/$normPath"
-            val parts = normPath.split('/')
+            val parts = normPath.split('/').filter { it.isNotBlank() }
             val symLow = symbolName.lowercase()
             val annLow = annotations.map { it.lowercase().removePrefix("@") }.toSet()
 

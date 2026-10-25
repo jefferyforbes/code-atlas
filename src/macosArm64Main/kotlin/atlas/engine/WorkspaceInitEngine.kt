@@ -107,7 +107,10 @@ class WorkspaceInitEngine(val workspaceRoot: String) {
             )
         }
 
-        PlatformFiles.mkdirs(hooksDir)
+        val dirCreated = PlatformFiles.mkdirs(hooksDir)
+        if (!dirCreated) {
+            PlatformFiles.logWarning("WorkspaceInitEngine", "Failed to create hooks directory: $hooksDir")
+        }
         val written = PlatformFiles.writeText(hookPath, scriptContent)
         if (!written) {
             return InitResult(

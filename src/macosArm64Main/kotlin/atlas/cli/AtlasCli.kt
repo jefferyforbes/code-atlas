@@ -927,7 +927,7 @@ class AtlasCli {
 
         private fun parseSpatialBounds(server: AtlasMcpServer, fileKey: String, normTarget: String, boundsArg: String?): FigmaSpatialBounds {
             if (boundsArg != null) {
-                val parts = boundsArg.split(',').map { it.trim().toDoubleOrNull() ?: 0.0 }
+                val parts = boundsArg.split(',').filter { it.isNotBlank() }.map { it.trim().toDoubleOrNull() ?: 0.0 }
                 if (parts.size >= 4) {
                     return FigmaSpatialBounds(parts[0], parts[1], parts[2], parts[3])
                 }

@@ -15,7 +15,11 @@ class NativeSqliteDatabase(val path: String) {
     private var dbPointer: CPointer<sqlite3>? = null
 
     init {
-        PlatformFiles.mkdirs(PlatformFiles.parentOf(path))
+        val parentDir = PlatformFiles.parentOf(path)
+        val dirCreated = PlatformFiles.mkdirs(parentDir)
+        if (!dirCreated && parentDir.isNotEmpty()) {
+            PlatformFiles.logWarning("NativeSqliteDatabase", "Failed to create parent directory: $parentDir")
+        }
         memScoped {
             val ppDb = alloc<CPointerVar<sqlite3>>()
             val flags = SQLITE_OPEN_READWRITE or SQLITE_OPEN_CREATE

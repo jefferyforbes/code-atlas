@@ -94,7 +94,7 @@ class WorkspaceIndexer(
     )
 
     private fun isPathSkipped(relStr: String): Boolean {
-        val parts = relStr.split('/')
+        val parts = relStr.split('/').filter { it.isNotBlank() }
         return parts.any { it in SKIP_DIRS || it.startsWith(".venv") }
     }
 

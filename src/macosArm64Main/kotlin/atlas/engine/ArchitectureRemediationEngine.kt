@@ -333,15 +333,25 @@ class ArchitectureRemediationEngine(
         return true
     }
 
+    private fun deleteFileIfPresent(path: String) {
+        val deleted = PlatformFiles.delete(path)
+        if (!deleted && PlatformFiles.exists(path)) {
+            PlatformFiles.logWarning("ArchitectureRemediationEngine", "Failed to delete file: $path")
+        }
+    }
+
     private fun rollbackFiles(writtenPaths: List<String>, fullPath: String, originalContent: String) {
         for (w in writtenPaths) {
-            PlatformFiles.delete(w)
+            deleteFileIfPresent(w)
         }
         PlatformFiles.writeText(fullPath, originalContent)
     }
 
+    private fun escapeShellSingleQuotes(value: String): String =
+        "'" + value.replace("'", "'\\''") + "'"
+
     private fun executeTestCommand(cmdStr: String, details: MutableList<String>): Boolean {
-        val cmd = "cd \"$workspaceRoot\" && $cmdStr"
+        val cmd = "cd ${escapeShellSingleQuotes(workspaceRoot)} && $cmdStr"
         val rawStatus = system(cmd)
         val exitCode = if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
         if (exitCode != 0) {
@@ -350,6 +360,20 @@ class ArchitectureRemediationEngine(
         }
         details.add("Test command '$cmdStr' passed (exit code 0).")
         return true
+    }
+
+    private fun writeSpawnedFiles(
+        root: String,
+        spawnedFiles: List<SpawnedFileRecord>,
+        writtenPaths: MutableList<String>
+    ) {
+        for (sf in spawnedFiles) {
+            val fPath = "$root/${sf.relPath}"
+            val dirCreated = PlatformFiles.mkdirs(fPath.substringBeforeLast('/'))
+            if (!dirCreated) PlatformFiles.logWarning("ArchitectureRemediationEngine", "Failed to mkdirs for $fPath")
+            PlatformFiles.writeText(fPath, sf.content)
+            writtenPaths.add(fPath)
+        }
     }
 
     private fun applyFilesAndRunTest(
@@ -365,14 +389,9 @@ class ArchitectureRemediationEngine(
     ): Boolean {
         val writtenPaths = mutableListOf<String>()
         return try {
-            for (sf in spawnedFiles) {
-                val fPath = "$root/${sf.relPath}"
-                PlatformFiles.mkdirs(fPath.substringBeforeLast('/'))
-                PlatformFiles.writeText(fPath, sf.content)
-                writtenPaths.add(fPath)
-            }
+            writeSpawnedFiles(root, spawnedFiles, writtenPaths)
             if (targetRenameRelPath != null) {
-                PlatformFiles.delete(fullPath)
+                deleteFileIfPresent(fullPath)
                 PlatformFiles.writeText(primaryNewFullPath, cleanModified)
                 writtenPaths.add(primaryNewFullPath)
             } else {

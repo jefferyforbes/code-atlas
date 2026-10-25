@@ -442,7 +442,7 @@ object VaultPlanBridge {
 
         private fun collapseDotSegments(rawCombined: String): String {
             val stack = mutableListOf<String>()
-            for (seg in rawCombined.split('/')) {
+            for (seg in rawCombined.split('/').filter { it.isNotBlank() }) {
                 pushPathSegment(stack, seg)
             }
             return stack.joinToString("/")
@@ -566,7 +566,7 @@ object VaultPlanBridge {
 
         private fun extractScriptInvocationsFromLine(line: String, lineNo: Int) {
             if (line.isEmpty() || line.startsWith("#") || line.startsWith("//")) return
-            for (rawToken in line.split(WHITESPACE_RE)) {
+            for (rawToken in line.split(WHITESPACE_RE).filter { it.isNotBlank() }) {
                 val clean = rawToken.trim('\'', '"', '`', '(', ')', '[', ']', '<', '>', ',', ';')
                 processScriptToken(clean, lineNo)
             }
@@ -644,9 +644,9 @@ object VaultPlanBridge {
 
     private fun extractFrontmatterText(markdownText: String): String? {
         if (!markdownText.startsWith("---")) return null
-        val parts = markdownText.split("---", limit = 3)
-        if (parts.size < 3) return null
-        return parts[1]
+        val endIdx = markdownText.indexOf("---", startIndex = 3)
+        if (endIdx < 0) return null
+        return markdownText.substring(3, endIdx)
     }
 
     private fun extractFrontmatterLines(markdownText: String): List<String>? {

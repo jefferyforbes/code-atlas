@@ -4,6 +4,7 @@ import atlas.model.ComposeNodeRecord
 import atlas.model.ComposeParamRecord
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
@@ -939,7 +940,9 @@ class ComposeStabilityExtractor {
                 dirtyParamsJson = dirtyJson,
                 recordedAt = ts
             )
-        } catch (_: Throwable) {
+        } catch (_: SerializationException) {
+            null
+        } catch (_: IllegalArgumentException) {
             null
         }
     }
@@ -1222,7 +1225,7 @@ class ComposeStabilityExtractor {
 
     private fun extractParamName(declPart: String, colonIdx: Int): String? {
         val rawPrefix = declPart.substring(0, colonIdx).trim()
-        val tokens = rawPrefix.split(Regex("""\s+"""))
+        val tokens = rawPrefix.split(Regex("""\s+""")).filter { it.isNotBlank() }
         val candidate = tokens.lastOrNull()?.removePrefix("vararg")?.trim()
         if (candidate.isNullOrEmpty()) return null
         return candidate

@@ -15,7 +15,7 @@ class NameSegmentTokenizer {
         fun tokenize(text: String): List<String> {
             if (text.isEmpty()) return emptyList()
             val expanded = CAMEL_REGEX.replace(text, " ")
-            val parts = NON_ALNUM_REGEX.split(expanded)
+            val parts = NON_ALNUM_REGEX.split(expanded).filter { it.isNotBlank() }
             val seen = mutableSetOf<String>()
             val result = mutableListOf<String>()
             for (p in parts) {
