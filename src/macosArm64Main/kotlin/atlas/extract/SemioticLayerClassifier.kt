@@ -1,5 +1,8 @@
 package atlas.extract
 
+/**
+ * Classifies source files and AST symbols into FOROALFA semiotic tiers, Clean Architecture layers, and KMP source sets.
+ */
 class SemioticLayerClassifier {
     companion object {
         private val KMP_SOURCE_SETS = listOf(

@@ -1,5 +1,8 @@
 package atlas.extract
 
+/**
+ * Tokenizes camelCase, snake_case, and CJK symbol identifiers into normalized vocabulary segments.
+ */
 class NameSegmentTokenizer {
     companion object {
         private val CAMEL_REGEX = Regex("(?<=[\\p{Ll}\\p{N}])(?=[\\p{Lu}])|(?<=[\\p{Lu}])(?=[\\p{Lu}][\\p{Ll}])")
