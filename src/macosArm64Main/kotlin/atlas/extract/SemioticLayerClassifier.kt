@@ -14,16 +14,21 @@ class SemioticLayerClassifier {
             "nativeTest", "appleTest", "wasmJsTest", "desktopTest"
         )
 
-        fun detectSourceSet(relPath: String): String {
-            val parts = relPath.replace('\\', '/').split('/').filter { it.isNotBlank() }
+        private val TEST_DIR_SEGMENTS = setOf("test", "tests", "__tests__")
+
+        private fun findMatchingSourceSetPart(parts: List<String>): String? {
             for (ss in KMP_SOURCE_SETS) {
                 if (ss in parts) return ss
             }
-            for (part in parts) {
-                if (part.endsWith("Test") && part.length > 4) return part
-                if (part.endsWith("Main") && part.length > 4) return part
+            return parts.firstOrNull { part ->
+                part.length > 4 && (part.endsWith("Test") || part.endsWith("Main"))
             }
-            if (parts.any { it in listOf("test", "tests", "__tests__") } || relPath.startsWith("test_")) {
+        }
+
+        fun detectSourceSet(relPath: String): String {
+            val parts = relPath.replace('\\', '/').split('/').filter { it.isNotBlank() }
+            findMatchingSourceSetPart(parts)?.let { return it }
+            if (parts.any { it in TEST_DIR_SEGMENTS } || relPath.startsWith("test_")) {
                 return "test"
             }
             return "main"

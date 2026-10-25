@@ -20,11 +20,13 @@ data class FigmaSpatialBounds(
 
 
     companion object {
+        private fun sanitizeCoord(v: Double): Double = if (v.isFinite()) v else 0.0
+
         fun fromRect(x: Double, y: Double, width: Double, height: Double): FigmaSpatialBounds {
-            val safeX = if (x.isNaN() || x.isInfinite()) 0.0 else x
-            val safeY = if (y.isNaN() || y.isInfinite()) 0.0 else y
-            val safeW = if (width.isNaN() || width.isInfinite()) 0.0 else width
-            val safeH = if (height.isNaN() || height.isInfinite()) 0.0 else height
+            val safeX = sanitizeCoord(x)
+            val safeY = sanitizeCoord(y)
+            val safeW = sanitizeCoord(width)
+            val safeH = sanitizeCoord(height)
             val minX = minOf(safeX, safeX + safeW)
             val maxX = maxOf(safeX, safeX + safeW)
             val minY = minOf(safeY, safeY + safeH)

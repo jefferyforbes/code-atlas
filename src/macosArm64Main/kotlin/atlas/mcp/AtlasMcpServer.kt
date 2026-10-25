@@ -743,20 +743,24 @@ class AtlasMcpServer(
         traceLogPath = traceLogPath
     )
 
-    fun resolveServerForProject(projectId: String, explicitWorkspace: String? = null): AtlasMcpServer {
-        if (customDbPath != null || (projectId.isEmpty() && explicitWorkspace.isNullOrEmpty())) return this
-        val localStats = store.getStats(projectId)
-        if (localStats.files > 0) return this
-
-        val candidateWs = if (!explicitWorkspace.isNullOrEmpty() && explicitWorkspace != "." && explicitWorkspace != workspaceRoot) {
+    private fun resolveCandidateWorkspacePath(projectId: String, explicitWorkspace: String?): String {
+        if (!explicitWorkspace.isNullOrEmpty() && explicitWorkspace != "." && explicitWorkspace != workspaceRoot) {
             val path = if (PlatformFiles.isDirectory(explicitWorkspace)) explicitWorkspace
                        else PlatformFiles.parentOf(explicitWorkspace)
-            PlatformFiles.canonicalPath(path)
-        } else {
-            CacheProfileResolver.resolveProjectWorkspace(workspaceRoot, projectId)
+            return PlatformFiles.canonicalPath(path)
         }
-        val canonCurrent = PlatformFiles.canonicalPath(workspaceRoot).replace('\\', '/').trimEnd('/')
-        val canonCandidate = PlatformFiles.canonicalPath(candidateWs).replace('\\', '/').trimEnd('/')
+        return CacheProfileResolver.resolveProjectWorkspace(workspaceRoot, projectId)
+    }
+
+    private fun normalizeWorkspacePath(path: String): String =
+        PlatformFiles.canonicalPath(path).replace('\\', '/').trimEnd('/')
+
+    fun resolveServerForProject(projectId: String, explicitWorkspace: String? = null): AtlasMcpServer {
+        if (customDbPath != null || (projectId.isEmpty() && explicitWorkspace.isNullOrEmpty())) return this
+        if (store.getStats(projectId).files > 0) return this
+
+        val canonCurrent = normalizeWorkspacePath(workspaceRoot)
+        val canonCandidate = normalizeWorkspacePath(resolveCandidateWorkspacePath(projectId, explicitWorkspace))
         if (canonCandidate == canonCurrent) return this
 
         return projectServers.getOrPut(canonCandidate) {
@@ -1890,34 +1894,44 @@ class AtlasMcpServer(
         }
     }
 
+    private fun readNextStdioLine(): String? = try {
+        readlnOrNull()
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun handleStdioLine(line: String) {
+        try {
+            val resp = processJsonRpcMessage(line)
+            if (resp != null) {
+                println(resp)
+                fflush(stdout)
+            }
+        } catch (e: Throwable) {
+            emitStdioFallbackError(e)
+        }
+    }
+
+    private fun emitStdioFallbackError(e: Throwable) {
+        try {
+            val err = json.encodeToString(buildJsonObject {
+                put("jsonrpc", "2.0")
+                put("id", JsonNull)
+                putJsonObject("error") {
+                    put("code", -32603)
+                    put("message", "Internal error: ${e.message ?: "Unexpected error"}")
+                }
+            })
+            println(err)
+            fflush(stdout)
+        } catch (_: Throwable) {
+        }
+    }
+
     fun serveStdio() {
         while (true) {
-            val line = try {
-                readlnOrNull() ?: break
-            } catch (_: Throwable) {
-                break
-            }
-            try {
-                val resp = processJsonRpcMessage(line)
-                if (resp != null) {
-                    println(resp)
-                    fflush(stdout)
-                }
-            } catch (e: Throwable) {
-                try {
-                    val err = json.encodeToString(buildJsonObject {
-                        put("jsonrpc", "2.0")
-                        put("id", JsonNull)
-                        putJsonObject("error") {
-                            put("code", -32603)
-                            put("message", "Internal error: ${e.message ?: "Unexpected error"}")
-                        }
-                    })
-                    println(err)
-                    fflush(stdout)
-                } catch (_: Throwable) {
-                }
-            }
+            val line = readNextStdioLine() ?: break
+            handleStdioLine(line)
         }
     }
 }
