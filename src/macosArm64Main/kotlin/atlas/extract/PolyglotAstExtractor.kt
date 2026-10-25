@@ -4,6 +4,9 @@ import atlas.model.ComplexityVector
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 
+/**
+ * Polyglot AST declaration, import, call, and complexity extractor across Kotlin, TypeScript, Python, Swift, Rust, and C++.
+ */
 class PolyglotAstExtractor {
     companion object {
         private val EXT_MAP = mapOf(

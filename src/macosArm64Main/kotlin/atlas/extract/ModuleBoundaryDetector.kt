@@ -4,6 +4,9 @@ import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
 
+/**
+ * Detects Gradle module boundaries, settings includes, and KMP expect/actual dependency edges.
+ */
 class ModuleBoundaryDetector {
     companion object {
         private val GRADLE_PROJECT_DEP_REGEX = Regex(

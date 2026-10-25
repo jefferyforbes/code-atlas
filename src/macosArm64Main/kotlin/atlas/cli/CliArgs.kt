@@ -1,5 +1,8 @@
 package atlas.cli
 
+/**
+ * Parsed command-line arguments and options for Atlas CLI subcommands.
+ */
 data class CliArgs(
     var subsystem: String = "",
     var command: String = "",

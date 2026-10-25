@@ -6,7 +6,7 @@ contract:
   task: pr-4-lexical-scope-call-disambiguation
   objective: Disambiguate unqualified call edges using caller lexical scope, eliminating false-positive dead code detection across nested classes.
 
-status: review_pending # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: merged # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
 
 size:
   complexity: small

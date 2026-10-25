@@ -6,6 +6,9 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+/**
+ * Installs and manages Git pre-commit and pre-push quality gate hooks for Atlas workspaces.
+ */
 class WorkspaceInitEngine(val workspaceRoot: String) {
 
     data class InitResult(
