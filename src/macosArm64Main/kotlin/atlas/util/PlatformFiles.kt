@@ -1,45 +1,26 @@
 package atlas.util
 
+import com.orion.nativeio.env.PlatformEnvProvider
+import com.orion.nativeio.fs.PlatformFileSystem
 import kotlinx.cinterop.*
 import platform.posix.*
 
 /**
- * Pure POSIX file system utilities for Kotlin/Native on macOS.
- * Zero external library dependencies.
+ * Pure POSIX file system utilities for Kotlin/Native on macOS,
+ * backed by com.orion:orion-native-io:0.1.0.
  */
 @OptIn(ExperimentalForeignApi::class)
 object PlatformFiles {
 
-    fun exists(path: String): Boolean = access(path, F_OK) == 0
+    fun exists(path: String): Boolean = PlatformFileSystem.exists(path)
 
-    fun delete(path: String): Boolean = unlink(path) == 0
+    fun delete(path: String): Boolean = PlatformFileSystem.delete(path)
 
-    fun deleteRecursively(path: String): Boolean {
-        if (!exists(path)) return true
-        if (isDirectory(path)) {
-            val entries = listDirectory(path)
-            for (entry in entries) {
-                val full = if (path.endsWith("/")) "$path$entry" else "$path/$entry"
-                deleteRecursively(full)
-            }
-            return rmdir(path) == 0
-        }
-        return unlink(path) == 0
-    }
+    fun deleteRecursively(path: String): Boolean = PlatformFileSystem.deleteRecursively(path)
 
-    fun isDirectory(path: String): Boolean = memScoped {
-        val sb = alloc<stat>()
-        if (stat(path, sb.ptr) == 0) {
-            (sb.st_mode.toInt() and S_IFMT) == S_IFDIR
-        } else false
-    }
+    fun isDirectory(path: String): Boolean = PlatformFileSystem.isDirectory(path)
 
-    fun isRegularFile(path: String): Boolean = memScoped {
-        val sb = alloc<stat>()
-        if (stat(path, sb.ptr) == 0) {
-            (sb.st_mode.toInt() and S_IFMT) == S_IFREG
-        } else false
-    }
+    fun isRegularFile(path: String): Boolean = PlatformFileSystem.isRegularFile(path)
 
     fun mtime(path: String): Double = memScoped {
         val sb = alloc<stat>()
@@ -50,74 +31,13 @@ object PlatformFiles {
         } else 0.0
     }
 
-    fun mkdirs(path: String): Boolean {
-        if (path.isEmpty() || exists(path)) return true
-        val normalized = path.replace('\\', '/').trimEnd('/')
-        var current = if (normalized.startsWith("/")) "/" else ""
-        for (part in normalized.split('/')) {
-            if (part.isEmpty()) continue
-            current = joinPathSegment(current, part)
-            if (!ensureDirectoryExists(current)) {
-                return false
-            }
-        }
-        return true
-    }
+    fun mkdirs(path: String): Boolean = PlatformFileSystem.mkdirs(path)
 
-    private fun joinPathSegment(base: String, part: String): String {
-        return if (base == "/" || base.isEmpty()) "$base$part" else "$base/$part"
-    }
+    fun readBytes(path: String): ByteArray = PlatformFileSystem.readBytes(path)
 
-    private fun ensureDirectoryExists(dirPath: String): Boolean {
-        if (exists(dirPath)) return true
-        val mode = 0b111101101.toUShort()
-        return mkdir(dirPath, mode) == 0 || errno == EEXIST
-    }
+    fun readText(path: String): String = PlatformFileSystem.readText(path)
 
-    fun readBytes(path: String): ByteArray {
-        val file = fopen(path, "rb") ?: return ByteArray(0)
-        try {
-            fseek(file, 0, SEEK_END)
-            val len = ftell(file)
-            fseek(file, 0, SEEK_SET)
-            if (len <= 0) return ByteArray(0)
-            val bytes = ByteArray(len.toInt())
-            bytes.usePinned { pinned ->
-                fread(pinned.addressOf(0), 1u, len.toULong(), file)
-            }
-            return bytes
-        } finally {
-            fclose(file)
-        }
-    }
-
-    fun readText(path: String): String = readBytes(path).decodeToString()
-
-    fun writeText(path: String, content: String): Boolean {
-        val parent = parentOf(path)
-        if (parent.isNotEmpty()) {
-            mkdirs(parent)
-        }
-        val file = fopen(path, "wb") ?: return false
-        var success = false
-        try {
-            val bytes = content.encodeToByteArray()
-            if (bytes.isNotEmpty()) {
-                val written = bytes.usePinned { pinned ->
-                    fwrite(pinned.addressOf(0), 1u, bytes.size.toULong(), file)
-                }
-                success = (written == bytes.size.toULong())
-            } else {
-                success = true
-            }
-        } finally {
-            val closeRc = fclose(file)
-            if (closeRc != 0) {
-                success = false
-            }
-        }
-        return success
-    }
+    fun writeText(path: String, content: String): Boolean = PlatformFileSystem.writeText(path, content)
 
     fun chmod(path: String, mode: UInt): Boolean = platform.posix.chmod(path, mode.toUShort()) == 0
 
@@ -160,21 +80,7 @@ object PlatformFiles {
         platform.posix.fflush(platform.posix.stderr)
     }
 
-    fun listDirectory(dirPath: String): List<String> {
-        val result = mutableListOf<String>()
-        val dir = opendir(dirPath) ?: return result
-        try {
-            while (true) {
-                val entry = readdir(dir) ?: break
-                val name = entry.pointed.d_name.toKString()
-                if (name == "." || name == "..") continue
-                result.add(name)
-            }
-        } finally {
-            closedir(dir)
-        }
-        return result
-    }
+    fun listDirectory(dirPath: String): List<String> = PlatformFileSystem.listDirectory(dirPath)
 
     fun listFilesRecursively(
         dirPath: String,
@@ -258,11 +164,11 @@ object PlatformFiles {
     }
 
     fun userHome(): String {
-        val homeEnv = platform.posix.getenv("HOME")?.toKString()
+        val homeEnv = PlatformEnvProvider.get("HOME")
         return homeEnv ?: "/Users"
     }
 
     fun getenv(name: String): String? {
-        return platform.posix.getenv(name)?.toKString()
+        return PlatformEnvProvider.get(name)
     }
 }
