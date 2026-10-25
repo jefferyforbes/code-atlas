@@ -7,6 +7,11 @@ group = "com.orion"
 version = "0.7.0"
 
 repositories {
+    mavenLocal {
+        mavenContent {
+            includeGroup("com.orion")
+        }
+    }
     mavenCentral()
 }
 
@@ -32,11 +37,17 @@ kotlin {
         val macosArm64Main by getting {
             dependencies {
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+                implementation("com.orion:orion-native-io:0.1.0")
+                implementation("com.orion:orion-mcp-cli-core:0.1.0")
+                implementation("com.orion:orion-markdown-vault:0.1.0")
             }
         }
         val macosArm64Test by getting {
             dependencies {
                 implementation(kotlin("test"))
+                implementation("com.orion:orion-native-io-test-fixtures:0.1.0")
+                implementation("com.orion:orion-mcp-cli-test-fixtures:0.1.0")
+                implementation("com.orion:orion-markdown-vault-test-fixtures:0.1.0")
             }
         }
     }
