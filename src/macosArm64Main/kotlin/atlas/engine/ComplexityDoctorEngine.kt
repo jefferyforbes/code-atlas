@@ -763,21 +763,21 @@ class ComplexityDoctorEngine(
         return parts
     }
 
+    private val closingToOpeningDelimiter = mapOf('}' to '{', ')' to '(', ']' to '[')
+
+    private fun updateDelimiterStack(stack: MutableList<Char>, ch: Char): Boolean {
+        if (ch == '{' || ch == '(' || ch == '[') {
+            stack.add(ch)
+            return true
+        }
+        val expectedOpen = closingToOpeningDelimiter[ch] ?: return true
+        return stack.isNotEmpty() && stack.removeAt(stack.size - 1) == expectedOpen
+    }
+
     private fun hasBalancedDelimiters(maskedText: String): Boolean {
         val stack = mutableListOf<Char>()
         for (c in maskedText) {
-            when (c) {
-                '{', '(', '[' -> stack.add(c)
-                '}' -> {
-                    if (stack.isEmpty() || stack.removeAt(stack.size - 1) != '{') return false
-                }
-                ')' -> {
-                    if (stack.isEmpty() || stack.removeAt(stack.size - 1) != '(') return false
-                }
-                ']' -> {
-                    if (stack.isEmpty() || stack.removeAt(stack.size - 1) != '[') return false
-                }
-            }
+            if (!updateDelimiterStack(stack, c)) return false
         }
         return stack.isEmpty()
     }
