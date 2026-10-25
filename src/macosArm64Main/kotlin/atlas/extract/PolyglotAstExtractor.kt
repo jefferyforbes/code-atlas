@@ -2540,7 +2540,7 @@ class PolyglotAstExtractor {
                 val parsed = TS_IMP_RE.find(origMatch) ?: m
                 val named = parsed.groupValues[1].ifEmpty { parsed.groupValues[2] }
                 val lineNo = maskedText.substring(0, m.range.first).count { it == '\n' } + 1
-                for (sym in named.split(",")) {
+                for (sym in named.split(",").filter { it.isNotBlank() }) {
                     val clean = sym.trim().substringBefore(" as ").trim()
                     if (clean.isNotEmpty()) imports.add(Pair(clean, lineNo))
                 }

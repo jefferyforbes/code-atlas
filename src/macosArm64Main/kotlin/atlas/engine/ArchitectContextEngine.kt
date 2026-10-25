@@ -102,7 +102,10 @@ class ArchitectContextEngine(
 
         val slug = sanitizeSlug(effectiveSeeds.firstOrNull() ?: "task")
         val destDir = "$workspaceRoot/.artifacts/atlas"
-        PlatformFiles.mkdirs(destDir)
+        val dirCreated = PlatformFiles.mkdirs(destDir)
+        if (!dirCreated) {
+            PlatformFiles.logWarning("ArchitectContextEngine", "Failed to create spillover directory: $destDir")
+        }
         val spilloverPath = "$destDir/context-$slug.md"
         PlatformFiles.writeText(spilloverPath, fullMarkdown)
 

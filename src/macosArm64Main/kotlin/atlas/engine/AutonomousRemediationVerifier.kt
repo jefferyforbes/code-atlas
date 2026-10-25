@@ -359,7 +359,8 @@ class AutonomousRemediationVerifier(
 
         var passed = false
         try {
-            val cmd = "cd \"$workspaceRoot\" && $testCommand"
+            val escapedRoot = "'" + workspaceRoot.replace("'", "'\\''") + "'"
+            val cmd = "cd $escapedRoot && $testCommand"
             val rawStatus = system(cmd)
             val exitCode = if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
             if (exitCode != 0) {

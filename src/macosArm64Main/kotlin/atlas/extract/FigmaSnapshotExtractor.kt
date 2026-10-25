@@ -1046,7 +1046,7 @@ class FigmaSnapshotExtractor {
     }
 
     private fun toCamelCase(str: String): String {
-        val parts = str.split('-', '_', '.', ' ')
+        val parts = str.split('-', '_', '.', ' ').filter { it.isNotBlank() }
         if (parts.isEmpty()) return str
         return parts.first().lowercase() + parts.drop(1).joinToString("") { part ->
             part.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }

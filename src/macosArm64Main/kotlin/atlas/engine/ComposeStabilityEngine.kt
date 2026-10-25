@@ -9,6 +9,7 @@ import atlas.model.ComposeParamRecord
 import atlas.model.ComposeQueryResult
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -446,7 +447,9 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
 
         val dirtyList = try {
             json.parseToJsonElement(trace.third).jsonArray.map { it.jsonPrimitive.content }
-        } catch (_: Throwable) {
+        } catch (_: SerializationException) {
+            emptyList()
+        } catch (_: IllegalArgumentException) {
             emptyList()
         }
 
@@ -702,6 +705,12 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         return -1
     }
 
+    private fun hasSingleSubstringOccurrence(content: String, target: String): Boolean {
+        if (target.isEmpty()) return false
+        val first = content.indexOf(target)
+        return first >= 0 && content.indexOf(target, first + target.length) < 0
+    }
+
     private fun buildSliceReplacement(
         lines: List<String>,
         matchedIdx: Int,
@@ -709,7 +718,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         replacement: String,
         content: String
     ): Pair<String, String> {
-        if (content.split(lineText).size - 1 == 1) {
+        if (hasSingleSubstringOccurrence(content, lineText)) {
             return Pair(lineText, replacement)
         }
         val startSlice = (matchedIdx - 2).coerceAtLeast(0)
@@ -717,7 +726,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         val sliceLines = lines.subList(startSlice, matchedIdx).toMutableList()
         sliceLines.add(replacement)
         val sliceAfter = sliceLines.joinToString("\n")
-        return if (content.split(sliceBefore).size - 1 == 1) {
+        return if (hasSingleSubstringOccurrence(content, sliceBefore)) {
             Pair(sliceBefore, sliceAfter)
         } else {
             Pair(lineText, replacement)
@@ -856,8 +865,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
     }
 
     private fun resolveDeclSnippets(content: String, lineText: String, typeName: String): Pair<String, String> {
-        val occurrences = content.split(lineText).size - 1
-        if (occurrences == 1) {
+        if (hasSingleSubstringOccurrence(content, lineText)) {
             return Pair(lineText, "@Immutable\n$lineText")
         }
         return Pair("interface $typeName", "@Stable\ninterface $typeName")

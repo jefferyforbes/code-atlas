@@ -101,7 +101,7 @@ object UrlTargetResolver {
 
     private fun extractFigmaNodeIdFromQuery(query: String): String? {
         if (query.isEmpty()) return null
-        for (param in query.split('&')) {
+        for (param in query.split('&').filter { it.isNotBlank() }) {
             val eqIdx = param.indexOf('=')
             if (eqIdx <= 0) continue
             val key = param.substring(0, eqIdx).lowercase()
@@ -120,7 +120,7 @@ object UrlTargetResolver {
             .replace("%3A", ":").replace("%3a", ":")
             .replace("%3B", ";").replace("%3b", ";")
             .replace("%2D", "-").replace("%2d", "-")
-        return decoded.split(';').joinToString(";") { segment ->
+        return decoded.split(';').filter { it.isNotBlank() }.joinToString(";") { segment ->
             val seg = segment.trim()
             if (Regex("""^I?\d+-\d+$""").matches(seg)) seg.replace('-', ':') else seg
         }
@@ -259,7 +259,7 @@ object UrlTargetResolver {
 
     private fun hasRouteParameterPlaceholder(s: String): Boolean {
         if (!s.startsWith("/") || s.count { it == '/' } < 2) return false
-        return BRACE_PARAM_RE.containsMatchIn(s) || s.split('/').any { COLON_PARAM_RE.matches(it) || ANGLE_PARAM_RE.matches(it) }
+        return BRACE_PARAM_RE.containsMatchIn(s) || s.split('/').filter { it.isNotBlank() }.any { COLON_PARAM_RE.matches(it) || ANGLE_PARAM_RE.matches(it) }
     }
 
     fun extractCodeRoutesAndUrls(sourceText: String, maskedText: String, language: String): List<ExtractedEndpointOrUrl> {

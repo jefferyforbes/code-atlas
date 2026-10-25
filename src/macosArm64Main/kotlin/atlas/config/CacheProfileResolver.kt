@@ -24,6 +24,26 @@ object CacheProfileResolver {
         return "$home/Library/Caches/atlas/$repoHash"
     }
 
+    private fun ensureCacheDir(path: String): Boolean {
+        val created = PlatformFiles.mkdirs(path)
+        if (!created) {
+            PlatformFiles.logWarning("CacheProfileResolver", "Failed to create directory: $path")
+        }
+        return created
+    }
+
+    private fun resolveInRepoPaths(inRepoDir: String, inRepoDb: String): Pair<String, String> {
+        ensureCacheDir(inRepoDir)
+        val artifacts = "$inRepoDir/artifacts"
+        ensureCacheDir(artifacts)
+        return Pair(inRepoDb, artifacts)
+    }
+
+    private fun shouldUseInRepoCache(selectedProfile: String, inRepoDb: String, profile: String?, envProfile: String): Boolean {
+        if (selectedProfile == IN_REPO_PROFILE) return true
+        return PlatformFiles.exists(inRepoDb) && profile == null && envProfile.isEmpty()
+    }
+
     fun resolvePaths(
         workspaceRoot: String,
         customDb: String? = null,
@@ -33,39 +53,28 @@ object CacheProfileResolver {
 
         if (customDb != null) {
             val resolvedDb = PlatformFiles.canonicalPath(customDb).replace('\\', '/')
-            val parent = PlatformFiles.parentOf(resolvedDb)
-            val artifacts = "$parent/artifacts"
-            PlatformFiles.mkdirs(artifacts)
+            val artifacts = "${PlatformFiles.parentOf(resolvedDb)}/artifacts"
+            ensureCacheDir(artifacts)
             return Pair(resolvedDb, artifacts)
         }
 
         val envProfile = PlatformFiles.getenv("ATLAS_CACHE_PROFILE")?.lowercase()?.trim() ?: ""
-        val selectedProfile = (profile ?: if (envProfile.isNotEmpty()) envProfile else ENTERPRISE_PROFILE).lowercase().trim()
-
+        val selectedProfile = (profile ?: envProfile.ifEmpty { ENTERPRISE_PROFILE }).lowercase().trim()
         val inRepoDir = "$canonicalWorkspace/.atlas"
         val inRepoDb = "$inRepoDir/atlas.db"
 
-        if (selectedProfile == IN_REPO_PROFILE || (PlatformFiles.exists(inRepoDb) && profile == null && envProfile.isEmpty())) {
-            PlatformFiles.mkdirs(inRepoDir)
-            val artifacts = "$inRepoDir/artifacts"
-            PlatformFiles.mkdirs(artifacts)
-            return Pair(inRepoDb, artifacts)
+        if (shouldUseInRepoCache(selectedProfile, inRepoDb, profile, envProfile)) {
+            return resolveInRepoPaths(inRepoDir, inRepoDb)
         }
 
-        // Enterprise profile: keep working tree 100% clean by storing in user cache
         val cacheBase = getEnterpriseCacheDir(canonicalWorkspace)
-        val success = PlatformFiles.mkdirs(cacheBase)
-        if (success) {
+        if (PlatformFiles.mkdirs(cacheBase)) {
             val artifacts = "$cacheBase/artifacts"
-            PlatformFiles.mkdirs(artifacts)
+            ensureCacheDir(artifacts)
             return Pair("$cacheBase/atlas.db", artifacts)
         }
 
-        // Graceful fallback to in-repo cache if user cache directory is not writable
-        PlatformFiles.mkdirs(inRepoDir)
-        val fallbackArtifacts = "$inRepoDir/artifacts"
-        PlatformFiles.mkdirs(fallbackArtifacts)
-        return Pair(inRepoDb, fallbackArtifacts)
+        return resolveInRepoPaths(inRepoDir, inRepoDb)
     }
 
     /**

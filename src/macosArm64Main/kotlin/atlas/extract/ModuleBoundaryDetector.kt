@@ -19,7 +19,7 @@ class ModuleBoundaryDetector {
 
         fun resolveModuleId(relPath: String, knownModules: List<String> = emptyList()): String {
             val norm = relPath.replace('\\', '/').trim('/')
-            val parts = norm.split('/')
+            val parts = norm.split('/').filter { it.isNotBlank() }
 
             for (mod in knownModules.sortedByDescending { it.length }) {
                 val modPath = mod.removePrefix(":").replace(':', '/')
@@ -49,7 +49,7 @@ class ModuleBoundaryDetector {
 
         fun convertTypesafeAccessorToModuleId(accessor: String, knownModules: List<String> = emptyList()): String {
             val clean = accessor.trim().removePrefix("projects.")
-            val segments = clean.split('.')
+            val segments = clean.split('.').filter { it.isNotBlank() }
             val directMod = ":" + segments.joinToString(":")
             if (knownModules.isEmpty()) return directMod
             return matchKnownModule(segments, directMod, knownModules) ?: directMod
@@ -275,7 +275,7 @@ class ModuleBoundaryDetector {
             if (fileName != "build.gradle" && fileName != "build.gradle.kts") return null
 
             val rel = filePath.removePrefix(projectRoot).removePrefix("/").replace('\\', '/')
-            val parts = rel.split('/')
+            val parts = rel.split('/').filter { it.isNotBlank() }
             if (parts.any { it.startsWith(".") || it in setOf("build", "node_modules", "dist") }) return null
 
             val parentRel = PlatformFiles.parentOf(rel)
