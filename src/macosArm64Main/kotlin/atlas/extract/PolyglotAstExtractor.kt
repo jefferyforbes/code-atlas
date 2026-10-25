@@ -2131,10 +2131,21 @@ class PolyglotAstExtractor {
         private fun isPublicTopLevel(isTopLevel: Boolean, modTokens: Set<String>, kw: String): Boolean =
             isTopLevel && "private" !in modTokens && "companion" !in modTokens && kw != "typealias"
 
+        private data class FileExtractionContext(
+            val projectId: String,
+            val relPath: String,
+            val fileId: String,
+            val moduleId: String,
+            val sourceSet: String,
+            val maskedText: String,
+            val lines: List<String>,
+            val maskedLines: List<String>,
+            val cleanLines: List<String>,
+            val imports: List<Pair<String, Int>>
+        )
+
         private fun buildKotlinNode(
-            projectId: String,
-            relPath: String,
-            fileId: String,
+            ctx: FileExtractionContext,
             pkgName: String,
             name: String,
             kw: String,
@@ -2144,40 +2155,36 @@ class PolyglotAstExtractor {
             startLine: Int,
             endLine: Int,
             matchStartLine: Int,
-            isTopLevel: Boolean,
-            lines: List<String>,
-            maskedLines: List<String>,
-            moduleId: String,
-            sourceSet: String
+            isTopLevel: Boolean
         ): GraphNode {
             val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
-                Pair("$fileId#$enclosingPrefix.$name", "$pkgName.$enclosingPrefix.$name")
+                Pair("${ctx.fileId}#$enclosingPrefix.$name", "$pkgName.$enclosingPrefix.$name")
             } else {
-                Pair("$fileId#$name", "$pkgName.$name")
+                Pair("${ctx.fileId}#$name", "$pkgName.$name")
             }
 
             val annTokens = Regex("""@([A-Za-z0-9_]+)""").findAll(annotations).map { it.groupValues[1] }.toList()
-            val sigLine = if (startLine <= lines.size) stripLeadingInlineAnnotations(lines[startLine - 1]) else name
+            val sigLine = if (startLine <= ctx.lines.size) stripLeadingInlineAnnotations(ctx.lines[startLine - 1]) else name
             val kind = extractKotlinKind(kw, modTokens, annTokens)
-            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name, annTokens)
-            val description = extractKotlinDoc(isTopLevel, kw, annTokens, lines, matchStartLine)
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, name, annTokens)
+            val description = extractKotlinDoc(isTopLevel, kw, annTokens, ctx.lines, matchStartLine)
 
             val (cVec, cScore) = computeComplexityMetrics(
                 kind = kind,
                 startLine = startLine,
                 endLine = endLine,
-                maskedLines = maskedLines,
-                lines = lines,
+                maskedLines = ctx.maskedLines,
+                lines = ctx.lines,
                 language = "kotlin",
                 isComposable = "Composable" in annTokens,
                 functionName = name
             )
 
             return GraphNode(
-                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                nodeId = nodeId, projectId = ctx.projectId, fileId = ctx.fileId, name = name,
                 qualifiedName = qualifiedName, kind = kind, signature = sigLine,
-                startLine = startLine, endLine = endLine, moduleId = moduleId,
-                sourceSet = sourceSet, semioticLayer = sem, archLayer = arch, isTestDouble = isTd,
+                startLine = startLine, endLine = endLine, moduleId = ctx.moduleId,
+                sourceSet = ctx.sourceSet, semioticLayer = sem, archLayer = arch, isTestDouble = isTd,
                 description = description, isTopLevel = isTopLevel,
                 cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
                 maxNestingDepth = cVec.maxNesting, complexityScore = cScore
@@ -2209,60 +2216,41 @@ class PolyglotAstExtractor {
 
         private fun processSingleKotlinDeclaration(
             match: MatchResult,
-            maskedText: String,
-            lines: List<String>,
-            maskedLines: List<String>,
-            cleanLines: List<String>,
-            scopeStack: MutableList<ScopeEntry>,
-            projectId: String,
-            relPath: String,
-            fileId: String,
+            ctx: FileExtractionContext,
             pkgName: String,
-            imports: List<Pair<String, Int>>,
-            moduleId: String,
-            sourceSet: String,
+            scopeStack: MutableList<ScopeEntry>,
             edges: MutableList<GraphEdge>
         ): Pair<GraphNode, Boolean>? {
             val (kw, name, modTokens) = extractKotlinDeclHeader(match) ?: return null
             val annotations = match.groups["annotations"]?.value ?: ""
-            val (matchStartLine, startLine, endLine) = resolveKotlinDeclLines(match, maskedText, lines, cleanLines)
+            val (matchStartLine, startLine, endLine) = resolveKotlinDeclLines(match, ctx.maskedText, ctx.lines, ctx.cleanLines)
             shrinkScopeStack(scopeStack, startLine)
 
             val isTopLevel = scopeStack.isEmpty()
             val isPublicTop = isPublicTopLevel(isTopLevel, modTokens, kw)
             val enclosingPrefix = scopeStack.joinToString(".") { it.name }
             val node = buildKotlinNode(
-                projectId, relPath, fileId, pkgName, name, kw, modTokens,
+                ctx, pkgName, name, kw, modTokens,
                 annotations, enclosingPrefix, startLine, endLine, matchStartLine,
-                isTopLevel, lines, maskedLines, moduleId, sourceSet
+                isTopLevel
             )
-            addKotlinEdges(node.nodeId, isTopLevel, kw, startLine, endLine, lines, imports, projectId, edges)
+            addKotlinEdges(node.nodeId, isTopLevel, kw, startLine, endLine, ctx.lines, ctx.imports, ctx.projectId, edges)
             pushScopeEntryIfContainer(kw, name, startLine, endLine, scopeStack)
             return Pair(node, isPublicTop)
         }
 
         private fun parseKotlinDeclarations(
-            projectId: String,
-            relPath: String,
-            fileId: String,
+            ctx: FileExtractionContext,
             pkgName: String,
-            maskedText: String,
-            lines: List<String>,
-            maskedLines: List<String>,
-            cleanLines: List<String>,
-            imports: List<Pair<String, Int>>,
-            moduleId: String,
-            sourceSet: String,
             edges: MutableList<GraphEdge>
         ): Pair<List<GraphNode>, Int> {
             val nodes = mutableListOf<GraphNode>()
             val scopeStack = mutableListOf<ScopeEntry>()
             var topLevelCount = 0
 
-            for (match in KT_DECL_RE.findAll(maskedText)) {
+            for (match in KT_DECL_RE.findAll(ctx.maskedText)) {
                 val (node, isPublicTop) = processSingleKotlinDeclaration(
-                    match, maskedText, lines, maskedLines, cleanLines, scopeStack,
-                    projectId, relPath, fileId, pkgName, imports, moduleId, sourceSet, edges
+                    match, ctx, pkgName, scopeStack, edges
                 ) ?: continue
                 nodes.add(node)
                 if (isPublicTop) topLevelCount++
@@ -2299,11 +2287,12 @@ class PolyglotAstExtractor {
             val pkgMatch = KT_PKG_RE.find(maskedText)
             val pkgName = pkgMatch?.groupValues?.get(1) ?: relPath.replace('/', '.')
             val imports = extractKotlinImports(maskedText)
-
-            val (nodes, topLevelCount) = parseKotlinDeclarations(
-                projectId, relPath, fileId, pkgName, maskedText, lines, maskedLines, cleanLines,
-                imports, moduleId, sourceSet, edges
+            val ctx = FileExtractionContext(
+                projectId, relPath, fileId, moduleId, sourceSet,
+                maskedText, lines, maskedLines, cleanLines, imports
             )
+
+            val (nodes, topLevelCount) = parseKotlinDeclarations(ctx, pkgName, edges)
 
             val fileVarTypes = extractKotlinReceiverTypes(maskedText)
             parseKotlinCalls(nodes, maskedLines, fileVarTypes, projectId, edges)
@@ -2378,39 +2367,33 @@ class PolyglotAstExtractor {
         }
 
         private fun buildSwiftNode(
+            ctx: FileExtractionContext,
             nodeId: String,
             qualifiedName: String,
             name: String,
             kw: String,
             startLine: Int,
             endLine: Int,
-            isTopLevel: Boolean,
-            lines: List<String>,
-            maskedLines: List<String>,
-            fileId: String,
-            relPath: String,
-            projectId: String,
-            moduleId: String,
-            sourceSet: String
+            isTopLevel: Boolean
         ): GraphNode {
-            val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
-            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-            val description = if (isTopLevel) extractDocDescription(lines, startLine, "swift") else null
+            val sigLine = if (startLine <= ctx.lines.size) ctx.lines[startLine - 1].trim() else name
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, name)
+            val description = if (isTopLevel) extractDocDescription(ctx.lines, startLine, "swift") else null
             val kind = if (kw == "func") "function" else kw
             val (cVec, cScore) = computeComplexityMetrics(
                 kind = kind,
                 startLine = startLine,
                 endLine = endLine,
-                maskedLines = maskedLines,
-                lines = lines,
+                maskedLines = ctx.maskedLines,
+                lines = ctx.lines,
                 language = "swift",
                 functionName = name
             )
             return GraphNode(
-                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                nodeId = nodeId, projectId = ctx.projectId, fileId = ctx.fileId, name = name,
                 qualifiedName = qualifiedName, kind = kind,
                 signature = sigLine, startLine = startLine, endLine = endLine,
-                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                moduleId = ctx.moduleId, sourceSet = ctx.sourceSet, semioticLayer = sem,
                 archLayer = arch, isTestDouble = isTd,
                 description = description, isTopLevel = isTopLevel,
                 cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
@@ -2457,33 +2440,23 @@ class PolyglotAstExtractor {
 
         private fun processSwiftDeclaration(
             match: MatchResult,
-            maskedText: String,
-            lines: List<String>,
-            maskedLines: List<String>,
-            cleanLines: List<String>,
+            ctx: FileExtractionContext,
             scopeStack: MutableList<ScopeEntry>,
-            fileId: String,
-            relPath: String,
-            projectId: String,
-            moduleId: String,
-            sourceSet: String,
-            imports: List<Pair<String, Int>>,
             nodes: MutableList<GraphNode>,
             edges: MutableList<GraphEdge>
         ): Boolean {
             val (indent, kw, name) = extractSwiftDeclHeader(match) ?: return false
-            val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-            val endLine = findBlockEndLine(lines, startLine, cleanLines)
+            val startLine = ctx.maskedText.substring(0, match.range.first).count { it == '\n' } + 1
+            val endLine = findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
 
             pruneScopeStack(scopeStack, startLine)
-            val (nodeId, qualifiedName) = buildSwiftNodeIdentifiers(fileId, relPath, name, scopeStack)
+            val (nodeId, qualifiedName) = buildSwiftNodeIdentifiers(ctx.fileId, ctx.relPath, name, scopeStack)
             val isTopLevel = isSwiftTopLevel(indent, scopeStack)
 
             val node = buildSwiftNode(
-                nodeId, qualifiedName, name, kw, startLine, endLine, isTopLevel,
-                lines, maskedLines, fileId, relPath, projectId, moduleId, sourceSet
+                ctx, nodeId, qualifiedName, name, kw, startLine, endLine, isTopLevel
             )
-            recordSwiftNodeAndEdges(node, isTopLevel, nodeId, projectId, imports, nodes, edges)
+            recordSwiftNodeAndEdges(node, isTopLevel, nodeId, ctx.projectId, ctx.imports, nodes, edges)
             recordSwiftScopeEntry(kw, name, startLine, endLine, scopeStack)
 
             return isTopLevel && kw != "extension"
@@ -2502,13 +2475,14 @@ class PolyglotAstExtractor {
             val cleanLines = cleanLinesFrom(lines, 0)
             val scopeStack = mutableListOf<ScopeEntry>()
             val imports = extractSwiftImports(maskedText)
+            val ctx = FileExtractionContext(
+                projectId, relPath, fileId, moduleId, sourceSet,
+                maskedText, lines, maskedLines, cleanLines, imports
+            )
 
             var topLevelCount = 0
             for (match in SWIFT_DECL_RE.findAll(maskedText)) {
-                if (processSwiftDeclaration(
-                    match, maskedText, lines, maskedLines, cleanLines, scopeStack,
-                    fileId, relPath, projectId, moduleId, sourceSet, imports, nodes, edges
-                )) {
+                if (processSwiftDeclaration(match, ctx, scopeStack, nodes, edges)) {
                     topLevelCount++
                 }
             }
@@ -2615,38 +2589,32 @@ class PolyglotAstExtractor {
         }
 
         private fun buildTsNode(
+            ctx: FileExtractionContext,
             nodeId: String,
             qualifiedName: String,
             name: String,
             kind: String,
             startLine: Int,
             endLine: Int,
-            isTopLevel: Boolean,
-            lines: List<String>,
-            maskedLines: List<String>,
-            fileId: String,
-            relPath: String,
-            projectId: String,
-            moduleId: String,
-            sourceSet: String
+            isTopLevel: Boolean
         ): GraphNode {
-            val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
-            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-            val description = if (isTopLevel && kind in TS_DOC_KINDS) extractDocDescription(lines, startLine, "typescript") else null
+            val sigLine = if (startLine <= ctx.lines.size) ctx.lines[startLine - 1].trim() else name
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, name)
+            val description = if (isTopLevel && kind in TS_DOC_KINDS) extractDocDescription(ctx.lines, startLine, "typescript") else null
             val (cVec, cScore) = computeComplexityMetrics(
                 kind = kind,
                 startLine = startLine,
                 endLine = endLine,
-                maskedLines = maskedLines,
-                lines = lines,
+                maskedLines = ctx.maskedLines,
+                lines = ctx.lines,
                 language = "typescript",
                 functionName = name
             )
             return GraphNode(
-                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                nodeId = nodeId, projectId = ctx.projectId, fileId = ctx.fileId, name = name,
                 qualifiedName = qualifiedName, kind = kind,
                 signature = sigLine, startLine = startLine, endLine = endLine,
-                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                moduleId = ctx.moduleId, sourceSet = ctx.sourceSet, semioticLayer = sem,
                 archLayer = arch, isTestDouble = isTd,
                 description = description, isTopLevel = isTopLevel,
                 cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
@@ -2690,41 +2658,31 @@ class PolyglotAstExtractor {
 
         private fun processTsCandidate(
             candidate: TsDeclCandidate,
-            maskedText: String,
-            lines: List<String>,
-            maskedLines: List<String>,
-            cleanLines: List<String>,
+            ctx: FileExtractionContext,
             scopeStack: MutableList<ScopeEntry>,
-            fileId: String,
-            relPath: String,
-            projectId: String,
-            moduleId: String,
-            sourceSet: String,
-            imports: List<Pair<String, Int>>,
             nodes: MutableList<GraphNode>,
             edges: MutableList<GraphEdge>
         ): Boolean {
-            val startLine = maskedText.substring(0, candidate.rangeStart).count { it == '\n' } + 1
+            val startLine = ctx.maskedText.substring(0, candidate.rangeStart).count { it == '\n' } + 1
             pruneScopeStack(scopeStack, startLine)
 
             if (candidate.isMethod && scopeStack.isEmpty()) {
                 return false
             }
 
-            val endLine = findTsBlockEndLine(lines, cleanLines, startLine)
-            val (nodeId, qualifiedName) = buildTsNodeIdentifiers(fileId, relPath, candidate.name, scopeStack)
+            val endLine = findTsBlockEndLine(ctx.lines, ctx.cleanLines, startLine)
+            val (nodeId, qualifiedName) = buildTsNodeIdentifiers(ctx.fileId, ctx.relPath, candidate.name, scopeStack)
 
-            val declHeaderSlice = maskedLines.subList(startLine - 1, minOf(maskedLines.size, minOf(endLine, startLine + 2))).joinToString(" ")
+            val declHeaderSlice = ctx.maskedLines.subList(startLine - 1, minOf(ctx.maskedLines.size, minOf(endLine, startLine + 2))).joinToString(" ")
             val kind = resolveTsKind(candidate, candidate.kw, declHeaderSlice)
             val isTopLevel = !candidate.isMethod && candidate.indent.isEmpty() && scopeStack.isEmpty()
 
             if (!isTopLevel && kind == "variable") return false
 
             val node = buildTsNode(
-                nodeId, qualifiedName, candidate.name, kind, startLine, endLine, isTopLevel,
-                lines, maskedLines, fileId, relPath, projectId, moduleId, sourceSet
+                ctx, nodeId, qualifiedName, candidate.name, kind, startLine, endLine, isTopLevel
             )
-            recordTsNodeAndEdges(node, isTopLevel, nodeId, projectId, imports, nodes, edges)
+            recordTsNodeAndEdges(node, isTopLevel, nodeId, ctx.projectId, ctx.imports, nodes, edges)
             recordTsScopeEntry(kind, candidate.name, startLine, endLine, scopeStack)
 
             return isTopLevel && kind !in TS_NON_COUNTABLE_TOP_LEVEL
@@ -2787,15 +2745,16 @@ class PolyglotAstExtractor {
             val scopeStack = mutableListOf<ScopeEntry>()
             val imports = extractTypeScriptImports(maskedText, sourceText)
             val declCandidates = collectTsDeclCandidates(maskedText)
+            val ctx = FileExtractionContext(
+                projectId, relPath, fileId, moduleId, sourceSet,
+                maskedText, lines, maskedLines, cleanLines, imports
+            )
 
             var topLevelCount = 0
             val seenStartOffsets = mutableSetOf<Int>()
             for (candidate in declCandidates) {
                 if (!seenStartOffsets.add(candidate.rangeStart)) continue
-                if (processTsCandidate(
-                    candidate, maskedText, lines, maskedLines, cleanLines, scopeStack,
-                    fileId, relPath, projectId, moduleId, sourceSet, imports, nodes, edges
-                )) {
+                if (processTsCandidate(candidate, ctx, scopeStack, nodes, edges)) {
                     topLevelCount++
                 }
             }
@@ -2831,38 +2790,32 @@ class PolyglotAstExtractor {
         }
 
         private fun buildRustNode(
+            ctx: FileExtractionContext,
             nodeId: String,
             qualifiedName: String,
             name: String,
             kind: String,
             startLine: Int,
             endLine: Int,
-            isTopLevel: Boolean,
-            lines: List<String>,
-            maskedLines: List<String>,
-            fileId: String,
-            relPath: String,
-            projectId: String,
-            moduleId: String,
-            sourceSet: String
+            isTopLevel: Boolean
         ): GraphNode {
-            val sigLine = if (startLine <= lines.size) lines[startLine - 1].trim() else name
-            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-            val description = if (isTopLevel && kind in RUST_DOC_KINDS) extractDocDescription(lines, startLine, "rust") else null
+            val sigLine = if (startLine <= ctx.lines.size) ctx.lines[startLine - 1].trim() else name
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, name)
+            val description = if (isTopLevel && kind in RUST_DOC_KINDS) extractDocDescription(ctx.lines, startLine, "rust") else null
             val (cVec, cScore) = computeComplexityMetrics(
                 kind = kind,
                 startLine = startLine,
                 endLine = endLine,
-                maskedLines = maskedLines,
-                lines = lines,
+                maskedLines = ctx.maskedLines,
+                lines = ctx.lines,
                 language = "rust",
                 functionName = name
             )
             return GraphNode(
-                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                nodeId = nodeId, projectId = ctx.projectId, fileId = ctx.fileId, name = name,
                 qualifiedName = qualifiedName, kind = kind,
                 signature = sigLine, startLine = startLine, endLine = endLine,
-                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                moduleId = ctx.moduleId, sourceSet = ctx.sourceSet, semioticLayer = sem,
                 archLayer = arch, isTestDouble = isTd,
                 description = description, isTopLevel = isTopLevel,
                 cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
@@ -2909,34 +2862,24 @@ class PolyglotAstExtractor {
 
         private fun processRustDeclaration(
             match: MatchResult,
-            maskedText: String,
-            lines: List<String>,
-            maskedLines: List<String>,
-            cleanLines: List<String>,
+            ctx: FileExtractionContext,
             scopeStack: MutableList<ScopeEntry>,
-            fileId: String,
-            relPath: String,
-            projectId: String,
-            moduleId: String,
-            sourceSet: String,
-            imports: List<Pair<String, Int>>,
             nodes: MutableList<GraphNode>,
             edges: MutableList<GraphEdge>
         ): Boolean {
             val (indent, kw, name) = extractSwiftDeclHeader(match) ?: return false
             val kind = resolveRustKind(kw)
-            val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-            val endLine = findBlockEndLine(lines, startLine, cleanLines)
+            val startLine = ctx.maskedText.substring(0, match.range.first).count { it == '\n' } + 1
+            val endLine = findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
 
             pruneScopeStack(scopeStack, startLine)
-            val (nodeId, qualifiedName) = buildRustNodeIdentifiers(fileId, relPath, name, scopeStack)
+            val (nodeId, qualifiedName) = buildRustNodeIdentifiers(ctx.fileId, ctx.relPath, name, scopeStack)
             val isTopLevel = isRustTopLevel(indent, scopeStack)
 
             val node = buildRustNode(
-                nodeId, qualifiedName, name, kind, startLine, endLine, isTopLevel,
-                lines, maskedLines, fileId, relPath, projectId, moduleId, sourceSet
+                ctx, nodeId, qualifiedName, name, kind, startLine, endLine, isTopLevel
             )
-            recordRustNodeAndEdges(node, isTopLevel, nodeId, projectId, imports, nodes, edges)
+            recordRustNodeAndEdges(node, isTopLevel, nodeId, ctx.projectId, ctx.imports, nodes, edges)
             recordRustScopeEntry(kw, name, startLine, endLine, scopeStack)
 
             return isTopLevel && kind !in RUST_NON_COUNTABLE_TOP_LEVEL
@@ -3002,13 +2945,14 @@ class PolyglotAstExtractor {
             val cleanLines = cleanLinesFrom(lines, 0)
             val scopeStack = mutableListOf<ScopeEntry>()
             val imports = extractRustImports(maskedText)
+            val ctx = FileExtractionContext(
+                projectId, relPath, fileId, moduleId, sourceSet,
+                maskedText, lines, maskedLines, cleanLines, imports
+            )
 
             var topLevelCount = 0
             for (match in RS_DECL_RE.findAll(maskedText)) {
-                if (processRustDeclaration(
-                    match, maskedText, lines, maskedLines, cleanLines, scopeStack,
-                    fileId, relPath, projectId, moduleId, sourceSet, imports, nodes, edges
-                )) {
+                if (processRustDeclaration(match, ctx, scopeStack, nodes, edges)) {
                     topLevelCount++
                 }
             }
@@ -3099,17 +3043,23 @@ class PolyglotAstExtractor {
         }
 
         private fun createCppTypeNode(
-            nodeId: String, qualifiedName: String, name: String, kind: String,
-            sigLine: String, startLine: Int, endLine: Int, fileId: String,
-            projectId: String, moduleId: String, sourceSet: String, relPath: String,
-            description: String?, isTopLevel: Boolean
+            ctx: FileExtractionContext,
+            nodeId: String,
+            qualifiedName: String,
+            name: String,
+            kind: String,
+            sigLine: String,
+            startLine: Int,
+            endLine: Int,
+            description: String?,
+            isTopLevel: Boolean
         ): GraphNode {
-            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, name)
             return GraphNode(
-                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                nodeId = nodeId, projectId = ctx.projectId, fileId = ctx.fileId, name = name,
                 qualifiedName = qualifiedName, kind = kind,
                 signature = sigLine, startLine = startLine, endLine = endLine,
-                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                moduleId = ctx.moduleId, sourceSet = ctx.sourceSet, semioticLayer = sem,
                 archLayer = arch, isTestDouble = isTd,
                 description = description, isTopLevel = isTopLevel
             )
@@ -3117,16 +3067,8 @@ class PolyglotAstExtractor {
 
         private fun processCppTypeDeclaration(
             declMatch: MatchResult,
-            maskedText: String,
-            lines: List<String>,
-            cleanLines: List<String>,
+            ctx: FileExtractionContext,
             scopeStack: MutableList<ScopeEntry>,
-            fileId: String,
-            relPath: String,
-            projectId: String,
-            moduleId: String,
-            sourceSet: String,
-            imports: List<Pair<String, Int>>,
             seenNodeIds: MutableSet<String>,
             nodes: MutableList<GraphNode>,
             edges: MutableList<GraphEdge>
@@ -3135,28 +3077,27 @@ class PolyglotAstExtractor {
             if (header == null) return false
             val (indent, kw, name) = header
             val kind = resolveCppDeclKind(kw)
-            val startLine = maskedText.substring(0, declMatch.range.first).count { it == '\n' } + 1
-            val endLine = findBlockEndLine(lines, startLine, cleanLines)
+            val startLine = ctx.maskedText.substring(0, declMatch.range.first).count { it == '\n' } + 1
+            val endLine = findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
 
             pruneScopeStack(scopeStack, startLine)
-            val (nodeId, qualifiedName) = buildCppTypeNodeIdentifiers(fileId, relPath, name, scopeStack)
+            val (nodeId, qualifiedName) = buildCppTypeNodeIdentifiers(ctx.fileId, ctx.relPath, name, scopeStack)
 
             val isTopLevel = isTopLevelCppType(indent, scopeStack)
-            val sigLine = resolveDeclarationSignature(lines, startLine, name)
+            val sigLine = resolveDeclarationSignature(ctx.lines, startLine, name)
             if (!seenNodeIds.add(nodeId)) return false
 
-            val description = resolveCppTypeDoc(isTopLevel, kind, lines, startLine)
+            val description = resolveCppTypeDoc(isTopLevel, kind, ctx.lines, startLine)
             nodes.add(
                 createCppTypeNode(
-                    nodeId = nodeId, qualifiedName = qualifiedName, name = name, kind = kind,
-                    sigLine = sigLine, startLine = startLine, endLine = endLine, fileId = fileId,
-                    projectId = projectId, moduleId = moduleId, sourceSet = sourceSet, relPath = relPath,
+                    ctx = ctx, nodeId = nodeId, qualifiedName = qualifiedName, name = name, kind = kind,
+                    sigLine = sigLine, startLine = startLine, endLine = endLine,
                     description = description, isTopLevel = isTopLevel
                 )
             )
 
             if (isTopLevel) {
-                edges.addAll(buildCppImportEdges(nodeId, projectId, imports))
+                edges.addAll(buildCppImportEdges(nodeId, ctx.projectId, ctx.imports))
             }
             updateCppScopeStack(kind, name, startLine, endLine, scopeStack)
             return isReportableTopLevelCppType(isTopLevel, kind)
@@ -3207,27 +3148,31 @@ class PolyglotAstExtractor {
         }
 
         private fun createCppFunctionNode(
-            nodeId: String, relPath: String, qualifiedCppName: String, shortName: String,
-            sigLine: String, startLine: Int, endLine: Int, fileId: String,
-            projectId: String, moduleId: String, sourceSet: String,
-            description: String?, isTopLevel: Boolean,
-            maskedLines: List<String>, lines: List<String>
+            ctx: FileExtractionContext,
+            nodeId: String,
+            qualifiedCppName: String,
+            shortName: String,
+            sigLine: String,
+            startLine: Int,
+            endLine: Int,
+            description: String?,
+            isTopLevel: Boolean
         ): GraphNode {
-            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, shortName)
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, shortName)
             val (cVec, cScore) = computeComplexityMetrics(
                 kind = "function",
                 startLine = startLine,
                 endLine = endLine,
-                maskedLines = maskedLines,
-                lines = lines,
+                maskedLines = ctx.maskedLines,
+                lines = ctx.lines,
                 language = "cpp",
                 functionName = shortName
             )
             return GraphNode(
-                nodeId = nodeId, projectId = projectId, fileId = fileId, name = shortName,
-                qualifiedName = "$relPath:$qualifiedCppName", kind = "function",
+                nodeId = nodeId, projectId = ctx.projectId, fileId = ctx.fileId, name = shortName,
+                qualifiedName = "${ctx.relPath}:$qualifiedCppName", kind = "function",
                 signature = sigLine, startLine = startLine, endLine = endLine,
-                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                moduleId = ctx.moduleId, sourceSet = ctx.sourceSet, semioticLayer = sem,
                 archLayer = arch, isTestDouble = isTd,
                 description = description, isTopLevel = isTopLevel,
                 cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
@@ -3237,48 +3182,37 @@ class PolyglotAstExtractor {
 
         private fun processCppFunctionDeclaration(
             declMatch: MatchResult,
-            maskedText: String,
-            lines: List<String>,
-            maskedLines: List<String>,
-            cleanLines: List<String>,
-            fileId: String,
-            relPath: String,
-            projectId: String,
-            moduleId: String,
-            sourceSet: String,
-            imports: List<Pair<String, Int>>,
+            ctx: FileExtractionContext,
             seenNodeIds: MutableSet<String>,
             nodes: MutableList<GraphNode>,
             edges: MutableList<GraphEdge>
         ): Boolean {
             val rawName = declMatch.groups["name"]?.value
             if (rawName == null) return false
-            val startLine = maskedText.substring(0, declMatch.range.first).count { it == '\n' } + 1
+            val startLine = ctx.maskedText.substring(0, declMatch.range.first).count { it == '\n' } + 1
             if (isSkippedCppFunction(rawName, nodes, startLine)) return false
 
             val shortName = rawName.substringAfterLast("::")
-            val endLine = findBlockEndLine(lines, startLine, cleanLines)
+            val endLine = findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
             val enclosingClass = findEnclosingCppClass(nodes, startLine)
             val qualifiedCppName = resolveCppFunctionQualifiedName(rawName, enclosingClass)
             val indent = declMatch.groups["indent"]?.value.orEmpty()
             val isTopLevel = isTopLevelCppFunction(indent, enclosingClass, rawName)
-            val nodeId = "$fileId#$qualifiedCppName"
+            val nodeId = "${ctx.fileId}#$qualifiedCppName"
             if (!seenNodeIds.add(nodeId)) return false
 
-            val sigLine = resolveDeclarationSignature(lines, startLine, shortName)
-            val description = resolveCppFunctionDoc(isTopLevel, lines, startLine)
+            val sigLine = resolveDeclarationSignature(ctx.lines, startLine, shortName)
+            val description = resolveCppFunctionDoc(isTopLevel, ctx.lines, startLine)
             nodes.add(
                 createCppFunctionNode(
-                    nodeId = nodeId, relPath = relPath, qualifiedCppName = qualifiedCppName, shortName = shortName,
-                    sigLine = sigLine, startLine = startLine, endLine = endLine, fileId = fileId,
-                    projectId = projectId, moduleId = moduleId, sourceSet = sourceSet,
-                    description = description, isTopLevel = isTopLevel,
-                    maskedLines = maskedLines, lines = lines
+                    ctx = ctx, nodeId = nodeId, qualifiedCppName = qualifiedCppName, shortName = shortName,
+                    sigLine = sigLine, startLine = startLine, endLine = endLine,
+                    description = description, isTopLevel = isTopLevel
                 )
             )
 
             if (isTopLevel) {
-                edges.addAll(buildCppImportEdges(nodeId, projectId, imports))
+                edges.addAll(buildCppImportEdges(nodeId, ctx.projectId, ctx.imports))
             }
             return isTopLevel
         }
@@ -3327,18 +3261,15 @@ class PolyglotAstExtractor {
         }
 
         private fun collectCppTypeDeclarations(
-            maskedText: String, lines: List<String>, cleanLines: List<String>,
-            fileId: String, relPath: String, projectId: String, moduleId: String, sourceSet: String,
-            imports: List<Pair<String, Int>>, seenNodeIds: MutableSet<String>,
-            nodes: MutableList<GraphNode>, edges: MutableList<GraphEdge>
+            ctx: FileExtractionContext,
+            seenNodeIds: MutableSet<String>,
+            nodes: MutableList<GraphNode>,
+            edges: MutableList<GraphEdge>
         ): Int {
             val scopeStack = mutableListOf<ScopeEntry>()
             var count = 0
-            for (declMatch in CPP_DECL_RE.findAll(maskedText)) {
-                if (processCppTypeDeclaration(
-                    declMatch, maskedText, lines, cleanLines, scopeStack,
-                    fileId, relPath, projectId, moduleId, sourceSet, imports, seenNodeIds, nodes, edges
-                )) {
+            for (declMatch in CPP_DECL_RE.findAll(ctx.maskedText)) {
+                if (processCppTypeDeclaration(declMatch, ctx, scopeStack, seenNodeIds, nodes, edges)) {
                     count++
                 }
             }
@@ -3346,17 +3277,14 @@ class PolyglotAstExtractor {
         }
 
         private fun collectCppFunctionDeclarations(
-            maskedText: String, lines: List<String>, maskedLines: List<String>, cleanLines: List<String>,
-            fileId: String, relPath: String, projectId: String, moduleId: String, sourceSet: String,
-            imports: List<Pair<String, Int>>, seenNodeIds: MutableSet<String>,
-            nodes: MutableList<GraphNode>, edges: MutableList<GraphEdge>
+            ctx: FileExtractionContext,
+            seenNodeIds: MutableSet<String>,
+            nodes: MutableList<GraphNode>,
+            edges: MutableList<GraphEdge>
         ): Int {
             var count = 0
-            for (declMatch in CPP_FUNC_RE.findAll(maskedText)) {
-                if (processCppFunctionDeclaration(
-                    declMatch, maskedText, lines, maskedLines, cleanLines,
-                    fileId, relPath, projectId, moduleId, sourceSet, imports, seenNodeIds, nodes, edges
-                )) {
+            for (declMatch in CPP_FUNC_RE.findAll(ctx.maskedText)) {
+                if (processCppFunctionDeclaration(declMatch, ctx, seenNodeIds, nodes, edges)) {
                     count++
                 }
             }
@@ -3386,15 +3314,13 @@ class PolyglotAstExtractor {
             val cleanLines = cleanLinesFrom(lines, 0)
             val imports = extractCppImports(sourceText, maskedLines)
             val seenNodeIds = mutableSetOf<String>()
+            val ctx = FileExtractionContext(
+                projectId, relPath, fileId, moduleId, sourceSet,
+                maskedText, lines, maskedLines, cleanLines, imports
+            )
 
-            val typeTopLevelCount = collectCppTypeDeclarations(
-                maskedText, lines, cleanLines, fileId, relPath,
-                projectId, moduleId, sourceSet, imports, seenNodeIds, nodes, edges
-            )
-            val funcTopLevelCount = collectCppFunctionDeclarations(
-                maskedText, lines, maskedLines, cleanLines, fileId, relPath,
-                projectId, moduleId, sourceSet, imports, seenNodeIds, nodes, edges
-            )
+            val typeTopLevelCount = collectCppTypeDeclarations(ctx, seenNodeIds, nodes, edges)
+            val funcTopLevelCount = collectCppFunctionDeclarations(ctx, seenNodeIds, nodes, edges)
             edges.addAll(collectAllCppCallEdges(nodes, maskedLines, projectId))
 
             return Triple(nodes, edges, typeTopLevelCount + funcTopLevelCount)
@@ -3445,43 +3371,37 @@ class PolyglotAstExtractor {
         }
 
         private fun buildPythonNode(
+            ctx: FileExtractionContext,
             nodeId: String,
             qualifiedName: String,
             name: String,
             kw: String,
             startLine: Int,
             endLine: Int,
-            isTopLevel: Boolean,
-            lines: List<String>,
-            maskedLines: List<String>,
-            fileId: String,
-            relPath: String,
-            projectId: String,
-            moduleId: String,
-            sourceSet: String
+            isTopLevel: Boolean
         ): GraphNode {
-            val sigLine = buildPythonHeaderSignature(lines, maskedLines, startLine, endLine)
-            val (sem, arch, isTd) = SemioticLayerClassifier.classify(relPath, name)
-            val headerEndLine = findPythonHeaderEndLine(maskedLines, startLine, endLine)
+            val sigLine = buildPythonHeaderSignature(ctx.lines, ctx.maskedLines, startLine, endLine)
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, name)
+            val headerEndLine = findPythonHeaderEndLine(ctx.maskedLines, startLine, endLine)
             val description = if (isTopLevel) {
-                extractPythonDocDescription(lines, startLine, headerEndLine, endLine)
+                extractPythonDocDescription(ctx.lines, startLine, headerEndLine, endLine)
             } else null
             val kind = if ("class" in kw) "class" else "function"
             val (cVec, cScore) = computeComplexityMetrics(
                 kind = kind,
                 startLine = startLine,
                 endLine = endLine,
-                maskedLines = maskedLines,
-                lines = lines,
+                maskedLines = ctx.maskedLines,
+                lines = ctx.lines,
                 language = "python",
                 functionName = name
             )
 
             return GraphNode(
-                nodeId = nodeId, projectId = projectId, fileId = fileId, name = name,
+                nodeId = nodeId, projectId = ctx.projectId, fileId = ctx.fileId, name = name,
                 qualifiedName = qualifiedName, kind = kind,
                 signature = sigLine, startLine = startLine, endLine = endLine,
-                moduleId = moduleId, sourceSet = sourceSet, semioticLayer = sem,
+                moduleId = ctx.moduleId, sourceSet = ctx.sourceSet, semioticLayer = sem,
                 archLayer = arch, isTestDouble = isTd,
                 description = description, isTopLevel = isTopLevel,
                 cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
@@ -3553,35 +3473,24 @@ class PolyglotAstExtractor {
 
         private fun processPythonDeclaration(
             match: MatchResult,
-            maskedText: String,
-            lines: List<String>,
-            maskedLines: List<String>,
+            ctx: FileExtractionContext,
             scopeStack: MutableList<ScopeEntry>,
-            fileId: String,
-            relPath: String,
-            projectId: String,
-            moduleId: String,
-            sourceSet: String,
-            imports: List<Pair<String, Int>>,
             nodes: MutableList<GraphNode>,
             edges: MutableList<GraphEdge>
         ): Boolean {
             val (indent, kw, name) = extractDeclHeader(match) ?: return false
-            val startLine = maskedText.substring(0, match.range.first).count { it == '\n' } + 1
-            val endLine = findPythonBlockEndLine(lines, maskedLines, startLine)
+            val startLine = ctx.maskedText.substring(0, match.range.first).count { it == '\n' } + 1
+            val endLine = findPythonBlockEndLine(ctx.lines, ctx.maskedLines, startLine)
 
             pruneScopeStack(scopeStack, startLine)
-            val (nodeId, qualifiedName) = buildPythonNodeIdentifiers(fileId, relPath, name, scopeStack)
+            val (nodeId, qualifiedName) = buildPythonNodeIdentifiers(ctx.fileId, ctx.relPath, name, scopeStack)
             val isTopLevel = indent.isEmpty() && scopeStack.isEmpty()
 
             val node = buildPythonNode(
-                nodeId = nodeId, qualifiedName = qualifiedName, name = name, kw = kw,
-                startLine = startLine, endLine = endLine, isTopLevel = isTopLevel,
-                lines = lines, maskedLines = maskedLines, fileId = fileId,
-                relPath = relPath, projectId = projectId, moduleId = moduleId,
-                sourceSet = sourceSet
+                ctx = ctx, nodeId = nodeId, qualifiedName = qualifiedName, name = name, kw = kw,
+                startLine = startLine, endLine = endLine, isTopLevel = isTopLevel
             )
-            recordNodeAndEdges(node, isTopLevel, nodeId, projectId, imports, nodes, edges)
+            recordNodeAndEdges(node, isTopLevel, nodeId, ctx.projectId, ctx.imports, nodes, edges)
             appendScopeIfBlock(kw, name, startLine, endLine, scopeStack)
             return isTopLevel
         }
@@ -3649,13 +3558,14 @@ class PolyglotAstExtractor {
             val maskedLines = maskedText.lines()
             val scopeStack = mutableListOf<ScopeEntry>()
             val imports = extractPythonImports(maskedText)
+            val ctx = FileExtractionContext(
+                projectId, relPath, fileId, moduleId, sourceSet,
+                maskedText, lines, maskedLines, emptyList(), imports
+            )
 
             var topLevelCount = 0
             for (match in PY_DECL_RE.findAll(maskedText)) {
-                val isTop = processPythonDeclaration(
-                    match, maskedText, lines, maskedLines, scopeStack,
-                    fileId, relPath, projectId, moduleId, sourceSet, imports, nodes, edges
-                )
+                val isTop = processPythonDeclaration(match, ctx, scopeStack, nodes, edges)
                 if (isTop) topLevelCount++
             }
 
