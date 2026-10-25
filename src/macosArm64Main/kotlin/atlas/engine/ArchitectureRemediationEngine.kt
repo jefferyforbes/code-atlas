@@ -26,6 +26,48 @@ class ArchitectureRemediationEngine(
 ) {
     private val auditor = ArchitectureAuditor(store)
 
+    private fun isRuleIncluded(ruleFilter: String?, targetRule: String): Boolean {
+        if (ruleFilter == null) return true
+        return ruleFilter.equals(targetRule, ignoreCase = true) || ruleFilter.equals("all", ignoreCase = true)
+    }
+
+    private fun collectPlannedPrescriptions(
+        projectId: String,
+        boostViolations: List<SingleDeclarationViolation>,
+        layerViolations: List<LayerInversionViolation>,
+        dryRun: Boolean,
+        splitBoost003: Boolean,
+        makePrivateBoost003: Boolean,
+        testCommand: String?,
+        limit: Int
+    ): List<ArchitectureRemediationPrescription> {
+        val prescriptions = mutableListOf<ArchitectureRemediationPrescription>()
+        for (v in boostViolations.take(limit)) {
+            prescriptions.add(
+                remediateBoost003(
+                    projectId = projectId,
+                    violation = v,
+                    dryRun = dryRun,
+                    split = splitBoost003,
+                    makePrivate = makePrivateBoost003,
+                    testCommand = testCommand
+                )
+            )
+        }
+        val remaining = (limit - prescriptions.size).coerceAtLeast(0)
+        for (v in layerViolations.take(remaining)) {
+            prescriptions.add(
+                remediateLayerInversion(
+                    projectId = projectId,
+                    violation = v,
+                    dryRun = dryRun,
+                    testCommand = testCommand
+                )
+            )
+        }
+        return prescriptions
+    }
+
     fun planAndRemediate(
         projectId: String,
         targetPaths: List<String> = emptyList(),
@@ -38,63 +80,20 @@ class ArchitectureRemediationEngine(
     ): ArchitectureRemediationReport {
         val auditReport = auditor.runFullAudit(
             projectId = projectId,
-            pathPrefixes = if (targetPaths.isNotEmpty()) targetPaths else null,
+            pathPrefixes = targetPaths.ifEmpty { null },
             descriptionMode = "off"
         )
 
-        val boostViolations = if (ruleFilter == null || ruleFilter.equals("BOOST-003", ignoreCase = true) || ruleFilter.equals("all", ignoreCase = true)) {
-            auditReport.singleDeclarationViolations
-        } else emptyList()
-
-        val layerViolations = if (ruleFilter == null || ruleFilter.equals("ARCH-LAYER-INVERSION", ignoreCase = true) || ruleFilter.equals("all", ignoreCase = true)) {
-            auditReport.layerInversions
-        } else emptyList()
-
+        val boostViolations = if (isRuleIncluded(ruleFilter, "BOOST-003")) auditReport.singleDeclarationViolations else emptyList()
+        val layerViolations = if (isRuleIncluded(ruleFilter, "ARCH-LAYER-INVERSION")) auditReport.layerInversions else emptyList()
         val totalViolations = boostViolations.size + layerViolations.size
-        val prescriptions = mutableListOf<ArchitectureRemediationPrescription>()
-
-        var count = 0
-        // 1. Process BOOST-003 violations
-        for (v in boostViolations) {
-            if (count >= limit) break
-            val rx = remediateBoost003(
-                projectId = projectId,
-                violation = v,
-                dryRun = dryRun,
-                split = splitBoost003,
-                makePrivate = makePrivateBoost003,
-                testCommand = testCommand
-            )
-            prescriptions.add(rx)
-            count++
-        }
-
-        // 2. Process ARCH-LAYER-INVERSION violations
-        for (v in layerViolations) {
-            if (count >= limit) break
-            val rx = remediateLayerInversion(
-                projectId = projectId,
-                violation = v,
-                dryRun = dryRun,
-                testCommand = testCommand
-            )
-            prescriptions.add(rx)
-            count++
-        }
+        val prescriptions = collectPlannedPrescriptions(
+            projectId, boostViolations, layerViolations, dryRun, splitBoost003, makePrivateBoost003, testCommand, limit
+        )
 
         val verifiedCount = prescriptions.count { it.verified }
         val appliedCount = prescriptions.count { it.applied }
-
-        val summaryText = buildString {
-            append("[Remediation Plan] project=").append(projectId)
-            append(" total_violations=").append(totalViolations)
-            append(" boost003=").append(boostViolations.size)
-            append(" layer_inversions=").append(layerViolations.size)
-            append(" planned=").append(prescriptions.size)
-            append(" verified=").append(verifiedCount)
-            append(" applied=").append(appliedCount)
-            append(" dry_run=").append(dryRun)
-        }
+        val summaryText = "[Remediation Plan] project=$projectId total_violations=$totalViolations boost003=${boostViolations.size} layer_inversions=${layerViolations.size} planned=${prescriptions.size} verified=$verifiedCount applied=$appliedCount dry_run=$dryRun"
 
         return ArchitectureRemediationReport(
             project = projectId,
@@ -1044,41 +1043,60 @@ class ArchitectureRemediationEngine(
         return sb.toString()
     }
 
-    private fun computeUnifiedDiff(origLines: List<String>, modLines: List<String>): String {
-        val sb = StringBuilder()
+    private fun findCommonPrefixLength(origLines: List<String>, modLines: List<String>): Int {
         var prefix = 0
         while (prefix < origLines.size && prefix < modLines.size && origLines[prefix] == modLines[prefix]) {
             prefix++
         }
+        return prefix
+    }
+
+    private fun findDiffBounds(origLines: List<String>, modLines: List<String>, prefix: Int): Pair<Int, Int> {
         var origSuffix = origLines.size - 1
         var modSuffix = modLines.size - 1
         while (origSuffix >= prefix && modSuffix >= prefix && origLines[origSuffix] == modLines[modSuffix]) {
             origSuffix--
             modSuffix--
         }
+        return Pair(origSuffix, modSuffix)
+    }
 
-        if (prefix <= origSuffix || prefix <= modSuffix) {
-            val origHunkStart = max(1, prefix)
-            val origHunkLen = max(1, origSuffix - prefix + 1)
-            val modHunkStart = max(1, prefix)
-            val modHunkLen = max(1, modSuffix - prefix + 1)
-
-            sb.append("@@ -").append(origHunkStart).append(",").append(origHunkLen)
-                .append(" +").append(modHunkStart).append(",").append(modHunkLen).append(" @@\n")
-
-            if (prefix > 0 && prefix - 1 < origLines.size) {
-                sb.append(" ").append(origLines[prefix - 1]).append("\n")
-            }
-            for (i in prefix..origSuffix) {
-                sb.append("-").append(origLines[i]).append("\n")
-            }
-            for (i in prefix..modSuffix) {
-                sb.append("+").append(modLines[i]).append("\n")
-            }
-            if (origSuffix + 1 < origLines.size) {
-                sb.append(" ").append(origLines[origSuffix + 1]).append("\n")
-            }
+    private fun appendDiffHunkLines(
+        sb: StringBuilder,
+        origLines: List<String>,
+        modLines: List<String>,
+        prefix: Int,
+        origSuffix: Int,
+        modSuffix: Int
+    ) {
+        if (prefix > 0 && prefix - 1 < origLines.size) {
+            sb.append(" ").append(origLines[prefix - 1]).append("\n")
         }
+        for (i in prefix..origSuffix) {
+            sb.append("-").append(origLines[i]).append("\n")
+        }
+        for (i in prefix..modSuffix) {
+            sb.append("+").append(modLines[i]).append("\n")
+        }
+        if (origSuffix + 1 < origLines.size) {
+            sb.append(" ").append(origLines[origSuffix + 1]).append("\n")
+        }
+    }
+
+    private fun computeUnifiedDiff(origLines: List<String>, modLines: List<String>): String {
+        val prefix = findCommonPrefixLength(origLines, modLines)
+        val (origSuffix, modSuffix) = findDiffBounds(origLines, modLines, prefix)
+        if (prefix > origSuffix && prefix > modSuffix) return ""
+
+        val sb = StringBuilder()
+        val origHunkStart = max(1, prefix)
+        val origHunkLen = max(1, origSuffix - prefix + 1)
+        val modHunkStart = max(1, prefix)
+        val modHunkLen = max(1, modSuffix - prefix + 1)
+
+        sb.append("@@ -").append(origHunkStart).append(",").append(origHunkLen)
+            .append(" +").append(modHunkStart).append(",").append(modHunkLen).append(" @@\n")
+        appendDiffHunkLines(sb, origLines, modLines, prefix, origSuffix, modSuffix)
         return sb.toString()
     }
 }

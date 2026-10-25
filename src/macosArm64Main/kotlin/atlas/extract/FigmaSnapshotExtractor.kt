@@ -323,6 +323,18 @@ class FigmaSnapshotExtractor {
         }
     }
 
+    private fun resolveNodeSectionScope(
+        nodeObj: JsonObject,
+        nodeId: String,
+        rawType: String,
+        sectionId: String?
+    ): Pair<String?, String?> {
+        val isSection = rawType == "SECTION" || rawType == "CANVAS_SECTION"
+        val currentSectionId = if (isSection) sectionId else (sectionId ?: nodeObj["sectionId"].asString())
+        val nextSectionId = if (isSection) nodeId else currentSectionId
+        return Pair(currentSectionId, nextSectionId)
+    }
+
     private fun traverseNodeTree(
         fileKey: String,
         nodeObj: JsonObject,
@@ -332,17 +344,12 @@ class FigmaSnapshotExtractor {
         nodes: MutableList<FigmaNode>,
         edges: MutableMap<String, FigmaEdge>
     ) {
-        val nodeId = nodeObj["id"].asString()
-            ?: nodeObj["nodeId"].asString()
-            ?: return
-
+        val nodeId = nodeObj["id"].asString() ?: nodeObj["nodeId"].asString() ?: return
         val name = nodeObj["name"].asString() ?: ""
         val rawType = nodeObj["type"].asString()?.uppercase() ?: "FRAME"
 
         val effectivePageName = if (rawType == "CANVAS" && name.isNotBlank()) name else pageName
-        val isSection = rawType == "SECTION" || rawType == "CANVAS_SECTION"
-        val currentSectionId = if (isSection) sectionId else (sectionId ?: nodeObj["sectionId"].asString())
-        val nextSectionId = if (isSection) nodeId else currentSectionId
+        val (currentSectionId, nextSectionId) = resolveNodeSectionScope(nodeObj, nodeId, rawType, sectionId)
 
         val hasEmoji = detectEmoji(nodeObj, name)
         val hasReaction = extractReactions(fileKey, nodeId, nodeObj, edges)
@@ -792,24 +799,32 @@ class FigmaSnapshotExtractor {
         }
     }
 
+    private fun putCollectionEntriesFromArray(collectionsArray: JsonArray, collectionsMap: MutableMap<String, String>) {
+        for (col in collectionsArray.filterIsInstance<JsonObject>()) {
+            val colId = col["id"].asString() ?: continue
+            val colName = col["name"].asString() ?: "Default"
+            collectionsMap[colId] = colName
+        }
+    }
+
+    private fun putCollectionEntriesFromObject(collectionsObj: JsonObject, collectionsMap: MutableMap<String, String>) {
+        for ((colId, colVal) in collectionsObj) {
+            val colName = (colVal as? JsonObject)?.get("name").asString() ?: "Default"
+            collectionsMap[colId] = colName
+        }
+    }
+
     private fun resolveFigmaCollectionsMap(rootObj: JsonObject): Map<String, String> {
         val collectionsMap = mutableMapOf<String, String>()
         val collectionsArray = rootObj["collections"]?.jsonArray
             ?: rootObj["variableCollections"]?.jsonArray
             ?: rootObj["meta"]?.jsonObject?.get("variableCollections")?.jsonArray
         if (collectionsArray != null) {
-            for (col in collectionsArray.filterIsInstance<JsonObject>()) {
-                val colId = col["id"].asString() ?: continue
-                val colName = col["name"].asString() ?: "Default"
-                collectionsMap[colId] = colName
-            }
+            putCollectionEntriesFromArray(collectionsArray, collectionsMap)
         }
         val collectionsObj = rootObj["meta"]?.jsonObject?.get("variableCollections")?.jsonObject
         if (collectionsObj != null) {
-            for ((colId, colVal) in collectionsObj) {
-                val colName = (colVal as? JsonObject)?.get("name").asString() ?: "Default"
-                collectionsMap[colId] = colName
-            }
+            putCollectionEntriesFromObject(collectionsObj, collectionsMap)
         }
         return collectionsMap
     }
@@ -909,22 +924,20 @@ class FigmaSnapshotExtractor {
             ?: rawRef.replace('.', '/')
     }
 
+    private fun parseBraceWrappedAlias(str: String?, knownTokens: Map<String, String>): String? {
+        if (str == null || !str.startsWith("{") || !str.endsWith("}")) return null
+        val rawRef = str.removePrefix("{").removeSuffix("}").trim()
+        return resolveDtcgAliasTarget(rawRef, knownTokens)
+    }
+
     private fun extractDtcgAlias(value: JsonElement, knownTokens: Map<String, String>): String? {
-        val primContent = (value as? JsonPrimitive)?.content
-        if (primContent != null) {
-            if (primContent.startsWith("{") && primContent.endsWith("}")) {
-                val rawRef = primContent.removePrefix("{").removeSuffix("}").trim()
-                return resolveDtcgAliasTarget(rawRef, knownTokens)
-            }
-            return null
+        if (value is JsonPrimitive) {
+            return parseBraceWrappedAlias(value.content, knownTokens)
         }
         if (value is JsonObject) {
             for ((_, modeVal) in value) {
-                val str = (modeVal as? JsonPrimitive)?.content
-                if (str != null && str.startsWith("{") && str.endsWith("}")) {
-                    val rawRef = str.removePrefix("{").removeSuffix("}").trim()
-                    return resolveDtcgAliasTarget(rawRef, knownTokens)
-                }
+                val resolved = parseBraceWrappedAlias((modeVal as? JsonPrimitive)?.content, knownTokens)
+                if (resolved != null) return resolved
             }
         }
         return null
