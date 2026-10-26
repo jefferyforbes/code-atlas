@@ -36,7 +36,7 @@ kotlin {
     sourceSets {
         val macosArm64Main by getting {
             dependencies {
-                implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+                implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
                 implementation("com.orion:orion-native-io:0.1.0")
                 implementation("com.orion:orion-mcp-cli-core:0.1.0")
                 implementation("com.orion:orion-markdown-vault:0.1.0")
