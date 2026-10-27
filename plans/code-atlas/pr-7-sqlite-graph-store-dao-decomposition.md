@@ -6,7 +6,7 @@ contract:
   task: pr-7-sqlite-graph-store-dao-decomposition
   objective: Decompose the 4,568-line SqliteGraphStore into cohesive internal domain DAOs (FigmaGraphStoreDao, ComposeGraphStoreDao, GraphTraversalDao) while preserving the public SqliteGraphStore API and BOOST-003 compliance.
 
-status: planned # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: executing # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
 
 size:
   complexity: medium
@@ -36,7 +36,9 @@ scope:
     - src/macosArm64Main/kotlin/atlas/db/FigmaGraphStoreDao.kt
     - src/macosArm64Main/kotlin/atlas/db/ComposeGraphStoreDao.kt
     - src/macosArm64Main/kotlin/atlas/db/GraphTraversalDao.kt
+    - src/macosArm64Main/kotlin/atlas/extract/PolyglotAstExtractor.kt
     - src/macosArm64Test/kotlin/atlas/SqliteGraphStoreTest.kt
+    - plans/code-atlas/pr-6-mcp-audit-payload-and-param-ratchet.md
     - plans/code-atlas/pr-7-sqlite-graph-store-dao-decomposition.md
   modules:
     - :macosArm64Main
