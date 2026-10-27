@@ -1706,36 +1706,8 @@ class SqliteGraphStore(val dbPath: String) {
     fun getImpactRadius(projectId: String, nodeId: String, depth: Int = 2): ImpactRadiusResult {
         val callers = getCallers(projectId, nodeId, depth)
         val callees = getCallees(projectId, nodeId, depth)
-        val impactedIds = mutableSetOf(nodeId)
-        for (item in callers) {
-            if (item.sourceId.isNotEmpty()) impactedIds.add(item.sourceId)
-        }
-        for (item in callees) {
-            if (item.targetId.isNotEmpty()) impactedIds.add(item.targetId)
-        }
-
-        val nodes = mutableListOf<GraphNode>()
-        for (chunk in impactedIds.chunked(250)) {
-            val placeholders = chunk.joinToString(",") { "?" }
-            val stmt = db.prepare(
-                """
-                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree, description, is_top_level,
-                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
-                FROM nodes WHERE project_id = ? AND node_id IN ($placeholders);
-                """.trimIndent()
-            )
-            try {
-                stmt.bindString(1, projectId)
-                chunk.forEachIndexed { i, id -> stmt.bindString(2 + i, id) }
-                while (stmt.step()) {
-                    nodes.add(rowToNode(stmt))
-                }
-            } finally {
-                stmt.close()
-            }
-        }
+        val impactedIds = collectImpactedNodeIds(nodeId, callers, callees)
+        val nodes = fetchNodesByChunks(projectId, impactedIds)
 
         val files = nodes.mapNotNull { n ->
             if (n.fileId.isNotEmpty()) n.fileId.substringAfter(":") else null
@@ -1757,6 +1729,51 @@ class SqliteGraphStore(val dbPath: String) {
             callers = callers,
             callees = callees
         )
+    }
+
+    private fun collectImpactedNodeIds(
+        seedNodeId: String,
+        callers: List<GraphHop>,
+        callees: List<GraphHop>
+    ): Set<String> {
+        val impactedIds = mutableSetOf(seedNodeId)
+        for (item in callers) {
+            if (item.sourceId.isNotEmpty()) impactedIds.add(item.sourceId)
+        }
+        for (item in callees) {
+            if (item.targetId.isNotEmpty()) impactedIds.add(item.targetId)
+        }
+        return impactedIds
+    }
+
+    private fun fetchNodesByChunks(projectId: String, impactedIds: Set<String>): List<GraphNode> {
+        val nodes = mutableListOf<GraphNode>()
+        for (chunk in impactedIds.chunked(250)) {
+            fetchNodeChunk(projectId, chunk, nodes)
+        }
+        return nodes
+    }
+
+    private fun fetchNodeChunk(projectId: String, chunk: List<String>, outNodes: MutableList<GraphNode>) {
+        val placeholders = chunk.joinToString(",") { "?" }
+        val stmt = db.prepare(
+            """
+            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
+                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
+                   is_test_double, in_degree, out_degree, description, is_top_level,
+                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+            FROM nodes WHERE project_id = ? AND node_id IN ($placeholders);
+            """.trimIndent()
+        )
+        try {
+            stmt.bindString(1, projectId)
+            chunk.forEachIndexed { i, id -> stmt.bindString(2 + i, id) }
+            while (stmt.step()) {
+                outNodes.add(rowToNode(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
     }
 
     fun getGodNodes(projectId: String, topN: Int = 10): List<GraphNode> {
@@ -2140,44 +2157,66 @@ class SqliteGraphStore(val dbPath: String) {
     ): List<String> {
         if (sourceNodeId == targetNodeId) return listOf(sourceNodeId)
 
-        val queue = mutableListOf<Pair<String, List<String>>>()
-        val visited = mutableSetOf<String>()
-
-        queue.add(Pair(sourceNodeId, listOf(sourceNodeId)))
-        visited.add(sourceNodeId)
-
         val edgeStmt = db.prepare(
             """
             SELECT target_node_id FROM edges
             WHERE project_id = ? AND source_node_id = ?
             """.trimIndent()
         )
-
-        try {
-            var head = 0
-            while (head < queue.size) {
-                val (curr, path) = queue[head++]
-                if (path.size > maxHops) break
-
-                edgeStmt.reset()
-                edgeStmt.clearBindings()
-                edgeStmt.bindString(1, projectId)
-                edgeStmt.bindString(2, curr)
-
-                while (edgeStmt.step()) {
-                    val nextId = edgeStmt.columnString(0)
-                    if (nextId == targetNodeId) {
-                        return path + nextId
-                    }
-                    if (visited.add(nextId)) {
-                        queue.add(Pair(nextId, path + nextId))
-                    }
-                }
-            }
-            return emptyList()
+        return try {
+            bfsShortestPath(edgeStmt, projectId, sourceNodeId to targetNodeId, maxHops)
         } finally {
             edgeStmt.close()
         }
+    }
+
+    private fun bfsShortestPath(
+        edgeStmt: NativeSqliteStatement,
+        projectId: String,
+        endpoints: Pair<String, String>,
+        maxHops: Int
+    ): List<String> {
+        val (sourceNodeId, targetNodeId) = endpoints
+        val queue = mutableListOf(Pair(sourceNodeId, listOf(sourceNodeId)))
+        val visited = mutableSetOf(sourceNodeId)
+        var head = 0
+        while (head < queue.size) {
+            val (curr, path) = queue[head++]
+            if (path.size > maxHops) break
+            val neighbors = queryOutgoingTargets(edgeStmt, projectId, curr)
+            if (targetNodeId in neighbors) return path + targetNodeId
+            enqueueUnvisitedNeighbors(neighbors, path, visited, queue)
+        }
+        return emptyList()
+    }
+
+    private fun enqueueUnvisitedNeighbors(
+        neighbors: List<String>,
+        currentPath: List<String>,
+        visited: MutableSet<String>,
+        queue: MutableList<Pair<String, List<String>>>
+    ) {
+        for (nextId in neighbors) {
+            if (visited.add(nextId)) {
+                queue.add(Pair(nextId, currentPath + nextId))
+            }
+        }
+    }
+
+    private fun queryOutgoingTargets(
+        edgeStmt: NativeSqliteStatement,
+        projectId: String,
+        sourceNodeId: String
+    ): List<String> {
+        edgeStmt.reset()
+        edgeStmt.clearBindings()
+        edgeStmt.bindString(1, projectId)
+        edgeStmt.bindString(2, sourceNodeId)
+        val targets = mutableListOf<String>()
+        while (edgeStmt.step()) {
+            targets.add(edgeStmt.columnString(0))
+        }
+        return targets
     }
 
     fun sliceLiveSource(
@@ -2442,7 +2481,7 @@ class SqliteGraphStore(val dbPath: String) {
         if (value.isNaN() || value.isInfinite()) 0.0 else value
 
     private fun bindFigmaNodeRow(stmt: NativeSqliteStatement, node: FigmaNode, fileKey: String) {
-        val effectiveFileKey = if (node.fileKey.isNotBlank()) node.fileKey else fileKey
+        val effectiveFileKey = node.fileKey.ifBlank { fileKey }
         stmt.reset()
         stmt.clearBindings()
         stmt.bindString(1, node.nodeId)
@@ -2456,6 +2495,11 @@ class SqliteGraphStore(val dbPath: String) {
         stmt.bindString(9, node.sizingHorizontal)
         stmt.bindString(10, node.sizingVertical)
         stmt.bindString(11, node.textAutoResize)
+        bindFigmaNodeGeometry(stmt, node)
+        bindFigmaNodeFlagsAndContrast(stmt, node)
+    }
+
+    private fun bindFigmaNodeGeometry(stmt: NativeSqliteStatement, node: FigmaNode) {
         stmt.bindDouble(12, sanitizeFiniteDouble(node.paddingLeft))
         stmt.bindDouble(13, sanitizeFiniteDouble(node.paddingRight))
         stmt.bindDouble(14, sanitizeFiniteDouble(node.paddingTop))
@@ -2467,13 +2511,23 @@ class SqliteGraphStore(val dbPath: String) {
         stmt.bindDouble(20, sanitizeFiniteDouble(node.canvasY))
         stmt.bindDouble(21, sanitizeFiniteDouble(node.width))
         stmt.bindDouble(22, sanitizeFiniteDouble(node.height))
-        stmt.bindInt(23, if (node.isInteractive) 1 else 0)
-        stmt.bindInt(24, if (node.hasEmoji) 1 else 0)
-        stmt.bindInt(25, if (node.unboundFill) 1 else 0)
-        stmt.bindInt(26, if (node.unboundStroke) 1 else 0)
-        val safeContrast = node.wcagContrast?.takeUnless { it.isNaN() || it.isInfinite() }
-        if (safeContrast != null) stmt.bindDouble(27, safeContrast) else stmt.bindNull(27)
+    }
+
+    private fun bindFigmaNodeFlagsAndContrast(stmt: NativeSqliteStatement, node: FigmaNode) {
+        stmt.bindInt(23, boolToInt(node.isInteractive))
+        stmt.bindInt(24, boolToInt(node.hasEmoji))
+        stmt.bindInt(25, boolToInt(node.unboundFill))
+        stmt.bindInt(26, boolToInt(node.unboundStroke))
+        bindNullableFiniteDouble(stmt, 27, node.wcagContrast)
         stmt.bindString(28, node.semioticLayer)
+    }
+
+    private fun bindNullableFiniteDouble(stmt: NativeSqliteStatement, index: Int, value: Double?) {
+        if (value == null || value.isNaN() || value.isInfinite()) {
+            stmt.bindNull(index)
+        } else {
+            stmt.bindDouble(index, value)
+        }
     }
 
     private fun bindFigmaSpatialRow(
@@ -3614,22 +3668,11 @@ class SqliteGraphStore(val dbPath: String) {
         val totalCount = countFigmaNodes(fileKey)
         if (totalCount == 0) return emptyList()
 
-        var unboundCount = 0
-        val unbStmt = db.prepare(
-            "SELECT COUNT(*) FROM figma_nodes WHERE file_key = ? AND (unbound_fill = 1 OR unbound_stroke = 1);"
-        )
-        try {
-            unbStmt.bindString(1, fileKey)
-            if (unbStmt.step()) {
-                unboundCount = unbStmt.columnInt(0)
-            }
-        } finally {
-            unbStmt.close()
-        }
-
+        val unboundCount = countUnboundFigmaNodes(fileKey)
         val ratio = unboundCount.toDouble() / totalCount.toDouble()
         if (ratio <= 0.05) return emptyList()
 
+        val shortPct = (ratio * 100.0).toString().take(5)
         val violations = mutableListOf<FigmaViolation>()
         val stmt = db.prepare(
             """
@@ -3640,27 +3683,45 @@ class SqliteGraphStore(val dbPath: String) {
         )
         try {
             stmt.bindString(1, fileKey)
-            val pctStr = (ratio * 100.0).toString()
-            val shortPct = if (pctStr.length > 5) pctStr.substring(0, 5) else pctStr
             while (stmt.step()) {
-                val id = stmt.columnString(0)
-                val name = stmt.columnString(1)
-                val uf = stmt.columnInt(2) != 0
-                val us = stmt.columnInt(3) != 0
-                val kind = if (uf && us) "fill and stroke" else if (uf) "fill" else "stroke"
-                violations.add(
-                    FigmaViolation(
-                        rule = "UNBOUND_TOKENS",
-                        nodeId = id,
-                        nodeName = name,
-                        message = "Node '$name' has unbound $kind (file unbound ratio: $shortPct%, exceeds 5% threshold)"
-                    )
-                )
+                violations.add(mapUnboundTokenRow(stmt, shortPct))
             }
         } finally {
             stmt.close()
         }
         return violations
+    }
+
+    private fun countUnboundFigmaNodes(fileKey: String): Int {
+        val unbStmt = db.prepare(
+            "SELECT COUNT(*) FROM figma_nodes WHERE file_key = ? AND (unbound_fill = 1 OR unbound_stroke = 1);"
+        )
+        return try {
+            unbStmt.bindString(1, fileKey)
+            if (unbStmt.step()) unbStmt.columnInt(0) else 0
+        } finally {
+            unbStmt.close()
+        }
+    }
+
+    private fun mapUnboundTokenRow(stmt: NativeSqliteStatement, shortPct: String): FigmaViolation {
+        val id = stmt.columnString(0)
+        val name = stmt.columnString(1)
+        val uf = stmt.columnInt(2) != 0
+        val us = stmt.columnInt(3) != 0
+        val kind = unboundTokenSlotKind(uf, us)
+        return FigmaViolation(
+            rule = "UNBOUND_TOKENS",
+            nodeId = id,
+            nodeName = name,
+            message = "Node '$name' has unbound $kind (file unbound ratio: $shortPct%, exceeds 5% threshold)"
+        )
+    }
+
+    private fun unboundTokenSlotKind(unboundFill: Boolean, unboundStroke: Boolean): String = when {
+        unboundFill && unboundStroke -> "fill and stroke"
+        unboundFill -> "fill"
+        else -> "stroke"
     }
 
     fun queryAdHocDetachedSpecimenViolations(fileKey: String): List<FigmaViolation> {

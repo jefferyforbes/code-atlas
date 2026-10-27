@@ -1087,20 +1087,7 @@ class FigmaSnapshotExtractor {
     }
 
     private fun isEmojiCodePoint(cp: Int): Boolean {
-        return (cp in 0x1F300..0x1F5FF) || // Misc Symbols and Pictographs
-            (cp in 0x1F600..0x1F64F) || // Emoticons
-            (cp in 0x1F680..0x1F6FF) || // Transport and Map
-            (cp in 0x1F700..0x1F77F) || // Alchemical Symbols
-            (cp in 0x1F780..0x1F7FF) || // Geometric Shapes Extended
-            (cp in 0x1F800..0x1F8FF) || // Supplemental Arrows-C
-            (cp in 0x1F900..0x1F9FF) || // Supplemental Symbols and Pictographs
-            (cp in 0x1FA00..0x1FA6F) || // Chess Symbols
-            (cp in 0x1FA70..0x1FAFF) || // Symbols and Pictographs Extended-A
-            (cp in 0x2600..0x26FF) || // Misc Symbols
-            (cp in 0x2700..0x27BF) || // Dingbats
-            (cp in 0x2300..0x23FF) || // Misc Technical
-            (cp in 0x2B50..0x2B55) || // Stars
-            (cp in 0x1F1E6..0x1F1FF) // Flags
+        return EMOJI_CODE_POINT_RANGES.any { cp in it }
     }
 
     private fun JsonElement?.asString(): String? = (this as? JsonPrimitive)?.content
@@ -1138,6 +1125,22 @@ class FigmaSnapshotExtractor {
     )
 
     companion object {
+        private val EMOJI_CODE_POINT_RANGES = arrayOf(
+            0x1F300..0x1F5FF, // Misc Symbols and Pictographs
+            0x1F600..0x1F64F, // Emoticons
+            0x1F680..0x1F6FF, // Transport and Map
+            0x1F700..0x1F77F, // Alchemical Symbols
+            0x1F780..0x1F7FF, // Geometric Shapes Extended
+            0x1F800..0x1F8FF, // Supplemental Arrows-C
+            0x1F900..0x1F9FF, // Supplemental Symbols and Pictographs
+            0x1FA00..0x1FA6F, // Chess Symbols
+            0x1FA70..0x1FAFF, // Symbols and Pictographs Extended-A
+            0x2600..0x26FF, // Misc Symbols
+            0x2700..0x27BF, // Dingbats
+            0x2300..0x23FF, // Misc Technical
+            0x2B50..0x2B55, // Stars
+            0x1F1E6..0x1F1FF // Flags
+        )
         private val VALID_SIZINGS = setOf("FIXED", "HUG", "FILL")
         private val SEMANTIC_NODE_TYPES = setOf("COMPONENT_SET", "COMPONENT")
         private val PRAGMATIC_NODE_TYPES = setOf("SECTION", "CANVAS_SECTION", "TOUCH_TARGET_FRAME")

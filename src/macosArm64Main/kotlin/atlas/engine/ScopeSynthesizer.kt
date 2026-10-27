@@ -193,7 +193,10 @@ class ScopeSynthesizer(private val store: SqliteGraphStore) {
     }
 
     private fun findCollidingPlans(projectId: String, impactedNodeIds: Set<String>): List<String> {
-        val terminalPlanStatuses = setOf("(merged)", "(completed)", "(done)", "(landed)", "(closed)")
+        val terminalPlanStatuses = setOf(
+            "(merged)", "(completed)", "(done)", "(landed)", "(closed)",
+            "(planned)", "(draft)", "(blocked)", "(cancelled)"
+        )
         val collidingPlans = mutableListOf<String>()
         val planEdges = store.listEdges(projectId, edgeTypes = listOf("PLAN_SCOPES_FILE"))
         for (edge in planEdges) {

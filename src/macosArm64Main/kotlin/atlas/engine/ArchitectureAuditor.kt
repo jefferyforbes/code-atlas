@@ -69,7 +69,10 @@ class ArchitectureAuditor(
         )
         private val LOWER_TIER_LAYERS = setOf("presentation", "data", "infrastructure")
         private val NON_PRESENTATION_LAYERS = setOf("application", "data", "infrastructure")
-        private val TERMINAL_PLAN_STATUSES = setOf("(merged)", "(completed)", "(done)", "(landed)", "(closed)")
+        private val TERMINAL_PLAN_STATUSES = setOf(
+            "(merged)", "(completed)", "(done)", "(landed)", "(closed)",
+            "(planned)", "(draft)", "(blocked)", "(cancelled)"
+        )
         private val CONTAINER_KINDS = setOf("class", "object", "interface", "struct")
         private val DEAD_CODE_ENTRYPOINTS = setOf(
             "main", "init", "run", "invoke", "Companion", "onCreate", "onStart",

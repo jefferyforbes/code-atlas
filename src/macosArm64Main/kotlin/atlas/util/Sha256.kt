@@ -26,15 +26,23 @@ object Sha256 {
     )
 
     fun digest(data: ByteArray): String {
-        var h0 = 0x6a09e667.toInt()
-        var h1 = 0xbb67ae85.toInt()
-        var h2 = 0x3c6ef372.toInt()
-        var h3 = 0xa54ff53a.toInt()
-        var h4 = 0x510e527f.toInt()
-        var h5 = 0x9b05688c.toInt()
-        var h6 = 0x1f83d9ab.toInt()
-        var h7 = 0x5be0cd19.toInt()
+        val state = intArrayOf(
+            0x6a09e667.toInt(), 0xbb67ae85.toInt(), 0x3c6ef372.toInt(), 0xa54ff53a.toInt(),
+            0x510e527f.toInt(), 0x9b05688c.toInt(), 0x1f83d9ab.toInt(), 0x5be0cd19.toInt()
+        )
+        val padded = padMessage(data)
+        val w = IntArray(64)
+        val numChunks = padded.size / 64
 
+        for (chunk in 0 until numChunks) {
+            expandMessageSchedule(padded, chunk * 64, w)
+            compressChunk(state, w)
+        }
+
+        return formatDigestHex(state)
+    }
+
+    private fun padMessage(data: ByteArray): ByteArray {
         val bitLength = data.size.toLong() * 8L
         val padLength = (((56 - (data.size + 1) % 64) % 64 + 64) % 64)
         val totalLength = data.size + 1 + padLength + 8
@@ -45,73 +53,77 @@ object Sha256 {
         for (i in 0 until 8) {
             padded[totalLength - 1 - i] = ((bitLength ushr (i * 8)) and 0xFF).toByte()
         }
+        return padded
+    }
 
-        val w = IntArray(64)
-        val numChunks = totalLength / 64
+    private fun expandMessageSchedule(padded: ByteArray, offset: Int, w: IntArray) {
+        for (i in 0 until 16) {
+            val j = offset + i * 4
+            w[i] = ((padded[j].toInt() and 0xFF) shl 24) or
+                ((padded[j + 1].toInt() and 0xFF) shl 16) or
+                ((padded[j + 2].toInt() and 0xFF) shl 8) or
+                (padded[j + 3].toInt() and 0xFF)
+        }
+        for (i in 16 until 64) {
+            val s0 = (w[i - 15] rotateRight 7) xor (w[i - 15] rotateRight 18) xor (w[i - 15] ushr 3)
+            val s1 = (w[i - 2] rotateRight 17) xor (w[i - 2] rotateRight 19) xor (w[i - 2] ushr 10)
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1
+        }
+    }
 
-        for (chunk in 0 until numChunks) {
-            val offset = chunk * 64
-            for (i in 0 until 16) {
-                val j = offset + i * 4
-                w[i] = ((padded[j].toInt() and 0xFF) shl 24) or
-                        ((padded[j + 1].toInt() and 0xFF) shl 16) or
-                        ((padded[j + 2].toInt() and 0xFF) shl 8) or
-                        (padded[j + 3].toInt() and 0xFF)
-            }
-            for (i in 16 until 64) {
-                val s0 = (w[i - 15] rotateRight 7) xor (w[i - 15] rotateRight 18) xor (w[i - 15] ushr 3)
-                val s1 = (w[i - 2] rotateRight 17) xor (w[i - 2] rotateRight 19) xor (w[i - 2] ushr 10)
-                w[i] = w[i - 16] + s0 + w[i - 7] + s1
-            }
+    private fun compressChunk(state: IntArray, w: IntArray) {
+        var a = state[0]
+        var b = state[1]
+        var c = state[2]
+        var d = state[3]
+        var e = state[4]
+        var f = state[5]
+        var g = state[6]
+        var h = state[7]
 
-            var a = h0
-            var b = h1
-            var c = h2
-            var d = h3
-            var e = h4
-            var f = h5
-            var g = h6
-            var h = h7
+        for (i in 0 until 64) {
+            val s1 = (e rotateRight 6) xor (e rotateRight 11) xor (e rotateRight 25)
+            val ch = (e and f) xor (e.inv() and g)
+            val temp1 = h + s1 + ch + K[i] + w[i]
+            val s0 = (a rotateRight 2) xor (a rotateRight 13) xor (a rotateRight 22)
+            val maj = (a and b) xor (a and c) xor (b and c)
+            val temp2 = s0 + maj
 
-            for (i in 0 until 64) {
-                val s1 = (e rotateRight 6) xor (e rotateRight 11) xor (e rotateRight 25)
-                val ch = (e and f) xor (e.inv() and g)
-                val temp1 = h + s1 + ch + K[i] + w[i]
-                val s0 = (a rotateRight 2) xor (a rotateRight 13) xor (a rotateRight 22)
-                val maj = (a and b) xor (a and c) xor (b and c)
-                val temp2 = s0 + maj
-
-                h = g
-                g = f
-                f = e
-                e = d + temp1
-                d = c
-                c = b
-                b = a
-                a = temp1 + temp2
-            }
-
-            h0 += a
-            h1 += b
-            h2 += c
-            h3 += d
-            h4 += e
-            h5 += f
-            h6 += g
-            h7 += h
+            h = g
+            g = f
+            f = e
+            e = d + temp1
+            d = c
+            c = b
+            b = a
+            a = temp1 + temp2
         }
 
-        val ints = intArrayOf(h0, h1, h2, h3, h4, h5, h6, h7)
+        state[0] += a
+        state[1] += b
+        state[2] += c
+        state[3] += d
+        state[4] += e
+        state[5] += f
+        state[6] += g
+        state[7] += h
+    }
+
+    private fun formatDigestHex(state: IntArray): String {
         val sb = StringBuilder(64)
-        for (v in ints) {
-            for (byteIdx in 3 downTo 0) {
-                val b = (v ushr (byteIdx * 8)) and 0xFF
-                val hex = b.toString(16)
-                if (hex.length == 1) sb.append('0')
-                sb.append(hex)
-            }
+        for (v in state) {
+            appendIntHex(sb, v)
         }
         return sb.toString()
+    }
+
+    private fun appendIntHex(sb: StringBuilder, value: Int) {
+        for (byteIdx in 3 downTo 0) {
+            val b = (value ushr (byteIdx * 8)) and 0xFF
+            val hex = b.toString(16)
+            if (hex.length == 1) sb.append('0')
+            sb.append(hex)
+        }
     }
 
     fun digest(text: String): String = digest(text.encodeToByteArray())
