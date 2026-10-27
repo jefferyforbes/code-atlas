@@ -252,19 +252,22 @@ class FigmaSnapshotExtractor {
         )
     }
 
+    private data class FigmaNodeIdentity(
+        val nodeId: String,
+        val fileKey: String,
+        val pageName: String,
+        val sectionId: String?,
+        val parentId: String?,
+        val name: String,
+        val rawType: String
+    )
+
     private fun buildFigmaNode(
-        nodeId: String,
-        fileKey: String,
-        pageName: String,
-        sectionId: String?,
-        parentId: String?,
-        name: String,
-        rawType: String,
+        identity: FigmaNodeIdentity,
         nodeObj: JsonObject,
-        isInteractive: Boolean,
-        hasEmoji: Boolean,
-        hasReaction: Boolean
+        flags: Triple<Boolean, Boolean, Boolean>
     ): FigmaNode {
+        val (isInteractive, hasEmoji, hasReaction) = flags
         val autoLayout = extractAutoLayout(nodeObj)
         val bbox = extractBoundingBox(nodeObj)
         val fills = nodeObj["fills"]?.jsonArray
@@ -274,16 +277,16 @@ class FigmaSnapshotExtractor {
         val wcagContrast = nodeObj["wcagContrast"].asDouble() ?: nodeObj["wcag_contrast"].asDouble()
         val semioticLayer = nodeObj["semioticLayer"].asString()
             ?: nodeObj["semiotic_layer"].asString()
-            ?: classifySemioticLayer(rawType, name, isInteractive, hasReaction)
+            ?: classifySemioticLayer(identity.rawType, identity.name, isInteractive, hasReaction)
 
         return FigmaNode(
-            nodeId = nodeId,
-            fileKey = fileKey,
-            pageName = pageName,
-            sectionId = sectionId,
-            parentId = parentId,
-            name = name,
-            nodeType = rawType,
+            nodeId = identity.nodeId,
+            fileKey = identity.fileKey,
+            pageName = identity.pageName,
+            sectionId = identity.sectionId,
+            parentId = identity.parentId,
+            name = identity.name,
+            nodeType = identity.rawType,
             layoutMode = autoLayout.layoutMode,
             sizingHorizontal = autoLayout.sizingHorizontal,
             sizingVertical = autoLayout.sizingVertical,
@@ -362,17 +365,17 @@ class FigmaSnapshotExtractor {
         recordContainsEdge(fileKey, parentId, nodeId, edges)
 
         val figmaNode = buildFigmaNode(
-            nodeId = nodeId,
-            fileKey = fileKey,
-            pageName = effectivePageName,
-            sectionId = currentSectionId,
-            parentId = parentId,
-            name = name,
-            rawType = rawType,
+            identity = FigmaNodeIdentity(
+                nodeId = nodeId,
+                fileKey = fileKey,
+                pageName = effectivePageName,
+                sectionId = currentSectionId,
+                parentId = parentId,
+                name = name,
+                rawType = rawType
+            ),
             nodeObj = nodeObj,
-            isInteractive = isInteractive,
-            hasEmoji = hasEmoji,
-            hasReaction = hasReaction
+            flags = Triple(isInteractive, hasEmoji, hasReaction)
         )
         nodes.add(figmaNode)
 

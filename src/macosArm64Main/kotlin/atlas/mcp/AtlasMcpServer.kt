@@ -343,6 +343,10 @@ class AtlasMcpServer(
                     put("type", "integer")
                     put("description", "Maximum allowed HIGH severity violations for audit_complexity ratchet gate.")
                 }
+                putJsonObject("param_high_ratchet") {
+                    put("type", "integer")
+                    put("description", "Maximum allowed HIGH severity parameter count violations (COMPLEXITY-002-PARAMS) for audit_complexity.")
+                }
                 putJsonObject("max_high_violations") {
                     put("type", "integer")
                     put("description", "Alias for high_ratchet.")
@@ -1182,12 +1186,32 @@ class AtlasMcpServer(
 
     private fun handleAuditVerifyArchitecture(args: JsonObject, project: String, targets: List<String>): JsonObject {
         val descMode = args["description_mode"]?.jsonPrimitive?.contentOrNull ?: "domain-only"
+        val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
         val report = auditor.runFullAudit(
             projectId = project,
             pathPrefixes = if (targets.isNotEmpty()) targets else null,
             descriptionMode = descMode
         )
-        return json.encodeToJsonElement(report).jsonObject
+        val totalComp = report.complexityViolations.size
+        val cappedReport = if (totalComp > limit) {
+            report.copy(complexityViolations = prioritizeAndCapViolations(report.complexityViolations, limit))
+        } else {
+            report
+        }
+        val baseObj = json.encodeToJsonElement(cappedReport).jsonObject
+        return buildJsonObject {
+            baseObj.forEach { (k, v) -> put(k, v) }
+            put("total_complexity_violations", totalComp)
+        }
+    }
+
+    private fun prioritizeAndCapViolations(violations: List<ComplexityViolation>, limit: Int): List<ComplexityViolation> {
+        val sorted = violations.sortedWith(
+            compareBy<ComplexityViolation> { if (it.ruleId == "COMPLEXITY-001") 0 else 1 }
+                .thenBy { if (it.severity == "HIGH") 0 else 1 }
+                .thenByDescending { it.riskIndex }
+        )
+        return sorted.take(limit.coerceAtLeast(1))
     }
 
     private fun handleAuditCheckDescriptions(args: JsonObject, project: String, targets: List<String>): JsonObject {
@@ -1361,9 +1385,16 @@ class AtlasMcpServer(
             pathPrefixes = if (targets.isNotEmpty()) targets else null,
             thresholds = thresholds
         )
-        val (resolvedRatchet, resolvedHighRatchet) = resolveComplexityRatchets(args, project)
-        return buildComplexityAuditResponse(project, threshold, maxCyclomatic, violations, resolvedRatchet, resolvedHighRatchet)
+        val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
+        val ratchets = resolveComplexityRatchets(args, project)
+        return buildComplexityAuditResponse(project, threshold, maxCyclomatic, violations, ratchets, limit)
     }
+
+    private data class ComplexityRatchets(
+        val ratchet: Int?,
+        val highRatchet: Int?,
+        val paramHighRatchet: Int? = null
+    )
 
     private fun extractIntOrParsed(args: JsonObject, vararg keys: String): Int? {
         for (key in keys) {
@@ -1383,13 +1414,16 @@ class AtlasMcpServer(
         return prim.contentOrNull
     }
 
-    private fun resolveComplexityRatchets(args: JsonObject, project: String): Pair<Int?, Int?> {
+    private fun resolveComplexityRatchets(args: JsonObject, project: String): ComplexityRatchets {
         val rRatchet = extractIntOrParsed(args, "ratchet", "max_violations", "baseline")
         val rHigh = extractIntOrParsed(args, "high_ratchet", "max_high_violations")
-        if (rRatchet != null && rHigh != null) return Pair(rRatchet, rHigh)
+        val rParamHigh = extractIntOrParsed(args, "param_high_ratchet")
+        if (rRatchet != null && rHigh != null && rParamHigh != null) {
+            return ComplexityRatchets(rRatchet, rHigh, rParamHigh)
+        }
 
         val explicitFile = resolveExplicitBaselineFile(args)
-        return findBaselineInPaths(project, explicitFile, rRatchet, rHigh)
+        return findBaselineInPaths(project, explicitFile, ComplexityRatchets(rRatchet, rHigh, rParamHigh))
     }
 
     private fun candidateBaselinePaths(explicitFile: String?): List<String> {
@@ -1402,40 +1436,37 @@ class AtlasMcpServer(
         ).distinct()
     }
 
-    private fun isBothResolved(ratchet: Int?, high: Int?): Boolean {
-        return ratchet != null || high != null
+    private fun isAllResolved(ratchets: ComplexityRatchets): Boolean {
+        return ratchets.ratchet != null || ratchets.highRatchet != null || ratchets.paramHighRatchet != null
     }
 
     private fun tryReadBaseline(
         cPath: String,
         project: String,
-        ratchet: Int?,
-        high: Int?
-    ): Pair<Int?, Int?> {
-        val resolvedPath = resolveExistingPath(cPath) ?: return Pair(ratchet, high)
-        val parsed = parseBaselineJson(resolvedPath, project) ?: return Pair(ratchet, high)
-        val finalRatchet = ratchet ?: parsed.first
-        val finalHigh = high ?: parsed.second
-        return Pair(finalRatchet, finalHigh)
+        current: ComplexityRatchets
+    ): ComplexityRatchets {
+        val resolvedPath = resolveExistingPath(cPath) ?: return current
+        val parsed = parseBaselineJson(resolvedPath, project) ?: return current
+        return ComplexityRatchets(
+            ratchet = current.ratchet ?: parsed.ratchet,
+            highRatchet = current.highRatchet ?: parsed.highRatchet,
+            paramHighRatchet = current.paramHighRatchet ?: parsed.paramHighRatchet
+        )
     }
 
     private fun findBaselineInPaths(
         project: String,
         explicitFile: String?,
-        initialRatchet: Int?,
-        initialHigh: Int?
-    ): Pair<Int?, Int?> {
-        var ratchet = initialRatchet
-        var high = initialHigh
+        initial: ComplexityRatchets
+    ): ComplexityRatchets {
+        var current = initial
         val candidatePaths = candidateBaselinePaths(explicitFile)
 
         for (cPath in candidatePaths) {
-            val (newRatchet, newHigh) = tryReadBaseline(cPath, project, ratchet, high)
-            ratchet = newRatchet
-            high = newHigh
-            if (isBothResolved(ratchet, high)) break
+            current = tryReadBaseline(cPath, project, current)
+            if (isAllResolved(current)) break
         }
-        return Pair(ratchet, high)
+        return current
     }
 
     private fun resolveExistingPath(cPath: String): String? {
@@ -1454,7 +1485,7 @@ class AtlasMcpServer(
         return null
     }
 
-    private fun parseBaselineJson(resolvedPath: String, project: String): Pair<Int?, Int?>? {
+    private fun parseBaselineJson(resolvedPath: String, project: String): ComplexityRatchets? {
         return try {
             val text = PlatformFiles.readText(resolvedPath)
             val parsed = json.parseToJsonElement(text).jsonObject
@@ -1462,7 +1493,8 @@ class AtlasMcpServer(
             if (fileProject != null && fileProject != project) return null
             val r = extractIntFromObject(parsed, "ratchet", "total_violations", "max_violations")
             val h = extractIntFromObject(parsed, "high_ratchet", "high_severity_count", "max_high_violations")
-            Pair(r, h)
+            val ph = extractIntFromObject(parsed, "param_high_ratchet")
+            ComplexityRatchets(r, h, ph)
         } catch (e: Exception) {
             PlatformFiles.logWarning("AtlasMcpServer", "Failed to parse complexity baseline from $resolvedPath: ${e.message}")
             null
@@ -1474,16 +1506,22 @@ class AtlasMcpServer(
         threshold: Int,
         maxCyclomatic: Int,
         violations: List<ComplexityViolation>,
-        resolvedRatchet: Int?,
-        resolvedHighRatchet: Int?
+        ratchets: ComplexityRatchets,
+        limit: Int = 50
     ): JsonObject {
         val blockingViolations = violations.filter { it.ruleId == "COMPLEXITY-001" }
         val advisoryViolations = violations.filter { it.ruleId != "COMPLEXITY-001" }
         val highCount = blockingViolations.count { it.severity == "HIGH" }
         val warningCount = blockingViolations.count { it.severity == "WARNING" }
+        val paramHighCount = advisoryViolations.count { it.severity == "HIGH" }
+        val resolvedRatchet = ratchets.ratchet
+        val resolvedHighRatchet = ratchets.highRatchet
+        val resolvedParamHighRatchet = ratchets.paramHighRatchet
         val totalPassed = if (resolvedRatchet != null) blockingViolations.size <= resolvedRatchet else blockingViolations.isEmpty()
         val highPassed = if (resolvedHighRatchet != null) highCount <= resolvedHighRatchet else true
-        val passed = totalPassed && highPassed
+        val paramHighPassed = if (resolvedParamHighRatchet != null) paramHighCount <= resolvedParamHighRatchet else true
+        val passed = totalPassed && highPassed && paramHighPassed
+        val cappedViolations = prioritizeAndCapViolations(violations, limit)
 
         return buildJsonObject {
             put("project", project)
@@ -1494,6 +1532,8 @@ class AtlasMcpServer(
             put("high_severity_count", highCount)
             put("warning_count", warningCount)
             put("advisory_count", advisoryViolations.size)
+            put("param_high_count", paramHighCount)
+            put("returned_violations", cappedViolations.size)
             if (resolvedRatchet != null) {
                 put("ratchet", resolvedRatchet)
                 put("baseline_delta", blockingViolations.size - resolvedRatchet)
@@ -1502,7 +1542,11 @@ class AtlasMcpServer(
                 put("high_ratchet", resolvedHighRatchet)
                 put("high_delta", highCount - resolvedHighRatchet)
             }
-            put("violations", json.encodeToJsonElement(violations))
+            if (resolvedParamHighRatchet != null) {
+                put("param_high_ratchet", resolvedParamHighRatchet)
+                put("param_high_delta", paramHighCount - resolvedParamHighRatchet)
+            }
+            put("violations", json.encodeToJsonElement(cappedViolations))
         }
     }
 

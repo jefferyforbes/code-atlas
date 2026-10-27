@@ -2144,48 +2144,52 @@ class PolyglotAstExtractor {
             val imports: List<Pair<String, Int>>
         )
 
+        private data class KotlinDeclSpec(
+            val name: String,
+            val kw: String,
+            val modTokens: Set<String>,
+            val annotations: String,
+            val enclosingPrefix: String,
+            val startLine: Int,
+            val endLine: Int,
+            val matchStartLine: Int,
+            val isTopLevel: Boolean
+        )
+
         private fun buildKotlinNode(
             ctx: FileExtractionContext,
             pkgName: String,
-            name: String,
-            kw: String,
-            modTokens: Set<String>,
-            annotations: String,
-            enclosingPrefix: String,
-            startLine: Int,
-            endLine: Int,
-            matchStartLine: Int,
-            isTopLevel: Boolean
+            decl: KotlinDeclSpec
         ): GraphNode {
-            val (nodeId, qualifiedName) = if (enclosingPrefix.isNotEmpty()) {
-                Pair("${ctx.fileId}#$enclosingPrefix.$name", "$pkgName.$enclosingPrefix.$name")
+            val (nodeId, qualifiedName) = if (decl.enclosingPrefix.isNotEmpty()) {
+                Pair("${ctx.fileId}#${decl.enclosingPrefix}.${decl.name}", "$pkgName.${decl.enclosingPrefix}.${decl.name}")
             } else {
-                Pair("${ctx.fileId}#$name", "$pkgName.$name")
+                Pair("${ctx.fileId}#${decl.name}", "$pkgName.${decl.name}")
             }
 
-            val annTokens = Regex("""@([A-Za-z0-9_]+)""").findAll(annotations).map { it.groupValues[1] }.toList()
-            val sigLine = if (startLine <= ctx.lines.size) stripLeadingInlineAnnotations(ctx.lines[startLine - 1]) else name
-            val kind = extractKotlinKind(kw, modTokens, annTokens)
-            val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, name, annTokens)
-            val description = extractKotlinDoc(isTopLevel, kw, annTokens, ctx.lines, matchStartLine)
+            val annTokens = Regex("""@([A-Za-z0-9_]+)""").findAll(decl.annotations).map { it.groupValues[1] }.toList()
+            val sigLine = if (decl.startLine <= ctx.lines.size) stripLeadingInlineAnnotations(ctx.lines[decl.startLine - 1]) else decl.name
+            val kind = extractKotlinKind(decl.kw, decl.modTokens, annTokens)
+            val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, decl.name, annTokens)
+            val description = extractKotlinDoc(decl.isTopLevel, decl.kw, annTokens, ctx.lines, decl.matchStartLine)
 
             val (cVec, cScore) = computeComplexityMetrics(
                 kind = kind,
-                startLine = startLine,
-                endLine = endLine,
+                startLine = decl.startLine,
+                endLine = decl.endLine,
                 maskedLines = ctx.maskedLines,
                 lines = ctx.lines,
                 language = "kotlin",
                 isComposable = "Composable" in annTokens,
-                functionName = name
+                functionName = decl.name
             )
 
             return GraphNode(
-                nodeId = nodeId, projectId = ctx.projectId, fileId = ctx.fileId, name = name,
+                nodeId = nodeId, projectId = ctx.projectId, fileId = ctx.fileId, name = decl.name,
                 qualifiedName = qualifiedName, kind = kind, signature = sigLine,
-                startLine = startLine, endLine = endLine, moduleId = ctx.moduleId,
+                startLine = decl.startLine, endLine = decl.endLine, moduleId = ctx.moduleId,
                 sourceSet = ctx.sourceSet, semioticLayer = sem, archLayer = arch, isTestDouble = isTd,
-                description = description, isTopLevel = isTopLevel,
+                description = description, isTopLevel = decl.isTopLevel,
                 cyclomaticComplexity = cVec.cyclomatic, cognitiveComplexity = cVec.cognitive,
                 maxNestingDepth = cVec.maxNesting, complexityScore = cScore
             )
@@ -2230,9 +2234,19 @@ class PolyglotAstExtractor {
             val isPublicTop = isPublicTopLevel(isTopLevel, modTokens, kw)
             val enclosingPrefix = scopeStack.joinToString(".") { it.name }
             val node = buildKotlinNode(
-                ctx, pkgName, name, kw, modTokens,
-                annotations, enclosingPrefix, startLine, endLine, matchStartLine,
-                isTopLevel
+                ctx = ctx,
+                pkgName = pkgName,
+                decl = KotlinDeclSpec(
+                    name = name,
+                    kw = kw,
+                    modTokens = modTokens,
+                    annotations = annotations,
+                    enclosingPrefix = enclosingPrefix,
+                    startLine = startLine,
+                    endLine = endLine,
+                    matchStartLine = matchStartLine,
+                    isTopLevel = isTopLevel
+                )
             )
             addKotlinEdges(node.nodeId, isTopLevel, kw, startLine, endLine, ctx.lines, ctx.imports, ctx.projectId, edges)
             pushScopeEntryIfContainer(kw, name, startLine, endLine, scopeStack)
@@ -3044,21 +3058,18 @@ class PolyglotAstExtractor {
 
         private fun createCppTypeNode(
             ctx: FileExtractionContext,
-            nodeId: String,
-            qualifiedName: String,
-            name: String,
-            kind: String,
-            sigLine: String,
-            startLine: Int,
-            endLine: Int,
-            description: String?,
-            isTopLevel: Boolean
+            ids: Pair<String, String>,
+            decl: Triple<String, String, String>,
+            linesAndDoc: Triple<IntRange, String?, Boolean>
         ): GraphNode {
+            val (nodeId, qualifiedName) = ids
+            val (name, kind, sigLine) = decl
+            val (lineRange, description, isTopLevel) = linesAndDoc
             val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, name)
             return GraphNode(
                 nodeId = nodeId, projectId = ctx.projectId, fileId = ctx.fileId, name = name,
                 qualifiedName = qualifiedName, kind = kind,
-                signature = sigLine, startLine = startLine, endLine = endLine,
+                signature = sigLine, startLine = lineRange.first, endLine = lineRange.last,
                 moduleId = ctx.moduleId, sourceSet = ctx.sourceSet, semioticLayer = sem,
                 archLayer = arch, isTestDouble = isTd,
                 description = description, isTopLevel = isTopLevel
@@ -3090,9 +3101,10 @@ class PolyglotAstExtractor {
             val description = resolveCppTypeDoc(isTopLevel, kind, ctx.lines, startLine)
             nodes.add(
                 createCppTypeNode(
-                    ctx = ctx, nodeId = nodeId, qualifiedName = qualifiedName, name = name, kind = kind,
-                    sigLine = sigLine, startLine = startLine, endLine = endLine,
-                    description = description, isTopLevel = isTopLevel
+                    ctx = ctx,
+                    ids = nodeId to qualifiedName,
+                    decl = Triple(name, kind, sigLine),
+                    linesAndDoc = Triple(startLine..endLine, description, isTopLevel)
                 )
             )
 
