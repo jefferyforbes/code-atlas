@@ -389,33 +389,37 @@ class ComplexityDoctorEngine(
         return Pair(beforeSnippet, afterSnippet)
     }
 
+    private data class DoctorNodeContext(
+        val projectId: String,
+        val filePath: String,
+        val lang: String,
+        val sourceText: String,
+        val node: GraphNode,
+        val inDegree: Int
+    )
+
     private fun evaluateGuardInversionPrescription(
-        sourceText: String,
+        ctx: DoctorNodeContext,
         candidateText: String,
-        beforeSnippet: String,
-        afterSnippet: String,
-        node: GraphNode,
-        ifLineIdx: Int,
-        inDegree: Int,
-        filePath: String,
-        projectId: String,
-        lang: String
+        snippets: Pair<String, String>,
+        ifLineIdx: Int
     ): ComplexityDoctorReport.Prescription? {
-        val maskedCandidate = PolyglotAstExtractor.maskCommentsAndStrings(candidateText, lang)
+        val (beforeSnippet, afterSnippet) = snippets
+        val maskedCandidate = PolyglotAstExtractor.maskCommentsAndStrings(candidateText, ctx.lang)
         if (!hasBalancedDelimiters(maskedCandidate)) return null
 
         val modExtracted = try {
-            PolyglotAstExtractor.extractFile(projectId, filePath, candidateText)
+            PolyglotAstExtractor.extractFile(ctx.projectId, ctx.filePath, candidateText)
         } catch (_: Exception) {
             return null
         }
 
         val modNode = modExtracted.first
-            .filter { it.kind in setOf("function", "method", "composable") && it.name == node.name }
-            .minByOrNull { kotlin.math.abs(it.startLine - node.startLine) }
+            .filter { it.kind in setOf("function", "method", "composable") && it.name == ctx.node.name }
+            .minByOrNull { kotlin.math.abs(it.startLine - ctx.node.startLine) }
             ?: return null
 
-        val cogBefore = node.cognitiveComplexity
+        val cogBefore = ctx.node.cognitiveComplexity
         val cogAfter = modNode.cognitiveComplexity
         val diff = cogBefore - cogAfter
         if (diff < 1) return null
@@ -423,7 +427,7 @@ class ComplexityDoctorEngine(
         val reductionPct = if (cogBefore > 0) (diff.toDouble() / cogBefore.toDouble()) * 100.0 else 0.0
         val roundedPct = (reductionPct * 10.0).roundToInt() / 10.0
 
-        val inDeg = inDegree.coerceAtLeast(node.inDegree).toDouble()
+        val inDeg = ctx.inDegree.coerceAtLeast(ctx.node.inDegree).toDouble()
         val riskIndex = cogBefore.toDouble() * (1.0 + ln(1.0 + inDeg))
         val priorityScore = (riskIndex * (roundedPct / 100.0) * 10.0).roundToInt() / 10.0
 
@@ -433,8 +437,8 @@ class ComplexityDoctorEngine(
             ruleId = "COMPLEXITY-GUARD-INVERT",
             fixStrategy = "GUARD_INVERSION",
             writeSiteSafe = true,
-            targetNodeId = node.nodeId,
-            filePath = filePath,
+            targetNodeId = ctx.node.nodeId,
+            filePath = ctx.filePath,
             line = ifLineIdx + 1,
             cognitiveBefore = cogBefore,
             cognitiveAfter = cogAfter,
@@ -465,15 +469,13 @@ class ComplexityDoctorEngine(
         if (closeIfIdx <= ifInfo.lineIdx) return null
 
         val elseRes = resolveElseOrTrailingReturn(lines, closeIfIdx, endIdx, lang) ?: return null
-        val (beforeSnippet, afterSnippet) = buildInvertedCandidateText(
+        val snippets = buildInvertedCandidateText(
             sourceText, lines, ifInfo, closeIfIdx, elseRes.spanEndIdx, elseRes.defaultReturn
         ) ?: return null
 
-        val candidateText = sourceText.replace(beforeSnippet, afterSnippet)
-        return evaluateGuardInversionPrescription(
-            sourceText, candidateText, beforeSnippet, afterSnippet, node,
-            ifInfo.lineIdx, inDegree, filePath, projectId, lang
-        )
+        val candidateText = sourceText.replace(snippets.first, snippets.second)
+        val ctx = DoctorNodeContext(projectId, filePath, lang, sourceText, node, inDegree)
+        return evaluateGuardInversionPrescription(ctx, candidateText, snippets, ifInfo.lineIdx)
     }
 
     private data class ElvisNullCheck(
@@ -515,33 +517,28 @@ class ComplexityDoctorEngine(
     }
 
     private fun evaluateElvisPrescription(
-        filePath: String,
-        sourceText: String,
-        node: GraphNode,
-        inDegree: Int,
-        lang: String,
-        projectId: String,
+        ctx: DoctorNodeContext,
         lineIdx: Int,
-        beforeSnippet: String,
-        afterSnippet: String
+        snippets: Pair<String, String>
     ): ComplexityDoctorReport.Prescription? {
-        if (countOccurrences(sourceText, beforeSnippet) != 1) return null
+        val (beforeSnippet, afterSnippet) = snippets
+        if (countOccurrences(ctx.sourceText, beforeSnippet) != 1) return null
 
-        val candidateText = sourceText.replace(beforeSnippet, afterSnippet)
-        val maskedCandidate = PolyglotAstExtractor.maskCommentsAndStrings(candidateText, lang)
+        val candidateText = ctx.sourceText.replace(beforeSnippet, afterSnippet)
+        val maskedCandidate = PolyglotAstExtractor.maskCommentsAndStrings(candidateText, ctx.lang)
         if (!hasBalancedDelimiters(maskedCandidate)) return null
 
         val modExtracted = try {
-            PolyglotAstExtractor.extractFile(projectId, filePath, candidateText)
+            PolyglotAstExtractor.extractFile(ctx.projectId, ctx.filePath, candidateText)
         } catch (_: Exception) {
             return null
         }
 
         val modNode = modExtracted.first
-            .filter { it.kind in setOf("function", "method", "composable") && it.name == node.name }
-            .minByOrNull { kotlin.math.abs(it.startLine - node.startLine) }
+            .filter { it.kind in setOf("function", "method", "composable") && it.name == ctx.node.name }
+            .minByOrNull { kotlin.math.abs(it.startLine - ctx.node.startLine) }
             ?: return null
-        val cogBefore = node.cognitiveComplexity
+        val cogBefore = ctx.node.cognitiveComplexity
         val cogAfter = modNode.cognitiveComplexity
         val diff = cogBefore - cogAfter
         val reductionPct = if (cogBefore > 0) (diff.toDouble() / cogBefore.toDouble()) * 100.0 else 0.0
@@ -549,7 +546,7 @@ class ComplexityDoctorEngine(
 
         if (diff < 1) return null
 
-        val inDeg = inDegree.coerceAtLeast(node.inDegree).toDouble()
+        val inDeg = ctx.inDegree.coerceAtLeast(ctx.node.inDegree).toDouble()
         val riskIndex = cogBefore.toDouble() * (1.0 + ln(1.0 + inDeg))
         val priorityScore = (riskIndex * (roundedPct / 100.0) * 10.0).roundToInt() / 10.0
 
@@ -559,8 +556,8 @@ class ComplexityDoctorEngine(
             ruleId = "COMPLEXITY-ELVIS-GUARD",
             fixStrategy = "ELVIS_GUARD",
             writeSiteSafe = true,
-            targetNodeId = node.nodeId,
-            filePath = filePath,
+            targetNodeId = ctx.node.nodeId,
+            filePath = ctx.filePath,
             line = lineIdx + 1,
             cognitiveBefore = cogBefore,
             cognitiveAfter = cogAfter,
@@ -573,16 +570,12 @@ class ComplexityDoctorEngine(
 
     private fun trySynthesizeElvisGuardAtLine(
         lines: List<String>,
-        declLineIdx: Int,
-        endIdx: Int,
+        bounds: IntRange,
         declRegex: Regex,
-        filePath: String,
-        sourceText: String,
-        node: GraphNode,
-        inDegree: Int,
-        lang: String,
-        projectId: String
+        ctx: DoctorNodeContext
     ): ComplexityDoctorReport.Prescription? {
+        val declLineIdx = bounds.first
+        val endIdx = bounds.last
         val dMatch = declRegex.find(lines[declLineIdx]) ?: return null
         val indent = dMatch.groupValues[1]
         val varName = dMatch.groupValues[2]
@@ -597,10 +590,7 @@ class ComplexityDoctorEngine(
         val beforeSnippet = lines.subList(declLineIdx, nullCheck.spanEnd + 1).joinToString("\n")
         val afterSnippet = "${indent}val $varName = $initExpr$elvisRet"
 
-        return evaluateElvisPrescription(
-            filePath, sourceText, node, inDegree, lang, projectId,
-            declLineIdx, beforeSnippet, afterSnippet
-        )
+        return evaluateElvisPrescription(ctx, declLineIdx, beforeSnippet to afterSnippet)
     }
 
     private fun synthesizeElvisGuard(
@@ -617,12 +607,10 @@ class ComplexityDoctorEngine(
         if (startIdx >= endIdx || startIdx >= lines.size) return null
 
         val declRegex = Regex("""^(\s*)(?:val|var)\s+([A-Za-z0-9_]+)\s*=\s*(.+)$""")
+        val ctx = DoctorNodeContext(projectId, filePath, lang, sourceText, node, inDegree)
 
         for (i in startIdx until endIdx) {
-            val prescription = trySynthesizeElvisGuardAtLine(
-                lines, i, endIdx, declRegex,
-                filePath, sourceText, node, inDegree, lang, projectId
-            )
+            val prescription = trySynthesizeElvisGuardAtLine(lines, i..endIdx, declRegex, ctx)
             if (prescription != null) return prescription
         }
 

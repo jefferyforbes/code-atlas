@@ -356,6 +356,10 @@ class AtlasCli {
         }
 
         private fun extractAuditArraySize(data: JsonObject, key1: String, key2: String): Int {
+            if (key1 == "complexity_violations") {
+                val total = data["total_complexity_violations"]?.jsonPrimitive?.intOrNull
+                if (total != null) return total
+            }
             val arr = data[key1]?.jsonArray ?: data[key2]?.jsonArray
             return arr?.size ?: 0
         }

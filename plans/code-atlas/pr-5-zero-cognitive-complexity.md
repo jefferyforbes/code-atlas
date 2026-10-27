@@ -6,7 +6,7 @@ contract:
   task: pr-5-zero-cognitive-complexity
   objective: Decompose the remaining 8 COMPLEXITY-001 cognitive/cyclomatic complexity warning functions and ratchet complexity-baseline.json to 0.
 
-status: executing # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: merged # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
 
 size:
   complexity: medium

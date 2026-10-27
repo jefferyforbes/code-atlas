@@ -503,27 +503,22 @@ class SqliteGraphStore(val dbPath: String) {
 
     private fun bindRawSymbolEdgeRow(
         stmt: NativeSqliteStatement,
-        projectId: String,
-        normalizedFileId: String,
-        sourceNodeId: String,
-        targetSym: String,
-        edgeType: String,
-        confidence: Double,
-        provenance: String,
-        lineNumber: Int,
-        edgeId: String
+        fileContext: Pair<String, String>,
+        edge: GraphEdge,
+        targetSym: String
     ) {
+        val (projectId, normalizedFileId) = fileContext
         stmt.reset()
         stmt.clearBindings()
         stmt.bindString(1, projectId)
         stmt.bindString(2, normalizedFileId)
-        stmt.bindString(3, sourceNodeId)
+        stmt.bindString(3, edge.sourceNodeId)
         stmt.bindString(4, targetSym)
-        stmt.bindString(5, edgeType)
-        stmt.bindDouble(6, confidence)
-        stmt.bindString(7, provenance)
-        stmt.bindInt(8, lineNumber)
-        stmt.bindString(9, edgeId)
+        stmt.bindString(5, edge.edgeType)
+        stmt.bindDouble(6, edge.confidence)
+        stmt.bindString(7, edge.provenance)
+        stmt.bindInt(8, edge.lineNumber)
+        stmt.bindString(9, edge.edgeId)
         stmt.step()
     }
 
@@ -532,18 +527,17 @@ class SqliteGraphStore(val dbPath: String) {
         projectId: String,
         normalizedFileId: String
     ) {
-        bindRawSymbolEdgeRow(
-            stmt = stmt,
+        val markerEdge = GraphEdge(
+            edgeId = "",
             projectId = projectId,
-            normalizedFileId = normalizedFileId,
             sourceNodeId = "",
-            targetSym = "",
+            targetNodeId = "",
             edgeType = "INDEXED_MARKER",
-            confidence = 1.0,
             provenance = "EXTRACTED_AST",
-            lineNumber = 0,
-            edgeId = ""
+            confidence = 1.0,
+            lineNumber = 0
         )
+        bindRawSymbolEdgeRow(stmt, projectId to normalizedFileId, markerEdge, "")
     }
 
     private fun replaceFileRawSymbolEdgesInBatch(
@@ -561,21 +555,11 @@ class SqliteGraphStore(val dbPath: String) {
         delStmt.step()
 
         var insertedCount = 0
+        val fileCtx = projectId to normalizedFileId
         for (edge in edges) {
             if (edge.edgeType == "CONTAINS") continue
             val targetSym = resolveTargetSymbol(projectId, edge.targetNodeId) ?: continue
-            bindRawSymbolEdgeRow(
-                stmt = insStmt,
-                projectId = projectId,
-                normalizedFileId = normalizedFileId,
-                sourceNodeId = edge.sourceNodeId,
-                targetSym = targetSym,
-                edgeType = edge.edgeType,
-                confidence = edge.confidence,
-                provenance = edge.provenance,
-                lineNumber = edge.lineNumber,
-                edgeId = edge.edgeId
-            )
+            bindRawSymbolEdgeRow(insStmt, fileCtx, edge, targetSym)
             insertedCount++
         }
         if (insertedCount == 0) {
@@ -746,6 +730,20 @@ class SqliteGraphStore(val dbPath: String) {
         return fileId
     }
 
+    data class FileRecordUpsert(
+        val projectId: String,
+        val relPath: String,
+        val language: String,
+        val moduleId: String,
+        val sourceSet: String,
+        val semioticLayer: String,
+        val archLayer: String,
+        val sha256: String,
+        val mtime: Double,
+        val loc: Int,
+        val topLevelDeclCount: Int
+    )
+
     fun upsertFileRecord(
         projectId: String,
         relPath: String,
@@ -758,8 +756,24 @@ class SqliteGraphStore(val dbPath: String) {
         mtime: Double,
         loc: Int,
         topLevelDeclCount: Int
-    ): String {
-        val fileId = "$projectId:$relPath"
+    ): String = upsertFileRecord(
+        FileRecordUpsert(
+            projectId = projectId,
+            relPath = relPath,
+            language = language,
+            moduleId = moduleId,
+            sourceSet = sourceSet,
+            semioticLayer = semioticLayer,
+            archLayer = archLayer,
+            sha256 = sha256,
+            mtime = mtime,
+            loc = loc,
+            topLevelDeclCount = topLevelDeclCount
+        )
+    )
+
+    fun upsertFileRecord(record: FileRecordUpsert): String {
+        val fileId = "${record.projectId}:${record.relPath}"
         withSavepoint("sp_index_file") {
             val scope = StatementScope(db)
             try {
@@ -792,7 +806,7 @@ class SqliteGraphStore(val dbPath: String) {
 
                         delEdges.reset()
                         delEdges.clearBindings()
-                        delEdges.bindString(1, projectId)
+                        delEdges.bindString(1, record.projectId)
                         delEdges.bindString(2, nodeId)
                         delEdges.bindString(3, nodeId)
                         delEdges.step()
@@ -802,7 +816,7 @@ class SqliteGraphStore(val dbPath: String) {
                 }
 
                 val delRawEdges = scope.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
-                delRawEdges.bindString(1, projectId)
+                delRawEdges.bindString(1, record.projectId)
                 delRawEdges.bindString(2, fileId)
                 delRawEdges.step()
 
@@ -825,17 +839,17 @@ class SqliteGraphStore(val dbPath: String) {
                     """.trimIndent()
                 )
                 upsertStmt.bindString(1, fileId)
-                upsertStmt.bindString(2, projectId)
-                upsertStmt.bindString(3, relPath)
-                upsertStmt.bindString(4, language)
-                upsertStmt.bindString(5, moduleId)
-                upsertStmt.bindString(6, sourceSet)
-                upsertStmt.bindString(7, semioticLayer)
-                upsertStmt.bindString(8, archLayer)
-                upsertStmt.bindString(9, sha256)
-                upsertStmt.bindDouble(10, mtime)
-                upsertStmt.bindInt(11, loc)
-                upsertStmt.bindInt(12, topLevelDeclCount)
+                upsertStmt.bindString(2, record.projectId)
+                upsertStmt.bindString(3, record.relPath)
+                upsertStmt.bindString(4, record.language)
+                upsertStmt.bindString(5, record.moduleId)
+                upsertStmt.bindString(6, record.sourceSet)
+                upsertStmt.bindString(7, record.semioticLayer)
+                upsertStmt.bindString(8, record.archLayer)
+                upsertStmt.bindString(9, record.sha256)
+                upsertStmt.bindDouble(10, record.mtime)
+                upsertStmt.bindInt(11, record.loc)
+                upsertStmt.bindInt(12, record.topLevelDeclCount)
                 upsertStmt.step()
             } finally {
                 scope.closeAll()
