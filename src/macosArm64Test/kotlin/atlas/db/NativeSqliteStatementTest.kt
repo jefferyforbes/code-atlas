@@ -168,17 +168,19 @@ class NativeSqliteStatementTest {
         val store = SqliteGraphStore(dbPath)
         try {
             store.upsertFileRecord(
-                projectId = "p1",
-                relPath = "src/Main.kt",
-                language = "kotlin",
-                moduleId = "main",
-                sourceSet = "main",
-                semioticLayer = "semantic",
-                archLayer = "domain",
-                sha256 = "hash1",
-                mtime = 1.0,
-                loc = 50,
-                topLevelDeclCount = 1
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = "p1",
+                    relPath = "src/Main.kt",
+                    language = "kotlin",
+                    moduleId = "main",
+                    sourceSet = "main",
+                    semioticLayer = "semantic",
+                    archLayer = "domain",
+                    sha256 = "hash1",
+                    mtime = 1.0,
+                    loc = 50,
+                    topLevelDeclCount = 1
+                )
             )
             // Ensure virtual file record
             store.ensureVirtualFileRecord("p1", "__endpoints__")

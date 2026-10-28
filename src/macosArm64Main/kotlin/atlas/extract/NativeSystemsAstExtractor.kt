@@ -142,13 +142,9 @@ internal object NativeSystemsAstExtractor {
         } else null
         val kind = if (decl.kwOrKind == "func") "function" else decl.kwOrKind
         val (cVec, cScore) = PolyglotAstExtractor.computeComplexityMetrics(
-            kind = kind,
-            startLine = decl.startLine,
-            endLine = decl.endLine,
-            maskedLines = ctx.maskedLines,
-            lines = ctx.lines,
-            language = "swift",
-            functionName = decl.name
+            ctx = ctx,
+            span = PolyglotAstExtractor.Companion.DeclMetricSpan(kind, decl.startLine, decl.endLine, decl.name),
+            language = "swift"
         )
         return GraphNode(
             nodeId = decl.nodeId,
@@ -328,13 +324,9 @@ internal object NativeSystemsAstExtractor {
             PolyglotAstExtractor.extractDocDescription(ctx.lines, decl.startLine, "rust")
         } else null
         val (cVec, cScore) = PolyglotAstExtractor.computeComplexityMetrics(
-            kind = decl.kwOrKind,
-            startLine = decl.startLine,
-            endLine = decl.endLine,
-            maskedLines = ctx.maskedLines,
-            lines = ctx.lines,
-            language = "rust",
-            functionName = decl.name
+            ctx = ctx,
+            span = PolyglotAstExtractor.Companion.DeclMetricSpan(decl.kwOrKind, decl.startLine, decl.endLine, decl.name),
+            language = "rust"
         )
         return GraphNode(
             nodeId = decl.nodeId,
@@ -664,13 +656,9 @@ internal object NativeSystemsAstExtractor {
     ): GraphNode {
         val (sem, arch, isTd) = SemioticLayerClassifier.classify(ctx.relPath, decl.name)
         val (cVec, cScore) = PolyglotAstExtractor.computeComplexityMetrics(
-            kind = "function",
-            startLine = decl.startLine,
-            endLine = decl.endLine,
-            maskedLines = ctx.maskedLines,
-            lines = ctx.lines,
-            language = "cpp",
-            functionName = decl.name
+            ctx = ctx,
+            span = PolyglotAstExtractor.Companion.DeclMetricSpan("function", decl.startLine, decl.endLine, decl.name),
+            language = "cpp"
         )
         return GraphNode(
             nodeId = decl.nodeId,

@@ -153,13 +153,9 @@ internal object TypeScriptAstExtractor {
             PolyglotAstExtractor.extractDocDescription(ctx.lines, decl.startLine, "typescript")
         } else null
         val (cVec, cScore) = PolyglotAstExtractor.computeComplexityMetrics(
-            kind = decl.kind,
-            startLine = decl.startLine,
-            endLine = decl.endLine,
-            maskedLines = ctx.maskedLines,
-            lines = ctx.lines,
-            language = "typescript",
-            functionName = decl.name
+            ctx = ctx,
+            span = PolyglotAstExtractor.Companion.DeclMetricSpan(decl.kind, decl.startLine, decl.endLine, decl.name),
+            language = "typescript"
         )
         return GraphNode(
             nodeId = decl.nodeId,

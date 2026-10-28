@@ -117,17 +117,19 @@ class WorkspaceIndexer(
             val sourceText = rawBytes.decodeToString()
             scan.markdownQueue.add(Pair(relStr, sourceText))
             store.upsertFileRecord(
-                projectId = projectId,
-                relPath = relStr,
-                language = "markdown",
-                moduleId = if (relStr.startsWith("plans/")) "plans" else "vault",
-                sourceSet = "docs",
-                semioticLayer = if (relStr.startsWith("plans/")) "syntactic" else "semantic",
-                archLayer = "infrastructure",
-                sha256 = sha256,
-                mtime = mtime,
-                loc = sourceText.lines().size,
-                topLevelDeclCount = 1
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = projectId,
+                    relPath = relStr,
+                    language = "markdown",
+                    moduleId = if (relStr.startsWith("plans/")) "plans" else "vault",
+                    sourceSet = "docs",
+                    semioticLayer = if (relStr.startsWith("plans/")) "syntactic" else "semantic",
+                    archLayer = "infrastructure",
+                    sha256 = sha256,
+                    mtime = mtime,
+                    loc = sourceText.lines().size,
+                    topLevelDeclCount = 1
+                )
             )
             scan.filesIndexed++
         } else {
@@ -161,17 +163,19 @@ class WorkspaceIndexer(
         val srcSet = SemioticLayerClassifier.detectSourceSet(relStr)
 
         store.upsertFileRecord(
-            projectId = ctx.projectId,
-            relPath = relStr,
-            language = lang,
-            moduleId = modId,
-            sourceSet = srcSet,
-            semioticLayer = semLayer,
-            archLayer = archLayer,
-            sha256 = sha256,
-            mtime = mtime,
-            loc = sourceText.lines().size,
-            topLevelDeclCount = topDeclCount
+            SqliteGraphStore.FileRecordUpsert(
+                projectId = ctx.projectId,
+                relPath = relStr,
+                language = lang,
+                moduleId = modId,
+                sourceSet = srcSet,
+                semioticLayer = semLayer,
+                archLayer = archLayer,
+                sha256 = sha256,
+                mtime = mtime,
+                loc = sourceText.lines().size,
+                topLevelDeclCount = topDeclCount
+            )
         )
         if (lang == "kotlin") {
             scan.pendingKotlinComposeFiles.add(Triple(relStr, sourceText, fEdges))

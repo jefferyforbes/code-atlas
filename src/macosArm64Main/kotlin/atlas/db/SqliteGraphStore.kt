@@ -753,34 +753,6 @@ class SqliteGraphStore(val dbPath: String) {
         val topLevelDeclCount: Int
     )
 
-    fun upsertFileRecord(
-        projectId: String,
-        relPath: String,
-        language: String,
-        moduleId: String,
-        sourceSet: String,
-        semioticLayer: String,
-        archLayer: String,
-        sha256: String,
-        mtime: Double,
-        loc: Int,
-        topLevelDeclCount: Int
-    ): String = upsertFileRecord(
-        FileRecordUpsert(
-            projectId = projectId,
-            relPath = relPath,
-            language = language,
-            moduleId = moduleId,
-            sourceSet = sourceSet,
-            semioticLayer = semioticLayer,
-            archLayer = archLayer,
-            sha256 = sha256,
-            mtime = mtime,
-            loc = loc,
-            topLevelDeclCount = topLevelDeclCount
-        )
-    )
-
     fun upsertFileRecord(record: FileRecordUpsert): String {
         val fileId = "${record.projectId}:${record.relPath}"
         withSavepoint("sp_index_file") {

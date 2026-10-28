@@ -1280,15 +1280,17 @@ class AtlasMcpServer(
         val dryRun = args["dry_run"]?.jsonPrimitive?.booleanOrNull ?: true
         val testCmd = args["test_command"]?.jsonPrimitive?.contentOrNull
         val res = resolveServerForProject(project).remediationVerifier.verifyAndApply(
-            projectSlug = project,
-            relPath = filePath,
-            beforeSnippet = beforeSnippet,
-            afterSnippet = afterSnippet,
-            ruleId = ruleId,
-            targetNodeId = targetNodeId,
-            writeSiteSafe = writeSiteSafe,
-            dryRun = dryRun,
-            testCommand = testCmd
+            AutonomousRemediationVerifier.VerificationRequest(
+                projectSlug = project,
+                relPath = filePath,
+                beforeSnippet = beforeSnippet,
+                afterSnippet = afterSnippet,
+                ruleId = ruleId,
+                targetNodeId = targetNodeId,
+                writeSiteSafe = writeSiteSafe,
+                dryRun = dryRun,
+                testCommand = testCmd
+            )
         )
         return json.encodeToJsonElement(res).jsonObject
     }
@@ -1330,14 +1332,16 @@ class AtlasMcpServer(
         val limitArg = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
         val active = resolveServerForProject(project)
         val report = active.remediationEngine.planAndRemediate(
-            projectId = project,
-            targetPaths = targetList,
-            ruleFilter = ruleFilter,
-            dryRun = dryRun,
-            splitBoost003 = split,
-            makePrivateBoost003 = makePrivate,
-            testCommand = testCmd,
-            limit = limitArg
+            ArchitectureRemediationEngine.RemediationPlanRequest(
+                projectId = project,
+                targetPaths = targetList,
+                ruleFilter = ruleFilter,
+                dryRun = dryRun,
+                splitBoost003 = split,
+                makePrivateBoost003 = makePrivate,
+                testCommand = testCmd,
+                limit = limitArg
+            )
         )
         if (!dryRun) {
             active.indexer.indexWorkspace(project, force = true)

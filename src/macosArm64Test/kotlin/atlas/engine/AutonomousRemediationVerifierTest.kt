@@ -41,12 +41,14 @@ class AutonomousRemediationVerifierTest {
         try {
             val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir)
             val res = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "src/State.kt",
-                beforeSnippet = "var title: String",
-                afterSnippet = "val title: String",
-                ruleId = "COMPOSE-STAB-001",
-                writeSiteSafe = false
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "src/State.kt",
+                    beforeSnippet = "var title: String",
+                    afterSnippet = "val title: String",
+                    ruleId = "COMPOSE-STAB-001",
+                    writeSiteSafe = false
+                )
             )
 
             assertFalse(res.valid)
@@ -79,10 +81,12 @@ class AutonomousRemediationVerifierTest {
 
             // 1. Snippet not found
             val resNotFound = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "Widget.kt",
-                beforeSnippet = "val missing = 0",
-                afterSnippet = "val replaced = 0"
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "Widget.kt",
+                    beforeSnippet = "val missing = 0",
+                    afterSnippet = "val replaced = 0"
+                )
             )
             assertFalse(resNotFound.valid)
             assertEquals("PRE_FLIGHT", resNotFound.phase)
@@ -91,10 +95,12 @@ class AutonomousRemediationVerifierTest {
 
             // 2. Ambiguous snippet (multiple occurrences)
             val resAmbiguous = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "Widget.kt",
-                beforeSnippet = "val duplicate =",
-                afterSnippet = "val unique ="
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "Widget.kt",
+                    beforeSnippet = "val duplicate =",
+                    afterSnippet = "val unique ="
+                )
             )
             assertFalse(resAmbiguous.valid)
             assertEquals("PRE_FLIGHT", resAmbiguous.phase)
@@ -125,10 +131,12 @@ class AutonomousRemediationVerifierTest {
 
             // 1. Candidate introduces invalid syntax (broken AST)
             val resBrokenAst = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "OrderModel.kt",
-                beforeSnippet = "var count: Int = 0",
-                afterSnippet = "var count: Int = {{{ INVALID SYNTAX"
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "OrderModel.kt",
+                    beforeSnippet = "var count: Int = 0",
+                    afterSnippet = "var count: Int = {{{ INVALID SYNTAX"
+                )
             )
             assertFalse(resBrokenAst.valid)
             assertEquals("POST_VERIFICATION", resBrokenAst.phase)
@@ -136,10 +144,12 @@ class AutonomousRemediationVerifierTest {
 
             // 2. Candidate introduces second top-level class (BOOST-003 violation)
             val resBoost003 = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "OrderModel.kt",
-                beforeSnippet = "class OrderModel {\n    var count: Int = 0\n}",
-                afterSnippet = "class OrderModel {\n    val count: Int = 0\n}\n\nclass IllegalSecondClass"
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "OrderModel.kt",
+                    beforeSnippet = "class OrderModel {\n    var count: Int = 0\n}",
+                    afterSnippet = "class OrderModel {\n    val count: Int = 0\n}\n\nclass IllegalSecondClass"
+                )
             )
             assertFalse(resBoost003.valid)
             assertEquals("POST_VERIFICATION", resBoost003.phase)
@@ -169,11 +179,13 @@ class AutonomousRemediationVerifierTest {
 
             val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir)
             val res = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "OrderModel.kt",
-                beforeSnippet = "val count: Int = 0",
-                afterSnippet = "val count: Int = 1",
-                testVerifier = { _, _ -> false } // Simulate test failure
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "OrderModel.kt",
+                    beforeSnippet = "val count: Int = 0",
+                    afterSnippet = "val count: Int = 1",
+                    testVerifier = { _, _ -> false } // Simulate test failure
+                )
             )
 
             assertFalse(res.valid)
@@ -206,12 +218,14 @@ class AutonomousRemediationVerifierTest {
 
             // 1. Dry run: Validates completely without writing to disk
             val dryRes = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "CounterWidget.kt",
-                beforeSnippet = "val state = 1",
-                afterSnippet = "val state = 2",
-                dryRun = true,
-                testVerifier = { _, _ -> true }
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "CounterWidget.kt",
+                    beforeSnippet = "val state = 1",
+                    afterSnippet = "val state = 2",
+                    dryRun = true,
+                    testVerifier = { _, _ -> true }
+                )
             )
             assertTrue(dryRes.valid)
             assertEquals("COMPLETED", dryRes.phase)
@@ -224,12 +238,14 @@ class AutonomousRemediationVerifierTest {
 
             // 2. Verified Apply: Writes safely to disk
             val applyRes = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "CounterWidget.kt",
-                beforeSnippet = "val state = 1",
-                afterSnippet = "val state = 2",
-                dryRun = false,
-                testVerifier = { _, _ -> true }
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "CounterWidget.kt",
+                    beforeSnippet = "val state = 1",
+                    afterSnippet = "val state = 2",
+                    dryRun = false,
+                    testVerifier = { _, _ -> true }
+                )
             )
             assertTrue(applyRes.valid)
             assertEquals("COMPLETED", applyRes.phase)
@@ -318,10 +334,12 @@ class AutonomousRemediationVerifierTest {
 
             // Interleaved mismatched delimiters: ({)} or ( [ ) ]
             val resInterleaved = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "SyntaxTest.kt",
-                beforeSnippet = "fun calculate(): Int = 42",
-                afterSnippet = "fun calculate(): Int { val x = listOf( { ) } ; return 42 }"
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "SyntaxTest.kt",
+                    beforeSnippet = "fun calculate(): Int = 42",
+                    afterSnippet = "fun calculate(): Int { val x = listOf( { ) } ; return 42 }"
+                )
             )
             assertFalse(resInterleaved.valid, "Interleaved mismatched delimiters must be rejected")
             assertEquals("POST_VERIFICATION", resInterleaved.phase)
@@ -349,11 +367,13 @@ class AutonomousRemediationVerifierTest {
             val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir)
 
             val res = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "Constants.kt",
-                beforeSnippet = "val APP_TIMEOUT_MS = 5000L",
-                afterSnippet = "val APP_TIMEOUT_MS = 10000L",
-                dryRun = false
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "Constants.kt",
+                    beforeSnippet = "val APP_TIMEOUT_MS = 5000L",
+                    afterSnippet = "val APP_TIMEOUT_MS = 10000L",
+                    dryRun = false
+                )
             )
             assertTrue(res.valid, "File with only top-level properties must pass AST validation")
             assertEquals("COMPLETED", res.phase)
@@ -394,13 +414,15 @@ class AutonomousRemediationVerifierTest {
 
             // Fix SearchBar by moving modifier to first optional parameter position
             val res = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "ScreenComponents.kt",
-                beforeSnippet = "fun SearchBar(query: String, modifier: Modifier = Modifier)",
-                afterSnippet = "fun SearchBar(modifier: Modifier = Modifier, query: String)",
-                ruleId = "COMPOSE-API-001",
-                targetNodeId = "proj:ScreenComponents.kt#SearchBar",
-                dryRun = true
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "ScreenComponents.kt",
+                    beforeSnippet = "fun SearchBar(query: String, modifier: Modifier = Modifier)",
+                    afterSnippet = "fun SearchBar(modifier: Modifier = Modifier, query: String)",
+                    ruleId = "COMPOSE-API-001",
+                    targetNodeId = "proj:ScreenComponents.kt#SearchBar",
+                    dryRun = true
+                )
             )
             assertTrue(res.valid, "Remediating target composable must succeed even if another composable still has the rule. Details: ${res.details}")
             assertEquals("COMPLETED", res.phase)
@@ -496,12 +518,14 @@ class AutonomousRemediationVerifierTest {
 
             // Attempt var -> val conversion with writeSiteSafe passed as true
             val res = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "UserModel.kt",
-                beforeSnippet = "var title: String",
-                afterSnippet = "val title: String",
-                ruleId = "COMPOSE-STAB-001",
-                writeSiteSafe = true // Caller thought it was safe, but store knows better!
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "UserModel.kt",
+                    beforeSnippet = "var title: String",
+                    afterSnippet = "val title: String",
+                    ruleId = "COMPOSE-STAB-001",
+                    writeSiteSafe = true // Caller thought it was safe, but store knows better!
+                )
             )
 
             assertFalse(res.valid, "Store-level write-site mutations must reject remediation in pre-flight")
@@ -532,12 +556,14 @@ class AutonomousRemediationVerifierTest {
 
             // 1. Failing test command: must fail verification and restore disk even with dryRun=false
             val resFail = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "Config.kt",
-                beforeSnippet = "val port = 8080",
-                afterSnippet = "val port = 9090",
-                dryRun = false,
-                testCommand = "exit 1" // Simulated test failure
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "Config.kt",
+                    beforeSnippet = "val port = 8080",
+                    afterSnippet = "val port = 9090",
+                    dryRun = false,
+                    testCommand = "exit 1" // Simulated test failure
+                )
             )
             assertFalse(resFail.valid)
             assertEquals("POST_VERIFICATION", resFail.phase)
@@ -546,12 +572,14 @@ class AutonomousRemediationVerifierTest {
 
             // 2. Passing test command with dryRun=true: validates and rolls back
             val resPassDry = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "Config.kt",
-                beforeSnippet = "val port = 8080",
-                afterSnippet = "val port = 9090",
-                dryRun = true,
-                testCommand = "exit 0" // Passing test command
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "Config.kt",
+                    beforeSnippet = "val port = 8080",
+                    afterSnippet = "val port = 9090",
+                    dryRun = true,
+                    testCommand = "exit 0" // Passing test command
+                )
             )
             assertTrue(resPassDry.valid)
             assertEquals("COMPLETED", resPassDry.phase)
@@ -560,12 +588,14 @@ class AutonomousRemediationVerifierTest {
 
             // 3. Passing test command with dryRun=false: commits to disk
             val resPassApply = verifier.verifyAndApply(
-                projectSlug = "proj",
-                relPath = "Config.kt",
-                beforeSnippet = "val port = 8080",
-                afterSnippet = "val port = 9090",
-                dryRun = false,
-                testCommand = "exit 0"
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "Config.kt",
+                    beforeSnippet = "val port = 8080",
+                    afterSnippet = "val port = 9090",
+                    dryRun = false,
+                    testCommand = "exit 0"
+                )
             )
             assertTrue(resPassApply.valid)
             assertEquals("COMPLETED", resPassApply.phase)

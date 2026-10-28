@@ -406,14 +406,15 @@ internal object KotlinAstExtractor {
         val description = extractKotlinDoc(decl.isTopLevel, decl.kw, annTokens, ctx.lines, decl.matchStartLine)
 
         val (cVec, cScore) = PolyglotAstExtractor.computeComplexityMetrics(
-            kind = kind,
-            startLine = decl.startLine,
-            endLine = decl.endLine,
-            maskedLines = ctx.maskedLines,
-            lines = ctx.lines,
-            language = "kotlin",
-            isComposable = "Composable" in annTokens,
-            functionName = decl.name
+            ctx = ctx,
+            span = PolyglotAstExtractor.Companion.DeclMetricSpan(
+                kind = kind,
+                startLine = decl.startLine,
+                endLine = decl.endLine,
+                name = decl.name,
+                isComposable = "Composable" in annTokens
+            ),
+            language = "kotlin"
         )
 
         return GraphNode(

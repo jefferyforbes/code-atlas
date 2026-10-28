@@ -451,13 +451,9 @@ internal object PythonAstExtractor {
         } else null
         val kind = if ("class" in decl.kw) "class" else "function"
         val (cVec, cScore) = PolyglotAstExtractor.computeComplexityMetrics(
-            kind = kind,
-            startLine = decl.startLine,
-            endLine = decl.endLine,
-            maskedLines = ctx.maskedLines,
-            lines = ctx.lines,
-            language = "python",
-            functionName = decl.name
+            ctx = ctx,
+            span = PolyglotAstExtractor.Companion.DeclMetricSpan(kind, decl.startLine, decl.endLine, decl.name),
+            language = "python"
         )
 
         return GraphNode(
