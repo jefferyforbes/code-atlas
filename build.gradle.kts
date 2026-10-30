@@ -94,7 +94,9 @@ tasks.register<Copy>("installToDist") {
         layout.projectDirectory.file("dist/atlas").asFile.delete()
     }
     doLast {
-        layout.projectDirectory.file("dist/atlas").asFile.setExecutable(true)
+        val target = layout.projectDirectory.file("dist/atlas").asFile
+        target.setExecutable(true)
+        ProcessBuilder("codesign", "-s", "-", "-f", target.absolutePath).start().waitFor()
     }
 }
 
@@ -107,6 +109,8 @@ tasks.register<Copy>("installToLocalBin") {
         file(System.getProperty("user.home") + "/.local/bin/atlas").delete()
     }
     doLast {
-        file(System.getProperty("user.home") + "/.local/bin/atlas").setExecutable(true)
+        val target = file(System.getProperty("user.home") + "/.local/bin/atlas")
+        target.setExecutable(true)
+        ProcessBuilder("codesign", "-s", "-", "-f", target.absolutePath).start().waitFor()
     }
 }

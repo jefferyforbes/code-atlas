@@ -1145,22 +1145,25 @@ class PolyglotAstExtractor {
             return rest
         }
 
+        internal data class DeclMetricSpan(
+            val kind: String,
+            val startLine: Int,
+            val endLine: Int,
+            val name: String? = null,
+            val isComposable: Boolean = false
+        )
+
         internal fun computeComplexityMetrics(
-            kind: String,
-            startLine: Int,
-            endLine: Int,
-            maskedLines: List<String>,
-            lines: List<String>,
-            language: String,
-            isComposable: Boolean = false,
-            functionName: String? = null
+            ctx: FileExtractionContext,
+            span: DeclMetricSpan,
+            language: String
         ): Pair<ComplexityVector, Double> {
-            return if (kind in setOf("function", "composable", "method")) {
-                val sIdx = (startLine - 1).coerceAtLeast(0)
-                val eIdx = endLine.coerceAtMost(maskedLines.size)
-                val fMasked = if (sIdx < eIdx) maskedLines.subList(sIdx, eIdx) else emptyList()
-                val fRaw = if (sIdx < lines.size) lines.subList(sIdx, minOf(eIdx, lines.size)) else emptyList()
-                val vec = ComplexityExtractor.calculate(fMasked, fRaw, language, isComposable, functionName)
+            return if (span.kind in setOf("function", "composable", "method")) {
+                val sIdx = (span.startLine - 1).coerceAtLeast(0)
+                val eIdx = span.endLine.coerceAtMost(ctx.maskedLines.size)
+                val fMasked = if (sIdx < eIdx) ctx.maskedLines.subList(sIdx, eIdx) else emptyList()
+                val fRaw = if (sIdx < ctx.lines.size) ctx.lines.subList(sIdx, minOf(eIdx, ctx.lines.size)) else emptyList()
+                val vec = ComplexityExtractor.calculate(fMasked, fRaw, language, span.isComposable, span.name)
                 val score = ComplexityExtractor.computeScore(vec)
                 Pair(vec, score)
             } else {

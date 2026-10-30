@@ -31,16 +31,18 @@ class AutonomousRemediationVerifier(
         testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null
     ): RemediationVerificationResult {
         return verifyAndApply(
-            projectSlug = projectSlug,
-            relPath = prescription.filePath,
-            beforeSnippet = prescription.beforeSnippet,
-            afterSnippet = prescription.afterSnippet,
-            ruleId = prescription.ruleId,
-            targetNodeId = prescription.targetNodeId,
-            writeSiteSafe = prescription.writeSiteSafe,
-            dryRun = dryRun,
-            testCommand = testCommand,
-            testVerifier = testVerifier
+            VerificationRequest(
+                projectSlug = projectSlug,
+                relPath = prescription.filePath,
+                beforeSnippet = prescription.beforeSnippet,
+                afterSnippet = prescription.afterSnippet,
+                ruleId = prescription.ruleId,
+                targetNodeId = prescription.targetNodeId,
+                writeSiteSafe = prescription.writeSiteSafe,
+                dryRun = dryRun,
+                testCommand = testCommand,
+                testVerifier = testVerifier
+            )
         )
     }
 
@@ -52,114 +54,113 @@ class AutonomousRemediationVerifier(
         testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null
     ): RemediationVerificationResult {
         return verifyAndApply(
-            projectSlug = projectSlug,
-            relPath = prescription.filePath,
-            beforeSnippet = prescription.beforeSnippet,
-            afterSnippet = prescription.afterSnippet,
-            ruleId = prescription.ruleId,
-            targetNodeId = prescription.targetNodeId,
-            writeSiteSafe = prescription.writeSiteSafe,
-            dryRun = dryRun,
-            testCommand = testCommand,
-            testVerifier = testVerifier,
-            expectedReductionPercent = prescription.reductionPercent
+            VerificationRequest(
+                projectSlug = projectSlug,
+                relPath = prescription.filePath,
+                beforeSnippet = prescription.beforeSnippet,
+                afterSnippet = prescription.afterSnippet,
+                ruleId = prescription.ruleId,
+                targetNodeId = prescription.targetNodeId,
+                writeSiteSafe = prescription.writeSiteSafe,
+                dryRun = dryRun,
+                testCommand = testCommand,
+                testVerifier = testVerifier,
+                expectedReductionPercent = prescription.reductionPercent
+            )
         )
+    }
+
+    private enum class PassedStage {
+        NONE,
+        PRE_FLIGHT,
+        AST_VALID,
+        CHECKS_PASSED,
+        TESTS_PRESERVED
     }
 
     private fun failResult(
         phase: String,
-        ruleId: String,
-        filePath: String,
+        req: VerificationRequest,
         message: String,
         details: List<String>,
-        preFlightPassed: Boolean = false,
-        astValid: Boolean = false,
-        checksPassed: Boolean = false,
-        testsPreserved: Boolean = false
+        passedStage: PassedStage = PassedStage.NONE
     ): RemediationVerificationResult {
         return RemediationVerificationResult(
             valid = false,
             phase = phase,
-            ruleId = ruleId,
-            filePath = filePath,
-            preFlightPassed = preFlightPassed,
-            astValid = astValid,
-            checksPassed = checksPassed,
-            testsPreserved = testsPreserved,
+            ruleId = req.ruleId,
+            filePath = req.relPath,
+            preFlightPassed = passedStage >= PassedStage.PRE_FLIGHT,
+            astValid = passedStage >= PassedStage.AST_VALID,
+            checksPassed = passedStage >= PassedStage.CHECKS_PASSED,
+            testsPreserved = passedStage >= PassedStage.TESTS_PRESERVED,
             message = message,
             details = details
         )
     }
 
     private fun checkGraphStoreSafety(
-        projectSlug: String,
-        relPath: String,
-        beforeSnippet: String,
-        ruleId: String,
+        req: VerificationRequest,
         details: MutableList<String>
     ): RemediationVerificationResult? {
         if (store == null) return null
-        val varPropMatch = Regex("""\bvar\s+([A-Za-z0-9_]+)\s*:""").find(beforeSnippet) ?: return null
+        val varPropMatch = Regex("""\bvar\s+([A-Za-z0-9_]+)\s*:""").find(req.beforeSnippet) ?: return null
         val propName = varPropMatch.groupValues[1]
-        val className = Regex("""\b(?:data\s+)?class\s+([A-Za-z0-9_]+)""").find(beforeSnippet)?.groupValues?.get(1)
-        val mutations = store.countPropertyMutations(projectSlug, propName, className)
+        val className = Regex("""\b(?:data\s+)?class\s+([A-Za-z0-9_]+)""").find(req.beforeSnippet)?.groupValues?.get(1)
+        val mutations = store.countPropertyMutations(req.projectSlug, propName, className)
         if (mutations > 0) {
             val msg = "Pre-flight failed: Write-site mutations exist in call graph ($mutations active mutation(s) for '$propName')."
             details.add("Graph store check failed: Property '$propName' has $mutations MUTATES_PROPERTY edge(s). Refactor mutations before converting 'var' -> 'val'.")
-            return failResult("PRE_FLIGHT", ruleId, relPath, msg, details)
+            return failResult("PRE_FLIGHT", req, msg, details)
         }
         return null
     }
 
     private fun validatePreFlight(
-        projectSlug: String,
+        req: VerificationRequest,
         fullPath: String,
-        relPath: String,
-        beforeSnippet: String,
-        ruleId: String,
-        writeSiteSafe: Boolean,
         details: MutableList<String>
     ): Pair<String?, RemediationVerificationResult?> {
-        if (!writeSiteSafe) {
-            val msg = "Pre-flight failed: Write-site mutations exist in call graph for $ruleId in $relPath."
+        if (!req.writeSiteSafe) {
+            val msg = "Pre-flight failed: Write-site mutations exist in call graph for ${req.ruleId} in ${req.relPath}."
             details.add("Write-site safety check failed (writeSiteSafe=false). Autonomous modification rejected.")
-            return Pair(null, failResult("PRE_FLIGHT", ruleId, relPath, msg, details))
+            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
         }
 
-        val storeErr = checkGraphStoreSafety(projectSlug, relPath, beforeSnippet, ruleId, details)
+        val storeErr = checkGraphStoreSafety(req, details)
         if (storeErr != null) return Pair(null, storeErr)
 
         if (!PlatformFiles.exists(fullPath)) {
-            val msg = "Pre-flight failed: File does not exist at $relPath."
+            val msg = "Pre-flight failed: File does not exist at ${req.relPath}."
             details.add("File not found on disk: $fullPath")
-            return Pair(null, failResult("PRE_FLIGHT", ruleId, relPath, msg, details))
+            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
         }
 
         val originalContent = try {
             PlatformFiles.readText(fullPath)
         } catch (e: Exception) {
-            val msg = "Pre-flight failed: Cannot read $relPath: ${e.message}"
+            val msg = "Pre-flight failed: Cannot read ${req.relPath}: ${e.message}"
             details.add(msg)
-            return Pair(null, failResult("PRE_FLIGHT", ruleId, relPath, msg, details))
+            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
         }
 
-        if (beforeSnippet.isBlank()) {
+        if (req.beforeSnippet.isBlank()) {
             val msg = "Pre-flight failed: beforeSnippet is empty."
-            details.add("Empty beforeSnippet provided for remediation of $relPath.")
-            return Pair(null, failResult("PRE_FLIGHT", ruleId, relPath, msg, details))
+            details.add("Empty beforeSnippet provided for remediation of ${req.relPath}.")
+            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
         }
 
-        if (!originalContent.contains(beforeSnippet)) {
-            val msg = "Pre-flight failed: Target code snippet not found in $relPath."
+        if (!originalContent.contains(req.beforeSnippet)) {
+            val msg = "Pre-flight failed: Target code snippet not found in ${req.relPath}."
             details.add("Expected beforeSnippet not present in source text.")
-            return Pair(null, failResult("PRE_FLIGHT", ruleId, relPath, msg, details))
+            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
         }
 
-        val occurrences = countOccurrences(originalContent, beforeSnippet)
+        val occurrences = countOccurrences(originalContent, req.beforeSnippet)
         if (occurrences > 1) {
-            val msg = "Pre-flight failed: Ambiguous replacement; target snippet occurs $occurrences times in $relPath."
+            val msg = "Pre-flight failed: Ambiguous replacement; target snippet occurs $occurrences times in ${req.relPath}."
             details.add("Target snippet is ambiguous ($occurrences occurrences).")
-            return Pair(null, failResult("PRE_FLIGHT", ruleId, relPath, msg, details))
+            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
         }
 
         details.add("Pre-flight validation passed: File exists, writeSiteSafe=true, unique beforeSnippet located.")
@@ -168,17 +169,14 @@ class AutonomousRemediationVerifier(
 
     private fun stageReplacement(
         originalContent: String,
-        beforeSnippet: String,
-        afterSnippet: String,
-        relPath: String,
-        ruleId: String,
+        req: VerificationRequest,
         details: MutableList<String>
     ): Pair<String?, RemediationVerificationResult?> {
-        val modifiedContent = originalContent.replace(beforeSnippet, afterSnippet)
+        val modifiedContent = originalContent.replace(req.beforeSnippet, req.afterSnippet)
         if (modifiedContent == originalContent) {
             val msg = "Application failed: Replacement produced identical content."
             details.add("No changes resulted from replacing beforeSnippet with afterSnippet.")
-            return Pair(null, failResult("APPLICATION", ruleId, relPath, msg, details, preFlightPassed = true))
+            return Pair(null, failResult("APPLICATION", req, msg, details, PassedStage.PRE_FLIGHT))
         }
         return Pair(modifiedContent, null)
     }
@@ -240,23 +238,21 @@ class AutonomousRemediationVerifier(
     }
 
     private fun checkComposeStabilityRemediation(
-        projectSlug: String,
-        relPath: String,
+        req: VerificationRequest,
         originalContent: String,
         modifiedContent: String,
-        ruleId: String,
-        targetNodeId: String?,
         details: MutableList<String>
     ): Boolean {
-        val targetRuleBit = ruleBitForId(ruleId)
+        val targetRuleBit = ruleBitForId(req.ruleId)
         if (targetRuleBit == 0) return true
         return try {
             val origBundle = try {
-                composeExtractor.extractKotlinFile(projectSlug = projectSlug, relPath = relPath, sourceText = originalContent)
+                composeExtractor.extractKotlinFile(projectSlug = req.projectSlug, relPath = req.relPath, sourceText = originalContent)
             } catch (_: Exception) { null }
-            val bundle = composeExtractor.extractKotlinFile(projectSlug = projectSlug, relPath = relPath, sourceText = modifiedContent)
+            val bundle = composeExtractor.extractKotlinFile(projectSlug = req.projectSlug, relPath = req.relPath, sourceText = modifiedContent)
             val origViolations = origBundle?.nodes?.filter { (it.violationMask and targetRuleBit) != 0 } ?: emptyList()
             val newViolations = bundle.nodes.filter { (it.violationMask and targetRuleBit) != 0 }
+            val targetNodeId = req.targetNodeId
             val cleared = if (!targetNodeId.isNullOrBlank()) {
                 newViolations.none {
                     it.nodeId == targetNodeId || it.fqName == targetNodeId || it.nodeId.endsWith("#$targetNodeId")
@@ -265,10 +261,10 @@ class AutonomousRemediationVerifier(
                 newViolations.isEmpty() || newViolations.size < origViolations.size
             }
             if (!cleared) {
-                details.add("Target rule $ruleId not cleared: ${newViolations.size} violation(s) remain post-remediation.")
+                details.add("Target rule ${req.ruleId} not cleared: ${newViolations.size} violation(s) remain post-remediation.")
                 false
             } else {
-                details.add("Target rule $ruleId verified cleared post-remediation.")
+                details.add("Target rule ${req.ruleId} verified cleared post-remediation.")
                 true
             }
         } catch (e: Exception) {
@@ -317,21 +313,19 @@ class AutonomousRemediationVerifier(
     }
 
     private fun checkComplexityReduction(
-        ruleId: String,
-        targetNodeId: String?,
-        expectedReductionPercent: Double?,
-        origNodes: List<GraphNode>,
-        nodes: List<GraphNode>,
+        req: VerificationRequest,
+        astResult: AstExtractionResult,
         details: MutableList<String>
     ): Boolean {
-        if (!ruleId.startsWith("COMPLEXITY") && expectedReductionPercent == null) return true
+        if (!req.ruleId.startsWith("COMPLEXITY") && req.expectedReductionPercent == null) return true
+        val targetNodeId = req.targetNodeId
         val sym = if (!targetNodeId.isNullOrBlank() && targetNodeId.contains('#')) targetNodeId.substringAfter('#') else (targetNodeId ?: "")
         val simpleSym = sym.substringAfterLast('.')
 
-        val origTargetNode = findTargetGraphNode(origNodes, targetNodeId, sym, simpleSym)
-        val newTargetNode = findTargetGraphNode(nodes, targetNodeId, sym, simpleSym, origTargetNode)
+        val origTargetNode = findTargetGraphNode(astResult.origNodes, targetNodeId, sym, simpleSym)
+        val newTargetNode = findTargetGraphNode(astResult.nodes, targetNodeId, sym, simpleSym, origTargetNode)
 
-        val (floorSatisfied, roundedReduction, diff) = evaluateReduction(origTargetNode, newTargetNode, expectedReductionPercent)
+        val (floorSatisfied, roundedReduction, diff) = evaluateReduction(origTargetNode, newTargetNode, req.expectedReductionPercent)
         if (!floorSatisfied) {
             details.add("Gate 4 failed: Cognitive complexity reduction ($roundedReduction%) is below the required threshold.")
             return false
@@ -344,10 +338,10 @@ class AutonomousRemediationVerifier(
         fullPath: String,
         originalContent: String,
         modifiedContent: String,
-        testCommand: String,
-        dryRun: Boolean,
+        req: VerificationRequest,
         details: MutableList<String>
     ): Boolean {
+        val testCommand = req.testCommand ?: return true
         val staged = try {
             PlatformFiles.writeText(fullPath, modifiedContent)
         } catch (_: Exception) { false }
@@ -372,7 +366,7 @@ class AutonomousRemediationVerifier(
         } catch (e: Exception) {
             details.add("Test command '$testCommand' crashed: ${e.message}")
         } finally {
-            if (!passed || dryRun) {
+            if (!passed || req.dryRun) {
                 PlatformFiles.writeText(fullPath, originalContent)
             }
         }
@@ -381,17 +375,15 @@ class AutonomousRemediationVerifier(
 
     private fun verifyTestSuitePreservation(
         fullPath: String,
-        relPath: String,
         originalContent: String,
         modifiedContent: String,
-        testCommand: String?,
-        testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)?,
-        dryRun: Boolean,
+        req: VerificationRequest,
         details: MutableList<String>
     ): Boolean {
-        if (testVerifier != null) {
+        val verifierHook = req.testVerifier
+        if (verifierHook != null) {
             try {
-                if (!testVerifier(relPath, modifiedContent)) {
+                if (!verifierHook(req.relPath, modifiedContent)) {
                     details.add("Test suite preservation hook returned false.")
                     return false
                 }
@@ -402,8 +394,8 @@ class AutonomousRemediationVerifier(
             }
         }
 
-        if (!testCommand.isNullOrBlank()) {
-            return executeTestCommandWithRollback(fullPath, originalContent, modifiedContent, testCommand, dryRun, details)
+        if (!req.testCommand.isNullOrBlank()) {
+            return executeTestCommandWithRollback(fullPath, originalContent, modifiedContent, req, details)
         }
         return true
     }
@@ -420,24 +412,22 @@ class AutonomousRemediationVerifier(
 
     private fun commitRemediation(
         fullPath: String,
-        relPath: String,
         modifiedContent: String,
-        testCommand: String?,
-        dryRun: Boolean,
+        req: VerificationRequest,
         details: MutableList<String>
     ): String? {
-        if (!dryRun) {
-            if (testCommand.isNullOrBlank()) {
+        if (!req.dryRun) {
+            if (req.testCommand.isNullOrBlank()) {
                 try {
                     PlatformFiles.writeText(fullPath, modifiedContent)
-                    details.add("Remediation safely written to disk at $relPath.")
+                    details.add("Remediation safely written to disk at ${req.relPath}.")
                 } catch (e: Exception) {
                     val msg = "Application failed: Write error writing to $fullPath: ${e.message}"
                     details.add(msg)
                     return msg
                 }
             } else {
-                details.add("Remediation safely verified and committed to disk at $relPath.")
+                details.add("Remediation safely verified and committed to disk at ${req.relPath}.")
             }
         } else {
             details.add("Dry run mode: changes validated and verified, disk untouched.")
@@ -446,23 +436,19 @@ class AutonomousRemediationVerifier(
     }
 
     private fun verifyRulesAndInvariants(
-        projectSlug: String,
-        relPath: String,
+        req: VerificationRequest,
         originalContent: String,
         modifiedContent: String,
-        ruleId: String,
-        targetNodeId: String?,
-        expectedReductionPercent: Double?,
         astResult: AstExtractionResult,
         details: MutableList<String>
     ): Boolean {
-        if (!checkSingleDeclaration(relPath, astResult.topDeclCount, details)) return false
+        if (!checkSingleDeclaration(req.relPath, astResult.topDeclCount, details)) return false
         if (astResult.lang == "kotlin") {
-            if (!checkComposeStabilityRemediation(projectSlug, relPath, originalContent, modifiedContent, ruleId, targetNodeId, details)) {
+            if (!checkComposeStabilityRemediation(req, originalContent, modifiedContent, details)) {
                 return false
             }
         }
-        return checkComplexityReduction(ruleId, targetNodeId, expectedReductionPercent, astResult.origNodes, astResult.nodes, details)
+        return checkComplexityReduction(req, astResult, details)
     }
 
     data class VerificationRequest(
@@ -479,75 +465,38 @@ class AutonomousRemediationVerifier(
         val expectedReductionPercent: Double? = null
     )
 
-    fun verifyAndApply(
-        projectSlug: String,
-        relPath: String,
-        beforeSnippet: String,
-        afterSnippet: String,
-        ruleId: String = "GENERIC",
-        targetNodeId: String? = null,
-        writeSiteSafe: Boolean = true,
-        dryRun: Boolean = true,
-        testCommand: String? = null,
-        testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null,
-        expectedReductionPercent: Double? = null
-    ): RemediationVerificationResult = verifyAndApply(
-        VerificationRequest(
-            projectSlug = projectSlug,
-            relPath = relPath,
-            beforeSnippet = beforeSnippet,
-            afterSnippet = afterSnippet,
-            ruleId = ruleId,
-            targetNodeId = targetNodeId,
-            writeSiteSafe = writeSiteSafe,
-            dryRun = dryRun,
-            testCommand = testCommand,
-            testVerifier = testVerifier,
-            expectedReductionPercent = expectedReductionPercent
-        )
-    )
-
     fun verifyAndApply(req: VerificationRequest): RemediationVerificationResult {
         val root = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
         val fullPath = if (req.relPath.startsWith("/")) req.relPath else "$root/${req.relPath}"
         val details = mutableListOf<String>()
 
-        val (originalContent, preFlightErr) = validatePreFlight(
-            req.projectSlug, fullPath, req.relPath, req.beforeSnippet, req.ruleId, req.writeSiteSafe, details
-        )
+        val (originalContent, preFlightErr) = validatePreFlight(req, fullPath, details)
         if (preFlightErr != null) return preFlightErr
 
-        val (modifiedContent, stageErr) = stageReplacement(
-            originalContent!!, req.beforeSnippet, req.afterSnippet, req.relPath, req.ruleId, details
-        )
+        val (modifiedContent, stageErr) = stageReplacement(originalContent!!, req, details)
         if (stageErr != null) return stageErr
 
         val astResult = validateAstIntegrity(req.projectSlug, req.relPath, originalContent, modifiedContent!!, details)
         if (!astResult.astValid) {
             val msg = "Post-remediation verification failed: Modified source produces an invalid AST."
-            return failResult("POST_VERIFICATION", req.ruleId, req.relPath, msg, details, preFlightPassed = true)
+            return failResult("POST_VERIFICATION", req, msg, details, PassedStage.PRE_FLIGHT)
         }
 
-        val checksPassed = verifyRulesAndInvariants(
-            req.projectSlug, req.relPath, originalContent, modifiedContent, req.ruleId,
-            req.targetNodeId, req.expectedReductionPercent, astResult, details
-        )
+        val checksPassed = verifyRulesAndInvariants(req, originalContent, modifiedContent, astResult, details)
         if (!checksPassed) {
             val msg = "Post-remediation verification failed: Checks did not pass post-remediation."
-            return failResult("POST_VERIFICATION", req.ruleId, req.relPath, msg, details, preFlightPassed = true, astValid = true)
+            return failResult("POST_VERIFICATION", req, msg, details, PassedStage.AST_VALID)
         }
 
-        val testsPreserved = verifyTestSuitePreservation(
-            fullPath, req.relPath, originalContent, modifiedContent, req.testCommand, req.testVerifier, req.dryRun, details
-        )
+        val testsPreserved = verifyTestSuitePreservation(fullPath, originalContent, modifiedContent, req, details)
         if (!testsPreserved) {
             val msg = "Post-remediation verification failed: Test suite preservation check failed."
-            return failResult("POST_VERIFICATION", req.ruleId, req.relPath, msg, details, preFlightPassed = true, astValid = true, checksPassed = true)
+            return failResult("POST_VERIFICATION", req, msg, details, PassedStage.CHECKS_PASSED)
         }
 
-        val writeErr = commitRemediation(fullPath, req.relPath, modifiedContent, req.testCommand, req.dryRun, details)
+        val writeErr = commitRemediation(fullPath, modifiedContent, req, details)
         if (writeErr != null) {
-            return failResult("APPLICATION", req.ruleId, req.relPath, writeErr, details, preFlightPassed = true, astValid = true, checksPassed = true, testsPreserved = true)
+            return failResult("APPLICATION", req, writeErr, details, PassedStage.TESTS_PRESERVED)
         }
 
         val diffSnippet = formatUnifiedDiff(req.relPath, req.beforeSnippet, req.afterSnippet)

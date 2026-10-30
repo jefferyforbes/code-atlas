@@ -213,17 +213,19 @@ class AtlasNativeTest {
 
             // Test file record pruning and deletion
             store.upsertFileRecord(
-                projectId = "p",
-                relPath = "A.kt",
-                language = "kotlin",
-                moduleId = "m1",
-                sourceSet = "main",
-                semioticLayer = "syntactic",
-                archLayer = "domain",
-                sha256 = "shaA",
-                mtime = 100.0,
-                loc = 10,
-                topLevelDeclCount = 1
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = "p",
+                    relPath = "A.kt",
+                    language = "kotlin",
+                    moduleId = "m1",
+                    sourceSet = "main",
+                    semioticLayer = "syntactic",
+                    archLayer = "domain",
+                    sha256 = "shaA",
+                    mtime = 100.0,
+                    loc = 10,
+                    topLevelDeclCount = 1
+                )
             )
             val indexed = store.listIndexedFiles("p")
             assertTrue(indexed.contains("A.kt"))
@@ -704,17 +706,19 @@ class AtlasNativeTest {
             assertTrue(indexNames.contains("idx_raw_edges_file"))
 
             store.upsertFileRecord(
-                projectId = "p",
-                relPath = "src/Caller.kt",
-                language = "kotlin",
-                moduleId = ":app",
-                sourceSet = "main",
-                semioticLayer = "semantic",
-                archLayer = "application",
-                sha256 = "sha_caller",
-                mtime = 1234.5,
-                loc = 20,
-                topLevelDeclCount = 1
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = "p",
+                    relPath = "src/Caller.kt",
+                    language = "kotlin",
+                    moduleId = ":app",
+                    sourceSet = "main",
+                    semioticLayer = "semantic",
+                    archLayer = "application",
+                    sha256 = "sha_caller",
+                    mtime = 1234.5,
+                    loc = 20,
+                    topLevelDeclCount = 1
+                )
             )
             val fileMap = store.getFileRecordsMap("p")
             assertEquals(Pair("sha_caller", 1234.5), fileMap["src/Caller.kt"])

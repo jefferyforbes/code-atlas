@@ -2,7 +2,7 @@
   "project": "code-atlas",
   "ratchet": 0,
   "high_ratchet": 0,
-  "param_high_ratchet": 55,
+  "param_high_ratchet": 45,
   "threshold": 10,
   "max_cyclomatic": 15,
   "total_violations": 0,

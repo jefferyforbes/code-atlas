@@ -31,78 +31,73 @@ class ArchitectureRemediationEngine(
         return ruleFilter.equals(targetRule, ignoreCase = true) || ruleFilter.equals("all", ignoreCase = true)
     }
 
+    data class RemediationPlanRequest(
+        val projectId: String,
+        val targetPaths: List<String> = emptyList(),
+        val ruleFilter: String? = null,
+        val dryRun: Boolean = true,
+        val splitBoost003: Boolean = true,
+        val makePrivateBoost003: Boolean = false,
+        val testCommand: String? = null,
+        val limit: Int = 50
+    )
+
     private fun collectPlannedPrescriptions(
-        projectId: String,
+        req: RemediationPlanRequest,
         boostViolations: List<SingleDeclarationViolation>,
-        layerViolations: List<LayerInversionViolation>,
-        dryRun: Boolean,
-        splitBoost003: Boolean,
-        makePrivateBoost003: Boolean,
-        testCommand: String?,
-        limit: Int
+        layerViolations: List<LayerInversionViolation>
     ): List<ArchitectureRemediationPrescription> {
         val prescriptions = mutableListOf<ArchitectureRemediationPrescription>()
-        for (v in boostViolations.take(limit)) {
+        for (v in boostViolations.take(req.limit)) {
             prescriptions.add(
                 remediateBoost003(
-                    projectId = projectId,
+                    projectId = req.projectId,
                     violation = v,
-                    dryRun = dryRun,
-                    split = splitBoost003,
-                    makePrivate = makePrivateBoost003,
-                    testCommand = testCommand
+                    dryRun = req.dryRun,
+                    split = req.splitBoost003,
+                    makePrivate = req.makePrivateBoost003,
+                    testCommand = req.testCommand
                 )
             )
         }
-        val remaining = (limit - prescriptions.size).coerceAtLeast(0)
+        val remaining = (req.limit - prescriptions.size).coerceAtLeast(0)
         for (v in layerViolations.take(remaining)) {
             prescriptions.add(
                 remediateLayerInversion(
-                    projectId = projectId,
+                    projectId = req.projectId,
                     violation = v,
-                    dryRun = dryRun,
-                    testCommand = testCommand
+                    dryRun = req.dryRun,
+                    testCommand = req.testCommand
                 )
             )
         }
         return prescriptions
     }
 
-    fun planAndRemediate(
-        projectId: String,
-        targetPaths: List<String> = emptyList(),
-        ruleFilter: String? = null,
-        dryRun: Boolean = true,
-        splitBoost003: Boolean = true,
-        makePrivateBoost003: Boolean = false,
-        testCommand: String? = null,
-        limit: Int = 50
-    ): ArchitectureRemediationReport {
+    fun planAndRemediate(req: RemediationPlanRequest): ArchitectureRemediationReport {
         val auditReport = auditor.runFullAudit(
-            projectId = projectId,
-            pathPrefixes = targetPaths.ifEmpty { null },
+            projectId = req.projectId,
+            pathPrefixes = req.targetPaths.ifEmpty { null },
             descriptionMode = "off"
         )
 
-        val boostViolations = if (isRuleIncluded(ruleFilter, "BOOST-003")) auditReport.singleDeclarationViolations else emptyList()
-        val layerViolations = if (isRuleIncluded(ruleFilter, "ARCH-LAYER-INVERSION")) auditReport.layerInversions else emptyList()
+        val boostViolations = if (isRuleIncluded(req.ruleFilter, "BOOST-003")) auditReport.singleDeclarationViolations else emptyList()
+        val layerViolations = if (isRuleIncluded(req.ruleFilter, "ARCH-LAYER-INVERSION")) auditReport.layerInversions else emptyList()
         val totalViolations = boostViolations.size + layerViolations.size
-        val prescriptions = collectPlannedPrescriptions(
-            projectId, boostViolations, layerViolations, dryRun, splitBoost003, makePrivateBoost003, testCommand, limit
-        )
+        val prescriptions = collectPlannedPrescriptions(req, boostViolations, layerViolations)
 
         val verifiedCount = prescriptions.count { it.verified }
         val appliedCount = prescriptions.count { it.applied }
-        val summaryText = "[Remediation Plan] project=$projectId total_violations=$totalViolations boost003=${boostViolations.size} layer_inversions=${layerViolations.size} planned=${prescriptions.size} verified=$verifiedCount applied=$appliedCount dry_run=$dryRun"
+        val summaryText = "[Remediation Plan] project=${req.projectId} total_violations=$totalViolations boost003=${boostViolations.size} layer_inversions=${layerViolations.size} planned=${prescriptions.size} verified=$verifiedCount applied=$appliedCount dry_run=${req.dryRun}"
 
         return ArchitectureRemediationReport(
-            project = projectId,
+            project = req.projectId,
             totalViolations = totalViolations,
             boost003Count = boostViolations.size,
             layerInversionCount = layerViolations.size,
             verifiedCount = verifiedCount,
             appliedCount = appliedCount,
-            dryRun = dryRun,
+            dryRun = req.dryRun,
             prescriptions = prescriptions,
             summary = summaryText
         )

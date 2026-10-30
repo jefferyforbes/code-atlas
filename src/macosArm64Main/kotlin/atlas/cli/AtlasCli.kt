@@ -1,5 +1,6 @@
 package atlas.cli
 
+import atlas.engine.AutonomousRemediationVerifier
 import atlas.engine.FigmaDesignAuditor
 import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkspaceInitEngine
@@ -1195,15 +1196,17 @@ class AtlasCli {
             val rxWriteSiteSafe = rx["write_site_safe"]?.jsonPrimitive?.booleanOrNull
 
             val vResult = server.remediationVerifier.verifyAndApply(
-                projectSlug = project,
-                relPath = rxFilePath,
-                beforeSnippet = rxBefore,
-                afterSnippet = rxAfter,
-                ruleId = rxRuleId,
-                targetNodeId = rxNodeId,
-                writeSiteSafe = rxWriteSiteSafe ?: true,
-                dryRun = false,
-                testCommand = testCmdArg
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = project,
+                    relPath = rxFilePath,
+                    beforeSnippet = rxBefore,
+                    afterSnippet = rxAfter,
+                    ruleId = rxRuleId,
+                    targetNodeId = rxNodeId,
+                    writeSiteSafe = rxWriteSiteSafe ?: true,
+                    dryRun = false,
+                    testCommand = testCmdArg
+                )
             )
             val json = buildJsonObject {
                 put("rule_id", rxRuleId)

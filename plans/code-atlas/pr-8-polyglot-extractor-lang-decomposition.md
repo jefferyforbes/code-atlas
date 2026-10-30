@@ -6,7 +6,7 @@ contract:
   task: pr-8-polyglot-extractor-lang-decomposition
   objective: Decompose the 3,792-line PolyglotAstExtractor into dedicated internal language extractors (KotlinAstExtractor, TypeScriptAstExtractor, PythonAstExtractor, NativeSystemsAstExtractor) while preserving PolyglotAstExtractor as the public facade.
 
-status: approved # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: merged # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
 
 size:
   complexity: medium

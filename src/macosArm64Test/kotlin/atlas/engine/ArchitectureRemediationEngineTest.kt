@@ -67,9 +67,11 @@ class ArchitectureRemediationEngineTest {
             val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
 
             val report = engine.planAndRemediate(
-                projectId = "test_proj",
-                dryRun = true,
-                splitBoost003 = true
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = true,
+                    splitBoost003 = true
+                )
             )
 
             assertEquals(1, report.boost003Count)
@@ -130,9 +132,11 @@ class ArchitectureRemediationEngineTest {
 
             // Apply remediation
             val report = engine.planAndRemediate(
-                projectId = "test_proj",
-                dryRun = false,
-                splitBoost003 = true
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = false,
+                    splitBoost003 = true
+                )
             )
 
             assertTrue(report.prescriptions.isNotEmpty())
@@ -193,9 +197,11 @@ class ArchitectureRemediationEngineTest {
             val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
 
             val report = engine.planAndRemediate(
-                projectId = "test_proj",
-                dryRun = false,
-                splitBoost003 = true
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = false,
+                    splitBoost003 = true
+                )
             )
 
             val rx = report.prescriptions.first()
@@ -251,10 +257,12 @@ class ArchitectureRemediationEngineTest {
             val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
 
             val report = engine.planAndRemediate(
-                projectId = "test_proj",
-                dryRun = false,
-                splitBoost003 = false,
-                makePrivateBoost003 = true
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = false,
+                    splitBoost003 = false,
+                    makePrivateBoost003 = true
+                )
             )
 
             val rx = report.prescriptions.first()
@@ -303,10 +311,12 @@ class ArchitectureRemediationEngineTest {
             val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
 
             val report = engine.planAndRemediate(
-                projectId = "test_proj",
-                dryRun = false,
-                splitBoost003 = false,
-                makePrivateBoost003 = false
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = false,
+                    splitBoost003 = false,
+                    makePrivateBoost003 = false
+                )
             )
 
             val rx = report.prescriptions.first()
@@ -343,10 +353,12 @@ class ArchitectureRemediationEngineTest {
 
             // Apply remediation with a failing test command
             val report = engine.planAndRemediate(
-                projectId = "test_proj",
-                dryRun = false,
-                splitBoost003 = true,
-                testCommand = "exit 1" // failing test command
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = false,
+                    splitBoost003 = true,
+                    testCommand = "exit 1" // failing test command
+                )
             )
 
             val rx = report.prescriptions.first()
@@ -387,9 +399,11 @@ class ArchitectureRemediationEngineTest {
             val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
 
             val report = engine.planAndRemediate(
-                projectId = "test_proj",
-                dryRun = false,
-                splitBoost003 = true
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = false,
+                    splitBoost003 = true
+                )
             )
 
             val rx = report.prescriptions.first()
@@ -433,9 +447,11 @@ class ArchitectureRemediationEngineTest {
             val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
 
             val report = engine.planAndRemediate(
-                projectId = "test_proj",
-                dryRun = false,
-                splitBoost003 = true
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = false,
+                    splitBoost003 = true
+                )
             )
 
             val rx = report.prescriptions.first()
@@ -465,9 +481,11 @@ class ArchitectureRemediationEngineTest {
             val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
 
             val report = engine.planAndRemediate(
-                projectId = "test_proj",
-                ruleFilter = "ARCH-LAYER-INVERSION",
-                dryRun = true
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    ruleFilter = "ARCH-LAYER-INVERSION",
+                    dryRun = true
+                )
             )
 
             assertEquals(0, report.prescriptions.size)
@@ -542,9 +560,11 @@ class ArchitectureRemediationEngineTest {
 
             // Test dry-run: applied must be FALSE
             val dryReport = engine.planAndRemediate(
-                projectId = "test_proj",
-                ruleFilter = "ARCH-LAYER-INVERSION",
-                dryRun = true
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    ruleFilter = "ARCH-LAYER-INVERSION",
+                    dryRun = true
+                )
             )
             assertEquals(1, dryReport.layerInversionCount)
             val dryRx = dryReport.prescriptions.first()
@@ -554,9 +574,11 @@ class ArchitectureRemediationEngineTest {
 
             // Test apply: applied must be TRUE and reindexes node
             val applyReport = engine.planAndRemediate(
-                projectId = "test_proj",
-                ruleFilter = "ARCH-LAYER-INVERSION",
-                dryRun = false
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    ruleFilter = "ARCH-LAYER-INVERSION",
+                    dryRun = false
+                )
             )
             val applyRx = applyReport.prescriptions.first()
             assertTrue(applyRx.verified)
@@ -604,10 +626,12 @@ class ArchitectureRemediationEngineTest {
             val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
 
             val report = engine.planAndRemediate(
-                projectId = "test_proj",
-                dryRun = false,
-                splitBoost003 = true,
-                makePrivateBoost003 = false
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = false,
+                    splitBoost003 = true,
+                    makePrivateBoost003 = false
+                )
             )
             assertTrue(report.prescriptions.isNotEmpty())
             val spawnedSecondary = PlatformFiles.readText("$tmpDir/SecondaryService.kt")

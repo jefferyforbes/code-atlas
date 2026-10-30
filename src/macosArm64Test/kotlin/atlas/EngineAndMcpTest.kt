@@ -165,30 +165,34 @@ class EngineAndMcpTest {
         val store = SqliteGraphStore(dbPath)
         try {
             store.upsertFileRecord(
-                projectId = "p",
-                relPath = "src/MultiClass.kt",
-                language = "kotlin",
-                moduleId = ":core",
-                sourceSet = "main",
-                semioticLayer = "semantic",
-                archLayer = "domain",
-                sha256 = "sha1",
-                mtime = 1.0,
-                loc = 30,
-                topLevelDeclCount = 2
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = "p",
+                    relPath = "src/MultiClass.kt",
+                    language = "kotlin",
+                    moduleId = ":core",
+                    sourceSet = "main",
+                    semioticLayer = "semantic",
+                    archLayer = "domain",
+                    sha256 = "sha1",
+                    mtime = 1.0,
+                    loc = 30,
+                    topLevelDeclCount = 2
+                )
             )
             store.upsertFileRecord(
-                projectId = "p",
-                relPath = "src/TestMulti.kt",
-                language = "kotlin",
-                moduleId = ":core",
-                sourceSet = "macosArm64Test",
-                semioticLayer = "test",
-                archLayer = "test",
-                sha256 = "sha2",
-                mtime = 1.0,
-                loc = 20,
-                topLevelDeclCount = 3
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = "p",
+                    relPath = "src/TestMulti.kt",
+                    language = "kotlin",
+                    moduleId = ":core",
+                    sourceSet = "macosArm64Test",
+                    semioticLayer = "test",
+                    archLayer = "test",
+                    sha256 = "sha2",
+                    mtime = 1.0,
+                    loc = 20,
+                    topLevelDeclCount = 3
+                )
             )
 
             val sharedTarget = GraphNode(
@@ -1119,30 +1123,34 @@ class EngineAndMcpTest {
         val store = SqliteGraphStore(dbPath)
         try {
             store.upsertFileRecord(
-                projectId = "p",
-                relPath = "src/service/OrderService.kt",
-                language = "kotlin",
-                moduleId = ":service",
-                sourceSet = "commonMain",
-                semioticLayer = "semantic",
-                archLayer = "domain",
-                sha256 = "sha1",
-                mtime = 100.0,
-                loc = 50,
-                topLevelDeclCount = 2
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = "p",
+                    relPath = "src/service/OrderService.kt",
+                    language = "kotlin",
+                    moduleId = ":service",
+                    sourceSet = "commonMain",
+                    semioticLayer = "semantic",
+                    archLayer = "domain",
+                    sha256 = "sha1",
+                    mtime = 100.0,
+                    loc = 50,
+                    topLevelDeclCount = 2
+                )
             )
             store.upsertFileRecord(
-                projectId = "p",
-                relPath = "src/models/Order.kt",
-                language = "kotlin",
-                moduleId = ":models",
-                sourceSet = "commonMain",
-                semioticLayer = "syntactic",
-                archLayer = "domain",
-                sha256 = "sha2",
-                mtime = 100.0,
-                loc = 20,
-                topLevelDeclCount = 1
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = "p",
+                    relPath = "src/models/Order.kt",
+                    language = "kotlin",
+                    moduleId = ":models",
+                    sourceSet = "commonMain",
+                    semioticLayer = "syntactic",
+                    archLayer = "domain",
+                    sha256 = "sha2",
+                    mtime = 100.0,
+                    loc = 20,
+                    topLevelDeclCount = 1
+                )
             )
 
             val classNode = GraphNode(
@@ -1811,33 +1819,37 @@ class EngineAndMcpTest {
                 kind = "class"
             )
             store.upsertFileRecord(
-                projectId = "proj",
-                relPath = "src/FileA.kt",
-                language = "kotlin",
-                moduleId = ":app",
-                sourceSet = "main",
-                semioticLayer = "syntactic",
-                archLayer = "domain",
-                sha256 = "hash1",
-                mtime = 1000.0,
-                loc = 50,
-                topLevelDeclCount = 1
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = "proj",
+                    relPath = "src/FileA.kt",
+                    language = "kotlin",
+                    moduleId = ":app",
+                    sourceSet = "main",
+                    semioticLayer = "syntactic",
+                    archLayer = "domain",
+                    sha256 = "hash1",
+                    mtime = 1000.0,
+                    loc = 50,
+                    topLevelDeclCount = 1
+                )
             )
             store.upsertNodesAndEdges("proj", listOf(nodeA1), emptyList())
 
             // Re-upsert file A (which deletes old nodes from nodes and nodes_fts)
             store.upsertFileRecord(
-                projectId = "proj",
-                relPath = "src/FileA.kt",
-                language = "kotlin",
-                moduleId = ":app",
-                sourceSet = "main",
-                semioticLayer = "syntactic",
-                archLayer = "domain",
-                sha256 = "hash2",
-                mtime = 2000.0,
-                loc = 60,
-                topLevelDeclCount = 1
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = "proj",
+                    relPath = "src/FileA.kt",
+                    language = "kotlin",
+                    moduleId = ":app",
+                    sourceSet = "main",
+                    semioticLayer = "syntactic",
+                    archLayer = "domain",
+                    sha256 = "hash2",
+                    mtime = 2000.0,
+                    loc = 60,
+                    topLevelDeclCount = 1
+                )
             )
 
             // Now insert a new node with different ID into file A
@@ -1960,13 +1972,15 @@ class EngineAndMcpTest {
 
             val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir)
             val result = verifier.verifyAndApply(
-                projectSlug = "test",
-                relPath = "A.kt",
-                beforeSnippet = "class A\n",
-                afterSnippet = "class A\n// comment\n",
-                ruleId = "GENERIC",
-                dryRun = true,
-                testCommand = "./test_fail.sh"
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "test",
+                    relPath = "A.kt",
+                    beforeSnippet = "class A\n",
+                    afterSnippet = "class A\n// comment\n",
+                    ruleId = "GENERIC",
+                    dryRun = true,
+                    testCommand = "./test_fail.sh"
+                )
             )
             assertFalse(result.testsPreserved, "Tests should fail when exit code is 1")
             assertTrue(
@@ -2331,17 +2345,19 @@ class EngineAndMcpTest {
         val store = SqliteGraphStore(dbPath)
         try {
             store.upsertFileRecord(
-                projectId = "p",
-                relPath = "src/OrderService.kt",
-                language = "kotlin",
-                moduleId = ":core",
-                sourceSet = "main",
-                semioticLayer = "semantic",
-                archLayer = "domain",
-                sha256 = "sha_order",
-                mtime = 1.0,
-                loc = 50,
-                topLevelDeclCount = 1
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = "p",
+                    relPath = "src/OrderService.kt",
+                    language = "kotlin",
+                    moduleId = ":core",
+                    sourceSet = "main",
+                    semioticLayer = "semantic",
+                    archLayer = "domain",
+                    sha256 = "sha_order",
+                    mtime = 1.0,
+                    loc = 50,
+                    topLevelDeclCount = 1
+                )
             )
 
             val codeNode = GraphNode(
