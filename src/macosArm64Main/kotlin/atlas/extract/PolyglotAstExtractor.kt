@@ -80,7 +80,7 @@ class PolyglotAstExtractor {
             "require", "check", "match", "throw", "yield", "guard", "case", "typeof"
         )
 
-        const val EXTRACTOR_VERSION: String = "1.4.0"
+        const val EXTRACTOR_VERSION: String = "1.4.1"
 
         private val INFIX_CALL_RE = Regex(
             """(?<=\s|[)\]a-zA-Z0-9_])\s+(?<callee>[a-zA-Z_][a-zA-Z0-9_]{1,})\s+(?=[A-Za-z0-9_"'(\[])"""
@@ -3701,6 +3701,11 @@ class PolyglotAstExtractor {
             if (ctx.srcModId.isNotEmpty()) {
                 val sameModule = candidatePool.filter { it.moduleId == ctx.srcModId }
                 if (sameModule.isNotEmpty()) return filterByLexicalScope(sameModule, ctx.srcNode)
+            }
+            val srcArch = ctx.srcNode?.archLayer.orEmpty()
+            if (srcArch.isNotEmpty()) {
+                val sameArchLayer = candidatePool.filter { it.archLayer == srcArch }
+                if (sameArchLayer.isNotEmpty()) return filterByLexicalScope(sameArchLayer, ctx.srcNode)
             }
             return filterByLexicalScope(fallback, ctx.srcNode)
         }

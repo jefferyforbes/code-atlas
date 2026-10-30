@@ -6,7 +6,7 @@ contract:
   task: pr-6-mcp-audit-payload-and-param-ratchet
   objective: Bound MCP atlas_audit complexity violation payloads to prevent 32KB spillovers, encapsulate 11-15 parameter functions, and enforce param_high_ratchet in complexity-baseline.json.
 
-status: executing # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: merged # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
 
 size:
   complexity: medium
