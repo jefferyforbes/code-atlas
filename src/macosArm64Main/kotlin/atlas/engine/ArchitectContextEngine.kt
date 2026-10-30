@@ -3,6 +3,7 @@ package atlas.engine
 import atlas.db.SqliteGraphStore
 import atlas.model.ArchitectContextResult
 import atlas.model.GraphNode
+import atlas.model.ScopeRecommendation
 import atlas.util.PlatformFiles
 import kotlin.math.roundToInt
 
@@ -68,17 +69,10 @@ class ArchitectContextEngine(
         val callHierarchy = buildCallHierarchy(projectId, keyNodes.take(5))
 
         val fullMarkdown = buildFullMarkdown(
-            projectId = projectId,
-            seedTargets = effectiveSeeds,
-            scopeFiles = scope.files,
-            scopeModules = scope.modules,
-            architecture = scope.architecture,
-            collidingPlans = scope.collidingPlans,
-            godNodesTouched = scope.godNodesTouched,
-            aciScore = aciScore,
-            isFastPath = isFastPath,
-            skeletons = skeletons,
-            callHierarchy = callHierarchy
+            headerTitle = effectiveSeeds.firstOrNull() ?: projectId,
+            scope = scope,
+            aciSummary = aciScore to isFastPath,
+            sections = skeletons to callHierarchy
         )
 
         val fullBytes = fullMarkdown.encodeToByteArray().size
@@ -110,14 +104,9 @@ class ArchitectContextEngine(
         PlatformFiles.writeText(spilloverPath, fullMarkdown)
 
         val inlineSummary = buildSpilloverSummary(
-            slug = slug,
-            spilloverPath = spilloverPath,
-            fullBytes = fullBytes,
-            scopeFiles = scope.files,
-            scopeModules = scope.modules,
-            collidingPlans = scope.collidingPlans,
-            aciScore = aciScore,
-            isFastPath = isFastPath,
+            spilloverMeta = Triple(slug, spilloverPath, fullBytes),
+            scope = scope,
+            aciSummary = aciScore to isFastPath,
             topSkeletons = skeletons.take(3)
         )
 
@@ -301,53 +290,42 @@ class ArchitectContextEngine(
     }
 
     private fun buildFullMarkdown(
-        projectId: String,
-        seedTargets: List<String>,
-        scopeFiles: List<String>,
-        scopeModules: List<String>,
-        architecture: List<String>,
-        collidingPlans: List<String>,
-        godNodesTouched: List<String>,
-        aciScore: Double,
-        isFastPath: Boolean,
-        skeletons: List<String>,
-        callHierarchy: List<String>
+        headerTitle: String,
+        scope: ScopeRecommendation,
+        aciSummary: Pair<Double, Boolean>,
+        sections: Pair<List<String>, List<String>>
     ): String {
         val sb = StringBuilder()
-        sb.append("# Architect Context: ").append(seedTargets.firstOrNull() ?: projectId).append("\n\n")
-        appendConcurrencyBoundarySection(sb, scopeFiles, scopeModules, architecture, aciScore, isFastPath, collidingPlans, godNodesTouched)
-        appendSkeletonsSection(sb, skeletons)
-        appendCallHierarchySection(sb, callHierarchy)
+        sb.append("# Architect Context: ").append(headerTitle).append("\n\n")
+        appendConcurrencyBoundarySection(sb, scope, aciSummary.first, aciSummary.second)
+        appendSkeletonsSection(sb, sections.first)
+        appendCallHierarchySection(sb, sections.second)
         return sb.toString().trimEnd()
     }
 
     private fun appendConcurrencyBoundarySection(
         sb: StringBuilder,
-        scopeFiles: List<String>,
-        scopeModules: List<String>,
-        architecture: List<String>,
+        scope: ScopeRecommendation,
         aciScore: Double,
-        isFastPath: Boolean,
-        collidingPlans: List<String>,
-        godNodesTouched: List<String>
+        isFastPath: Boolean
     ) {
         sb.append("## 1. 3D Concurrency Boundary\n")
-        appendBoundaryFiles(sb, scopeFiles)
-        sb.append("- **Modules (").append(scopeModules.size).append(")**: ")
-        sb.append(if (scopeModules.isNotEmpty()) scopeModules.joinToString(", ") else "root").append("\n")
+        appendBoundaryFiles(sb, scope.files)
+        sb.append("- **Modules (").append(scope.modules.size).append(")**: ")
+        sb.append(if (scope.modules.isNotEmpty()) scope.modules.joinToString(", ") else "root").append("\n")
         sb.append("- **Semiotic / Arch Layers**: ")
-        sb.append(if (architecture.isNotEmpty()) architecture.joinToString(", ") else "unclassified").append("\n")
+        sb.append(if (scope.architecture.isNotEmpty()) scope.architecture.joinToString(", ") else "unclassified").append("\n")
         sb.append("- **ACI Complexity Score**: ").append(aciScore)
         sb.append(" (Fast Path: ").append(if (isFastPath) "YES <= 5.0" else "NO -> Multi-Agent Swarm").append(")\n")
 
-        if (collidingPlans.isNotEmpty()) {
-            sb.append("- **Active Plan Collisions**: ").append(collidingPlans.joinToString(", ")).append("\n")
+        if (scope.collidingPlans.isNotEmpty()) {
+            sb.append("- **Active Plan Collisions**: ").append(scope.collidingPlans.joinToString(", ")).append("\n")
         } else {
             sb.append("- **Plan Collisions**: None detected\n")
         }
 
-        if (godNodesTouched.isNotEmpty()) {
-            sb.append("- **God Nodes Touched**: ").append(godNodesTouched.joinToString(", ")).append("\n")
+        if (scope.godNodesTouched.isNotEmpty()) {
+            sb.append("- **God Nodes Touched**: ").append(scope.godNodesTouched.joinToString(", ")).append("\n")
         }
         sb.append("\n")
     }
@@ -379,16 +357,16 @@ class ArchitectContextEngine(
     }
 
     private fun buildSpilloverSummary(
-        slug: String,
-        spilloverPath: String,
-        fullBytes: Int,
-        scopeFiles: List<String>,
-        scopeModules: List<String>,
-        collidingPlans: List<String>,
-        aciScore: Double,
-        isFastPath: Boolean,
+        spilloverMeta: Triple<String, String, Int>,
+        scope: ScopeRecommendation,
+        aciSummary: Pair<Double, Boolean>,
         topSkeletons: List<String>
     ): String {
+        val (slug, spilloverPath, fullBytes) = spilloverMeta
+        val (aciScore, isFastPath) = aciSummary
+        val scopeFiles = scope.files
+        val scopeModules = scope.modules
+        val collidingPlans = scope.collidingPlans
         val sb = StringBuilder()
         val kbSize = (fullBytes / 1024.0 * 10).roundToInt() / 10.0
         sb.append("# Architect Context: ").append(slug).append(" (Spilled to Disk)\n\n")

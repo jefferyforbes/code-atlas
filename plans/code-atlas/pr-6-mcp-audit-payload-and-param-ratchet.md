@@ -6,11 +6,11 @@ contract:
   task: pr-6-mcp-audit-payload-and-param-ratchet
   objective: Bound MCP atlas_audit complexity violation payloads to prevent 32KB spillovers, encapsulate 11-15 parameter functions, and enforce param_high_ratchet in complexity-baseline.json.
 
-status: planned # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: executing # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
 
 size:
   complexity: medium
-  expected_files: 8
+  expected_files: 11
   expected_modules: 1
   expected_tests: 4
 
@@ -35,11 +35,17 @@ scope:
     - src/macosArm64Main/kotlin/atlas/mcp/AtlasMcpServer.kt
     - src/macosArm64Main/kotlin/atlas/cli/AtlasCli.kt
     - src/macosArm64Main/kotlin/atlas/extract/ComposeStabilityExtractor.kt
+    - src/macosArm64Main/kotlin/atlas/extract/PolyglotAstExtractor.kt
+    - src/macosArm64Main/kotlin/atlas/extract/FigmaSnapshotExtractor.kt
     - src/macosArm64Main/kotlin/atlas/engine/ArchitectureRemediationEngine.kt
+    - src/macosArm64Main/kotlin/atlas/engine/ArchitectContextEngine.kt
     - src/macosArm64Main/kotlin/atlas/engine/AutonomousRemediationVerifier.kt
+    - src/macosArm64Main/kotlin/atlas/engine/ComplexityDoctorEngine.kt
     - src/macosArm64Main/kotlin/atlas/db/SqliteGraphStore.kt
     - complexity-baseline.json
     - src/macosArm64Test/kotlin/atlas/EngineAndMcpTest.kt
+    - src/macosArm64Test/kotlin/atlas/engine/ComplexityRatchetTest.kt
+    - plans/code-atlas/pr-5-zero-cognitive-complexity.md
     - plans/code-atlas/pr-6-mcp-audit-payload-and-param-ratchet.md
   modules:
     - :macosArm64Main

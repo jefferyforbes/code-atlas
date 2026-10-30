@@ -467,70 +467,74 @@ class ArchitectureRemediationEngine(
         )
     }
 
+    private data class AstSplitRequest(
+        val projectId: String,
+        val relPath: String,
+        val root: String,
+        val fullPath: String,
+        val originalContent: String,
+        val ext: String,
+        val lang: String,
+        val primaryNode: GraphNode,
+        val secondaryNodes: List<GraphNode>,
+        val targetRenameRelPath: String?,
+        val dryRun: Boolean,
+        val testCommand: String?
+    )
+
     private fun applyOrDryRun(
-        dryRun: Boolean,
-        root: String,
-        fullPath: String,
+        req: AstSplitRequest,
         primaryNewFullPath: String,
-        targetRenameRelPath: String?,
         cleanModified: String,
-        originalContent: String,
         spawnedFiles: List<SpawnedFileRecord>,
-        testCommand: String?,
         details: MutableList<String>
     ): Boolean {
-        if (!dryRun) {
-            return applyFilesAndRunTest(root, fullPath, primaryNewFullPath, targetRenameRelPath, cleanModified, originalContent, spawnedFiles, testCommand, details)
+        if (!req.dryRun) {
+            return applyFilesAndRunTest(
+                req.root, req.fullPath, primaryNewFullPath, req.targetRenameRelPath,
+                cleanModified, req.originalContent, spawnedFiles, req.testCommand, details
+            )
         }
         details.add("Dry-run mode: verified AST valid and Single Declaration compliant without modifying disk.")
         return true
     }
 
     private fun executeAstSplitRemediation(
-        projectId: String,
-        relPath: String,
-        root: String,
-        fullPath: String,
-        originalContent: String,
-        ext: String,
-        lang: String,
-        primaryNode: GraphNode,
-        secondaryNodes: List<GraphNode>,
-        targetRenameRelPath: String?,
-        dryRun: Boolean,
-        testCommand: String?,
+        req: AstSplitRequest,
         details: MutableList<String>
     ): ArchitectureRemediationPrescription {
-        val dir = if (relPath.contains('/')) relPath.substringBeforeLast('/') else ""
-        val collisionPrescription = checkCollision(root, dir, ext, targetRenameRelPath, secondaryNodes, relPath, primaryNode)
+        val dir = if (req.relPath.contains('/')) req.relPath.substringBeforeLast('/') else ""
+        val collisionPrescription = checkCollision(
+            req.root, dir, req.ext, req.targetRenameRelPath,
+            req.secondaryNodes, req.relPath, req.primaryNode
+        )
         if (collisionPrescription != null) return collisionPrescription
 
-        val originalLines = originalContent.lines()
+        val originalLines = req.originalContent.lines()
         val workingLines = originalLines.toMutableList()
-        val (headerLines, importLines) = extractHeaderAndImports(originalLines, ext)
-        val spawnedFiles = extractSpawnedFiles(workingLines, secondaryNodes, dir, ext, headerLines, importLines)
+        val (headerLines, importLines) = extractHeaderAndImports(originalLines, req.ext)
+        val spawnedFiles = extractSpawnedFiles(workingLines, req.secondaryNodes, dir, req.ext, headerLines, importLines)
 
         val rawModified = workingLines.joinToString("\n")
         val cleanModified = Regex("""\n{3,}""").replace(rawModified, "\n\n").trimEnd() + "\n"
-        val effectiveRelPath = targetRenameRelPath ?: relPath
+        val effectiveRelPath = req.targetRenameRelPath ?: req.relPath
 
-        val astValid = verifyAstSplits(projectId, effectiveRelPath, cleanModified, spawnedFiles, lang, details)
+        val astValid = verifyAstSplits(req.projectId, effectiveRelPath, cleanModified, spawnedFiles, req.lang, details)
         if (!astValid) {
-            return buildInvalidAstPrescription(relPath, primaryNode, secondaryNodes, spawnedFiles, details)
+            return buildInvalidAstPrescription(req.relPath, req.primaryNode, req.secondaryNodes, spawnedFiles, details)
         }
 
-        val diffPreview = buildDiffPreview(relPath, originalContent, cleanModified, spawnedFiles, renamedTo = targetRenameRelPath)
-        val primaryNewFullPath = if (targetRenameRelPath != null) "$root/$targetRenameRelPath" else fullPath
-        val testsPreserved = applyOrDryRun(
-            dryRun, root, fullPath, primaryNewFullPath, targetRenameRelPath,
-            cleanModified, originalContent, spawnedFiles, testCommand, details
+        val diffPreview = buildDiffPreview(
+            req.relPath, req.originalContent, cleanModified, spawnedFiles, renamedTo = req.targetRenameRelPath
         )
+        val primaryNewFullPath = if (req.targetRenameRelPath != null) "${req.root}/${req.targetRenameRelPath}" else req.fullPath
+        val testsPreserved = applyOrDryRun(req, primaryNewFullPath, cleanModified, spawnedFiles, details)
 
         val success = astValid && testsPreserved
-        val applied = !dryRun && success
+        val applied = !req.dryRun && success
         return buildFinalSplitPrescription(
-            relPath, primaryNode, secondaryNodes, spawnedFiles, diffPreview,
-            targetRenameRelPath, success, applied, details
+            req.relPath, req.primaryNode, req.secondaryNodes, spawnedFiles, diffPreview,
+            req.targetRenameRelPath, success, applied, details
         )
     }
 
@@ -574,8 +578,21 @@ class ArchitectureRemediationEngine(
         }
 
         return executeAstSplitRemediation(
-            projectId, relPath, root, fullPath, content, ext, lang,
-            primaryNode, secondaryNodes, targetRenameRelPath, dryRun, testCommand, details
+            AstSplitRequest(
+                projectId = projectId,
+                relPath = relPath,
+                root = root,
+                fullPath = fullPath,
+                originalContent = content,
+                ext = ext,
+                lang = lang,
+                primaryNode = primaryNode,
+                secondaryNodes = secondaryNodes,
+                targetRenameRelPath = targetRenameRelPath,
+                dryRun = dryRun,
+                testCommand = testCommand
+            ),
+            details
         )
     }
 

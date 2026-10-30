@@ -206,6 +206,33 @@ class ComposeStabilityExtractor {
         val isSkippable: Boolean
     )
 
+    private data class ComposeFileContext(
+        val sourceText: String,
+        val masked: String,
+        val lineOffsets: IntArray,
+        val fileId: String,
+        val projectSlug: String,
+        val relPath: String,
+        val pkg: String,
+        val sourceSet: String,
+        val stabilityPatterns: List<Regex>,
+        val localClassStability: Map<String, Pair<String, String>>,
+        val workspaceNodes: List<GraphNode>,
+        val hasPreviewInFile: Boolean
+    )
+
+    private data class ComposableDeclContext(
+        val nodeId: String,
+        val fqName: String,
+        val funName: String,
+        val startLine: Int,
+        val header: ComposableHeaderFlags,
+        val slices: ComposableSlices,
+        val parsedParams: List<ComposeParamRecord>,
+        val modFlags: ModifierParamFlags,
+        val metrics: ComposableStabilityMetrics
+    )
+
     private fun resolveReceiverStability(
         receiverType: String,
         pkg: String,
@@ -249,39 +276,30 @@ class ComposeStabilityExtractor {
     }
 
     private fun buildComposeNodeRecord(
-        nodeId: String,
-        projectSlug: String,
-        fqName: String,
-        relPath: String,
-        startLine: Int,
-        endLine: Int,
-        sourceSet: String,
-        returnsUnit: Boolean,
-        header: ComposableHeaderFlags,
-        modFlags: ModifierParamFlags,
-        metrics: ComposableStabilityMetrics,
+        fileCtx: ComposeFileContext,
+        declCtx: ComposableDeclContext,
         dominantProv: String,
         violationMask: Int
     ): ComposeNodeRecord {
         return ComposeNodeRecord(
-            nodeId = nodeId,
-            projectSlug = projectSlug,
-            fqName = fqName,
-            filePath = relPath,
-            startLine = startLine,
-            endLine = endLine,
-            sourceSet = sourceSet,
-            isRestartable = metrics.isRestartable,
-            isSkippable = metrics.isSkippable,
-            isReadonly = header.isReadonly,
-            isInline = header.isInline,
-            returnsUnit = returnsUnit,
-            hasModifierParam = modFlags.hasModifierParam,
-            modifierIsFirstOptional = modFlags.modifierIsFirstOptional,
-            modifierHasDefault = modFlags.modifierHasDefault,
-            unstableParamCount = metrics.usedUnstableCount,
-            runtimeParamCount = metrics.usedRuntimeCount,
-            receiverStability = metrics.receiverStability,
+            nodeId = declCtx.nodeId,
+            projectSlug = fileCtx.projectSlug,
+            fqName = declCtx.fqName,
+            filePath = fileCtx.relPath,
+            startLine = declCtx.startLine,
+            endLine = declCtx.slices.endLine,
+            sourceSet = fileCtx.sourceSet,
+            isRestartable = declCtx.metrics.isRestartable,
+            isSkippable = declCtx.metrics.isSkippable,
+            isReadonly = declCtx.header.isReadonly,
+            isInline = declCtx.header.isInline,
+            returnsUnit = declCtx.slices.returnsUnit,
+            hasModifierParam = declCtx.modFlags.hasModifierParam,
+            modifierIsFirstOptional = declCtx.modFlags.modifierIsFirstOptional,
+            modifierHasDefault = declCtx.modFlags.modifierHasDefault,
+            unstableParamCount = declCtx.metrics.usedUnstableCount,
+            runtimeParamCount = declCtx.metrics.usedRuntimeCount,
+            receiverStability = declCtx.metrics.receiverStability,
             provenance = dominantProv,
             violationMask = violationMask
         )
@@ -414,23 +432,32 @@ class ComposeStabilityExtractor {
      * Computes the 12-rule Compose violation bitmask for a composable function.
      */
     private fun computeComposableViolationMask(
-        isRestartable: Boolean,
-        isSkippable: Boolean,
-        usedUnstableCount: Int,
-        parsedParams: List<ComposeParamRecord>,
-        maskedBodySlice: String,
-        rawBodySlice: String,
-        funName: String,
-        returnsUnit: Boolean,
-        isPrivate: Boolean,
-        isPreview: Boolean,
-        modifierFlags: ModifierParamFlags,
-        hasPreviewInFile: Boolean
+        fileCtx: ComposeFileContext,
+        declCtx: ComposableDeclContext
     ): Int {
-        return computeStabilityViolationBits(isRestartable, isSkippable, usedUnstableCount, parsedParams) or
-            computeStateViolationBits(maskedBodySlice, parsedParams) or
-            computeApiViolationBits(maskedBodySlice, funName, isPrivate, isPreview, returnsUnit, modifierFlags, parsedParams) or
-            computePerfAndArchViolationBits(maskedBodySlice, rawBodySlice, funName, isPreview, hasPreviewInFile)
+        return computeStabilityViolationBits(
+            declCtx.metrics.isRestartable,
+            declCtx.metrics.isSkippable,
+            declCtx.metrics.usedUnstableCount,
+            declCtx.parsedParams
+        ) or
+            computeStateViolationBits(declCtx.slices.maskedBodySlice, declCtx.parsedParams) or
+            computeApiViolationBits(
+                declCtx.slices.maskedBodySlice,
+                declCtx.funName,
+                declCtx.header.isPrivate,
+                declCtx.header.isPreview,
+                declCtx.slices.returnsUnit,
+                declCtx.modFlags,
+                declCtx.parsedParams
+            ) or
+            computePerfAndArchViolationBits(
+                declCtx.slices.maskedBodySlice,
+                declCtx.slices.rawBodySlice,
+                declCtx.funName,
+                declCtx.header.isPreview,
+                fileCtx.hasPreviewInFile
+            )
     }
 
     private fun extractCompositionLocalEdges(
@@ -530,34 +557,28 @@ class ComposeStabilityExtractor {
     }
 
     private fun extractComposableSemanticEdges(
-        nodeId: String,
-        projectSlug: String,
-        funName: String,
-        startLine: Int,
-        bodyOpenBraceIdx: Int,
-        maskedBodySlice: String,
-        lineOffsets: IntArray,
-        parsedParams: List<ComposeParamRecord>,
-        isExpect: Boolean,
-        isActual: Boolean,
+        fileCtx: ComposeFileContext,
+        declCtx: ComposableDeclContext,
         composeEdges: MutableList<GraphEdge>
     ): Boolean {
         var hasUnstableForwarding = false
-        val unstableParamNames = parsedParams
+        val unstableParamNames = declCtx.parsedParams
             .filter { it.stability in setOf("UNSTABLE", "RUNTIME", "UNCERTAIN") }
             .map { it.paramName }
             .toSet()
 
+        val maskedBodySlice = declCtx.slices.maskedBodySlice
+        val bodyOpenBraceIdx = declCtx.slices.bodyOpenBraceIdx
         for (callMatch in COMPOSE_CALL_RE.findAll(maskedBodySlice)) {
             val calleeName = callMatch.groupValues[1]
-            if (calleeName == funName || calleeName in PRIMITIVE_STABLE_TYPES) continue
+            if (calleeName == declCtx.funName || calleeName in PRIMITIVE_STABLE_TYPES) continue
             val callOffset = bodyOpenBraceIdx + callMatch.range.first
-            val callLine = lineForOffset(lineOffsets, callOffset)
+            val callLine = lineForOffset(fileCtx.lineOffsets, callOffset)
             composeEdges.add(
                 GraphEdge(
-                    edgeId = "$nodeId:calls_composable:$calleeName:$callLine",
-                    projectId = projectSlug,
-                    sourceNodeId = nodeId,
+                    edgeId = "${declCtx.nodeId}:calls_composable:$calleeName:$callLine",
+                    projectId = fileCtx.projectSlug,
+                    sourceNodeId = declCtx.nodeId,
                     targetNodeId = "sym:$calleeName",
                     edgeType = "CALLS_COMPOSABLE",
                     provenance = "EXTRACTED_AST",
@@ -570,20 +591,20 @@ class ComposeStabilityExtractor {
             }
         }
 
-        extractCompositionLocalEdges(nodeId, projectSlug, bodyOpenBraceIdx, maskedBodySlice, lineOffsets, composeEdges)
-        extractStateAndPropertyEdges(nodeId, projectSlug, bodyOpenBraceIdx, maskedBodySlice, lineOffsets, composeEdges)
+        extractCompositionLocalEdges(declCtx.nodeId, fileCtx.projectSlug, bodyOpenBraceIdx, maskedBodySlice, fileCtx.lineOffsets, composeEdges)
+        extractStateAndPropertyEdges(declCtx.nodeId, fileCtx.projectSlug, bodyOpenBraceIdx, maskedBodySlice, fileCtx.lineOffsets, composeEdges)
 
-        if (isExpect || isActual) {
+        if (declCtx.header.isExpect || declCtx.header.isActual) {
             composeEdges.add(
                 GraphEdge(
-                    edgeId = "$nodeId:expect_actual:$funName:$startLine",
-                    projectId = projectSlug,
-                    sourceNodeId = nodeId,
-                    targetNodeId = "sym:$funName",
+                    edgeId = "${declCtx.nodeId}:expect_actual:${declCtx.funName}:${declCtx.startLine}",
+                    projectId = fileCtx.projectSlug,
+                    sourceNodeId = declCtx.nodeId,
+                    targetNodeId = "sym:${declCtx.funName}",
                     edgeType = "EXPECT_ACTUAL",
                     provenance = "EXTRACTED_AST",
                     confidence = 1.0,
-                    lineNumber = startLine
+                    lineNumber = declCtx.startLine
                 )
             )
         }
@@ -628,94 +649,65 @@ class ComposeStabilityExtractor {
 
     private fun parseSingleComposableDecl(
         composableMatch: MatchResult,
-        sourceText: String,
-        masked: String,
-        lineOffsets: IntArray,
-        fileId: String,
-        projectSlug: String,
-        relPath: String,
-        pkg: String,
-        sourceSet: String,
-        stabilityPatterns: List<Regex>,
-        localClassStability: Map<String, Pair<String, String>>,
-        workspaceNodes: List<GraphNode>,
-        hasPreviewInFile: Boolean,
+        fileCtx: ComposeFileContext,
         composeParams: MutableList<ComposeParamRecord>,
         composeEdges: MutableList<GraphEdge>
     ): ComposeNodeRecord? {
-        val prefixWindow = masked.substring(composableMatch.range.first, composableMatch.range.last)
+        val prefixWindow = fileCtx.masked.substring(composableMatch.range.first, composableMatch.range.last)
         if (Regex("""\bfun\b""").findAll(prefixWindow).count() != 1) return null
 
         val receiverType = composableMatch.groupValues[1].trim()
         val funName = composableMatch.groupValues[2].trim()
-        val startLine = lineForOffset(lineOffsets, composableMatch.range.first)
-        val header = extractHeaderFlags(masked, composableMatch, funName)
+        val startLine = lineForOffset(fileCtx.lineOffsets, composableMatch.range.first)
+        val header = extractHeaderFlags(fileCtx.masked, composableMatch, funName)
 
         val openParenIdx = composableMatch.range.last
-        val closeParenIdx = findBalancedCloseParen(masked, openParenIdx)
+        val closeParenIdx = findBalancedCloseParen(fileCtx.masked, openParenIdx)
         if (closeParenIdx < 0) return null
 
-        val slices = extractComposableSlices(sourceText, masked, openParenIdx, closeParenIdx, lineOffsets)
-        val nodeId = "$fileId#$funName"
-        val fqName = resolveFqName(pkg, funName)
+        val slices = extractComposableSlices(fileCtx.sourceText, fileCtx.masked, openParenIdx, closeParenIdx, fileCtx.lineOffsets)
+        val nodeId = "${fileCtx.fileId}#$funName"
+        val fqName = resolveFqName(fileCtx.pkg, funName)
 
         val parsedParams = parseParameters(
             nodeId = nodeId,
             rawParamSlice = slices.rawParamSlice,
             maskedParamSlice = slices.maskedParamSlice,
             maskedBodySlice = slices.maskedBodySlice,
-            pkg = pkg,
-            stabilityPatterns = stabilityPatterns,
-            localClassStability = localClassStability,
-            workspaceNodes = workspaceNodes
+            pkg = fileCtx.pkg,
+            stabilityPatterns = fileCtx.stabilityPatterns,
+            localClassStability = fileCtx.localClassStability,
+            workspaceNodes = fileCtx.workspaceNodes
         )
         composeParams.addAll(parsedParams)
 
-        val receiverStability = resolveReceiverStability(receiverType, pkg, stabilityPatterns, localClassStability, workspaceNodes)
+        val receiverStability = resolveReceiverStability(
+            receiverType, fileCtx.pkg, fileCtx.stabilityPatterns, fileCtx.localClassStability, fileCtx.workspaceNodes
+        )
         val (usedUnstableCount, usedRuntimeCount) = countUnstableAndRuntimeParams(parsedParams)
         val metrics = computeStabilityMetrics(receiverStability, usedUnstableCount, usedRuntimeCount, header, slices.returnsUnit)
         val modFlags = analyzeModifierParams(parsedParams)
 
-        var violationMask = computeComposableViolationMask(
-            isRestartable = metrics.isRestartable,
-            isSkippable = metrics.isSkippable,
-            usedUnstableCount = metrics.usedUnstableCount,
-            parsedParams = parsedParams,
-            maskedBodySlice = slices.maskedBodySlice,
-            rawBodySlice = slices.rawBodySlice,
+        val declCtx = ComposableDeclContext(
+            nodeId = nodeId,
+            fqName = fqName,
             funName = funName,
-            returnsUnit = slices.returnsUnit,
-            isPrivate = header.isPrivate,
-            isPreview = header.isPreview,
-            modifierFlags = modFlags,
-            hasPreviewInFile = hasPreviewInFile
+            startLine = startLine,
+            header = header,
+            slices = slices,
+            parsedParams = parsedParams,
+            modFlags = modFlags,
+            metrics = metrics
         )
 
-        val hasUnstableForwarding = extractComposableSemanticEdges(
-            nodeId, projectSlug, funName, startLine, slices.bodyOpenBraceIdx,
-            slices.maskedBodySlice, lineOffsets, parsedParams, header.isExpect, header.isActual, composeEdges
-        )
+        var violationMask = computeComposableViolationMask(fileCtx, declCtx)
+        val hasUnstableForwarding = extractComposableSemanticEdges(fileCtx, declCtx, composeEdges)
         if (hasUnstableForwarding) {
             violationMask = violationMask or BIT_STAB_003
         }
 
         val dominantProv = resolveDominantProvenance(parsedParams)
-
-        return buildComposeNodeRecord(
-            nodeId = nodeId,
-            projectSlug = projectSlug,
-            fqName = fqName,
-            relPath = relPath,
-            startLine = startLine,
-            endLine = slices.endLine,
-            sourceSet = sourceSet,
-            returnsUnit = slices.returnsUnit,
-            header = header,
-            modFlags = modFlags,
-            metrics = metrics,
-            dominantProv = dominantProv,
-            violationMask = violationMask
-        )
+        return buildComposeNodeRecord(fileCtx, declCtx, dominantProv, violationMask)
     }
 
     fun extractKotlinFile(
@@ -736,6 +728,20 @@ class ComposeStabilityExtractor {
             projectSlug, relPath, sourceText, masked, stabilityPatterns, workspaceNodes, precomputedClassStability
         )
         val hasPreviewInFile = Regex("""@Preview[A-Za-z0-9_]*""").containsMatchIn(masked)
+        val fileCtx = ComposeFileContext(
+            sourceText = sourceText,
+            masked = masked,
+            lineOffsets = lineOffsets,
+            fileId = fileId,
+            projectSlug = projectSlug,
+            relPath = relPath,
+            pkg = pkg,
+            sourceSet = sourceSet,
+            stabilityPatterns = stabilityPatterns,
+            localClassStability = localClassStability,
+            workspaceNodes = workspaceNodes,
+            hasPreviewInFile = hasPreviewInFile
+        )
 
         val composeNodes = mutableListOf<ComposeNodeRecord>()
         val composeParams = mutableListOf<ComposeParamRecord>()
@@ -743,11 +749,7 @@ class ComposeStabilityExtractor {
 
         val composableFunRe = Regex("""@Composable\b[\s\S]*?\bfun\s+(?:<[^>]+>\s*)?(?:([A-Za-z0-9_.<>?]+)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(""")
         for (declMatch in composableFunRe.findAll(masked)) {
-            val record = parseSingleComposableDecl(
-                declMatch, sourceText, masked, lineOffsets, fileId, projectSlug,
-                relPath, pkg, sourceSet, stabilityPatterns, localClassStability,
-                workspaceNodes, hasPreviewInFile, composeParams, composeEdges
-            ) ?: continue
+            val record = parseSingleComposableDecl(declMatch, fileCtx, composeParams, composeEdges) ?: continue
             composeNodes.add(record)
         }
 

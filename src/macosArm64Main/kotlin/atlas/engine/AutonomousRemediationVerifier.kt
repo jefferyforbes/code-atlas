@@ -465,6 +465,20 @@ class AutonomousRemediationVerifier(
         return checkComplexityReduction(ruleId, targetNodeId, expectedReductionPercent, astResult.origNodes, astResult.nodes, details)
     }
 
+    data class VerificationRequest(
+        val projectSlug: String,
+        val relPath: String,
+        val beforeSnippet: String,
+        val afterSnippet: String,
+        val ruleId: String = "GENERIC",
+        val targetNodeId: String? = null,
+        val writeSiteSafe: Boolean = true,
+        val dryRun: Boolean = true,
+        val testCommand: String? = null,
+        val testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null,
+        val expectedReductionPercent: Double? = null
+    )
+
     fun verifyAndApply(
         projectSlug: String,
         relPath: String,
@@ -477,56 +491,72 @@ class AutonomousRemediationVerifier(
         testCommand: String? = null,
         testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null,
         expectedReductionPercent: Double? = null
-    ): RemediationVerificationResult {
+    ): RemediationVerificationResult = verifyAndApply(
+        VerificationRequest(
+            projectSlug = projectSlug,
+            relPath = relPath,
+            beforeSnippet = beforeSnippet,
+            afterSnippet = afterSnippet,
+            ruleId = ruleId,
+            targetNodeId = targetNodeId,
+            writeSiteSafe = writeSiteSafe,
+            dryRun = dryRun,
+            testCommand = testCommand,
+            testVerifier = testVerifier,
+            expectedReductionPercent = expectedReductionPercent
+        )
+    )
+
+    fun verifyAndApply(req: VerificationRequest): RemediationVerificationResult {
         val root = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
-        val fullPath = if (relPath.startsWith("/")) relPath else "$root/$relPath"
+        val fullPath = if (req.relPath.startsWith("/")) req.relPath else "$root/${req.relPath}"
         val details = mutableListOf<String>()
 
         val (originalContent, preFlightErr) = validatePreFlight(
-            projectSlug, fullPath, relPath, beforeSnippet, ruleId, writeSiteSafe, details
+            req.projectSlug, fullPath, req.relPath, req.beforeSnippet, req.ruleId, req.writeSiteSafe, details
         )
         if (preFlightErr != null) return preFlightErr
 
         val (modifiedContent, stageErr) = stageReplacement(
-            originalContent!!, beforeSnippet, afterSnippet, relPath, ruleId, details
+            originalContent!!, req.beforeSnippet, req.afterSnippet, req.relPath, req.ruleId, details
         )
         if (stageErr != null) return stageErr
 
-        val astResult = validateAstIntegrity(projectSlug, relPath, originalContent, modifiedContent!!, details)
+        val astResult = validateAstIntegrity(req.projectSlug, req.relPath, originalContent, modifiedContent!!, details)
         if (!astResult.astValid) {
             val msg = "Post-remediation verification failed: Modified source produces an invalid AST."
-            return failResult("POST_VERIFICATION", ruleId, relPath, msg, details, preFlightPassed = true)
+            return failResult("POST_VERIFICATION", req.ruleId, req.relPath, msg, details, preFlightPassed = true)
         }
 
         val checksPassed = verifyRulesAndInvariants(
-            projectSlug, relPath, originalContent, modifiedContent, ruleId,
-            targetNodeId, expectedReductionPercent, astResult, details
+            req.projectSlug, req.relPath, originalContent, modifiedContent, req.ruleId,
+            req.targetNodeId, req.expectedReductionPercent, astResult, details
         )
         if (!checksPassed) {
             val msg = "Post-remediation verification failed: Checks did not pass post-remediation."
-            return failResult("POST_VERIFICATION", ruleId, relPath, msg, details, preFlightPassed = true, astValid = true)
+            return failResult("POST_VERIFICATION", req.ruleId, req.relPath, msg, details, preFlightPassed = true, astValid = true)
         }
 
         val testsPreserved = verifyTestSuitePreservation(
-            fullPath, relPath, originalContent, modifiedContent, testCommand, testVerifier, dryRun, details
+            fullPath, req.relPath, originalContent, modifiedContent, req.testCommand, req.testVerifier, req.dryRun, details
         )
         if (!testsPreserved) {
             val msg = "Post-remediation verification failed: Test suite preservation check failed."
-            return failResult("POST_VERIFICATION", ruleId, relPath, msg, details, preFlightPassed = true, astValid = true, checksPassed = true)
+            return failResult("POST_VERIFICATION", req.ruleId, req.relPath, msg, details, preFlightPassed = true, astValid = true, checksPassed = true)
         }
 
-        val writeErr = commitRemediation(fullPath, relPath, modifiedContent, testCommand, dryRun, details)
+        val writeErr = commitRemediation(fullPath, req.relPath, modifiedContent, req.testCommand, req.dryRun, details)
         if (writeErr != null) {
-            return failResult("APPLICATION", ruleId, relPath, writeErr, details, preFlightPassed = true, astValid = true, checksPassed = true, testsPreserved = true)
+            return failResult("APPLICATION", req.ruleId, req.relPath, writeErr, details, preFlightPassed = true, astValid = true, checksPassed = true, testsPreserved = true)
         }
 
-        val diffSnippet = formatUnifiedDiff(relPath, beforeSnippet, afterSnippet)
-        val successMsg = if (dryRun) "Remediation verified successfully (dry-run)." else "Remediation verified and applied successfully."
+        val diffSnippet = formatUnifiedDiff(req.relPath, req.beforeSnippet, req.afterSnippet)
+        val successMsg = if (req.dryRun) "Remediation verified successfully (dry-run)." else "Remediation verified and applied successfully."
         return RemediationVerificationResult(
             valid = true,
             phase = "COMPLETED",
-            ruleId = ruleId,
-            filePath = relPath,
+            ruleId = req.ruleId,
+            filePath = req.relPath,
             preFlightPassed = true,
             astValid = true,
             checksPassed = true,

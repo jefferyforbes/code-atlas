@@ -548,5 +548,81 @@ class ComplexityRatchetTest {
             cleanDir(tempDir)
         }
     }
+
+    @Test
+    fun testMcpAuditViolationCappingAndParamHighRatchet() {
+        val tempDir = makeTempDir()
+        val dbPath = makeTempDb()
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val nodes = (1..65).map { idx ->
+                GraphNode(
+                    nodeId = "proj:src/File$idx.kt#fn$idx",
+                    projectId = "proj",
+                    fileId = "proj:src/File$idx.kt",
+                    name = "fn$idx",
+                    qualifiedName = "atlas.sample.fn$idx",
+                    kind = "function",
+                    startLine = 1,
+                    endLine = 15,
+                    signature = if (idx <= 3) {
+                        "fun fn$idx(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int, i: Int)"
+                    } else {
+                        "fun fn$idx(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int)"
+                    },
+                    cognitiveComplexity = 4,
+                    cyclomaticComplexity = 3
+                )
+            }
+            store.upsertNodesAndEdges("proj", nodes, emptyList())
+
+            val server = AtlasMcpServer(workspaceRoot = tempDir, customDbPath = dbPath)
+
+            // 1. Default limit=50 caps returned violations while preserving exact advisory_count and param_high_count
+            val resDefault = server.callTool("atlas_audit", buildJsonObject {
+                put("action", "audit_complexity")
+                put("project", "proj")
+            })
+            assertFalse(resDefault["spillover"]?.jsonPrimitive?.booleanOrNull ?: false, "Capped payload must not trigger spillover")
+            assertEquals(0, resDefault["total_violations"]?.jsonPrimitive?.intOrNull)
+            assertEquals(65, resDefault["advisory_count"]?.jsonPrimitive?.intOrNull)
+            assertEquals(3, resDefault["param_high_count"]?.jsonPrimitive?.intOrNull)
+            assertEquals(50, resDefault["returned_violations"]?.jsonPrimitive?.intOrNull)
+
+            // 2. param_high_ratchet = 3 -> passes
+            val resParamPass = server.callTool("atlas_audit", buildJsonObject {
+                put("action", "audit_complexity")
+                put("project", "proj")
+                put("param_high_ratchet", 3)
+            })
+            assertTrue(resParamPass["passed"]?.jsonPrimitive?.booleanOrNull ?: false)
+            assertEquals(3, resParamPass["param_high_ratchet"]?.jsonPrimitive?.intOrNull)
+            assertEquals(0, resParamPass["param_high_delta"]?.jsonPrimitive?.intOrNull)
+
+            // 3. param_high_ratchet = 2 -> fails because 3 HIGH parameter violations > 2
+            val resParamFail = server.callTool("atlas_audit", buildJsonObject {
+                put("action", "audit_complexity")
+                put("project", "proj")
+                put("param_high_ratchet", 2)
+            })
+            assertFalse(resParamFail["passed"]?.jsonPrimitive?.booleanOrNull ?: true)
+            assertEquals(2, resParamFail["param_high_ratchet"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, resParamFail["param_high_delta"]?.jsonPrimitive?.intOrNull)
+
+            // 4. verify_architecture also caps complexityViolations to limit and avoids spillover
+            val resArch = server.callTool("atlas_audit", buildJsonObject {
+                put("action", "verify_architecture")
+                put("project", "proj")
+            })
+            assertFalse(resArch["spillover"]?.jsonPrimitive?.booleanOrNull ?: false)
+            assertEquals(65, resArch["total_complexity_violations"]?.jsonPrimitive?.intOrNull)
+
+            server.close()
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+            cleanDir(tempDir)
+        }
+    }
 }
 
