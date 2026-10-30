@@ -6,7 +6,7 @@ contract:
   task: pr-7-sqlite-graph-store-dao-decomposition
   objective: Decompose the 4,568-line SqliteGraphStore into cohesive internal domain DAOs (FigmaGraphStoreDao, ComposeGraphStoreDao, GraphTraversalDao) while preserving the public SqliteGraphStore API and BOOST-003 compliance.
 
-status: executing # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: merged # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
 
 size:
   complexity: medium

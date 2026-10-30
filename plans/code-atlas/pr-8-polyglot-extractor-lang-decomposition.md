@@ -6,11 +6,11 @@ contract:
   task: pr-8-polyglot-extractor-lang-decomposition
   objective: Decompose the 3,792-line PolyglotAstExtractor into dedicated internal language extractors (KotlinAstExtractor, TypeScriptAstExtractor, PythonAstExtractor, NativeSystemsAstExtractor) while preserving PolyglotAstExtractor as the public facade.
 
-status: planned # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
+status: approved # planned | ready | queued | executing | review_pending | changes_requested | blocked | approved | merged | failed | cancelled
 
 size:
   complexity: medium
-  expected_files: 7
+  expected_files: 9
   expected_modules: 1
   expected_tests: 4
 
@@ -38,6 +38,8 @@ scope:
     - src/macosArm64Main/kotlin/atlas/extract/PythonAstExtractor.kt
     - src/macosArm64Main/kotlin/atlas/extract/NativeSystemsAstExtractor.kt
     - src/macosArm64Test/kotlin/atlas/PolyglotExtractorTest.kt
+    - complexity-baseline.json
+    - plans/code-atlas/pr-7-sqlite-graph-store-dao-decomposition.md
     - plans/code-atlas/pr-8-polyglot-extractor-lang-decomposition.md
   modules:
     - :macosArm64Main
