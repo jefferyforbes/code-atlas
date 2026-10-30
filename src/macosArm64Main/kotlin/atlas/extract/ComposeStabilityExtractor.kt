@@ -1381,39 +1381,44 @@ class ComposeStabilityExtractor {
         workspaceNodes: List<GraphNode>
     ): Pair<String, String> {
         val clean = typeSig.trim().removeSuffix("?").trim()
-        if (clean.isEmpty()) return "STABLE" to "PRIMITIVE_OR_STRING"
-        if (clean.contains("->")) return "STABLE" to "FUNCTION_TYPE"
+        val fastHit = inferFastPrimitiveOrFunctionStability(clean)
+        if (fastHit != null) return fastHit
 
         val outerType = clean.substringBefore('<').trim()
         val shortOuter = outerType.substringAfterLast('.')
-        if (shortOuter in PRIMITIVE_STABLE_TYPES) {
-            return "STABLE" to "PRIMITIVE_OR_STRING"
-        }
-
         val configPattern = matchStabilityConfig(outerType, shortOuter, pkg, stabilityPatterns)
         if (configPattern != null) {
             return "STABLE" to "STABILITY_CONFIG_MATCH:$configPattern"
         }
 
-        val genericArgs = if (clean.contains('<') && clean.endsWith('>')) {
-            splitTopLevelComma(clean.substringAfter('<').substringBeforeLast('>'))
-        } else emptyList()
-
+        val genericArgs = extractTopLevelGenericArgs(clean)
         val immutableHit = inferImmutableCollectionStability(
             outerType, shortOuter, genericArgs, pkg, stabilityPatterns, localClassStability, workspaceNodes
         )
-        if (immutableHit != null) return immutableHit
+        return immutableHit ?: inferFallbackTypeStability(outerType, shortOuter, localClassStability)
+    }
 
-        val collectionHit = inferCollectionOrMutableStability(outerType, shortOuter)
-        if (collectionHit != null) return collectionHit
+    private fun inferFastPrimitiveOrFunctionStability(clean: String): Pair<String, String>? {
+        if (clean.isEmpty()) return "STABLE" to "PRIMITIVE_OR_STRING"
+        if (clean.contains("->")) return "STABLE" to "FUNCTION_TYPE"
+        val shortOuter = clean.substringBefore('<').trim().substringAfterLast('.')
+        if (shortOuter in PRIMITIVE_STABLE_TYPES) return "STABLE" to "PRIMITIVE_OR_STRING"
+        return null
+    }
 
-        val localHit = localClassStability[shortOuter] ?: localClassStability[outerType]
-        if (localHit != null) return localHit
+    private fun extractTopLevelGenericArgs(clean: String): List<String> {
+        if (!clean.contains('<') || !clean.endsWith('>')) return emptyList()
+        return splitTopLevelComma(clean.substringAfter('<').substringBeforeLast('>'))
+    }
 
-        if (shortOuter == "State") {
-            return "STABLE" to "COMPOSE_STATE_WRAPPER"
-        }
-
+    private fun inferFallbackTypeStability(
+        outerType: String,
+        shortOuter: String,
+        localClassStability: Map<String, Pair<String, String>>
+    ): Pair<String, String> {
+        inferCollectionOrMutableStability(outerType, shortOuter)?.let { return it }
+        (localClassStability[shortOuter] ?: localClassStability[outerType])?.let { return it }
+        if (shortOuter == "State") return "STABLE" to "COMPOSE_STATE_WRAPPER"
         return "RUNTIME" to "EXTERNAL_MODULE_TYPE:$outerType"
     }
 

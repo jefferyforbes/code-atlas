@@ -25,6 +25,19 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
             "Micro-interaction spring physics and capacitive press state damping",
             "Dynamic multi-line text wrapping resilience and localized string safety"
         )
+        private val RULE_DEDUCTION_WEIGHTS = mapOf(
+            "CIRCULAR_V_FILL_IN_HUG" to 10.0,
+            "CIRCULAR_H_FILL_IN_HUG" to 10.0,
+            "STATIC_CONTAINER_FRAME" to 8.0,
+            "DEFAULT_100PX_FRAME_HEIGHT" to 5.0,
+            "MIN_TOUCH_TARGET" to 7.0,
+            "NEGATIVE_COORDINATES" to 5.0,
+            "CHILD_AMPUTATION_WIDTH" to 7.0,
+            "NO_EMOJI" to 5.0,
+            "AD_HOC_DETACHED_SPECIMEN" to 8.0,
+            "CANVAS_SPATIAL_TOPOLOGY" to 5.0,
+            "WCAG_CONTRAST" to 6.0
+        )
     }
 
     /**
@@ -167,38 +180,13 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
         for (v in violations) {
             if (v.rule == "UNBOUND_TOKENS") {
                 unboundViolationCount++
-                continue
-            }
-            deductions += when (v.rule) {
-                "CIRCULAR_V_FILL_IN_HUG", "CIRCULAR_H_FILL_IN_HUG" -> 10.0
-                "STATIC_CONTAINER_FRAME" -> 8.0
-                "DEFAULT_100PX_FRAME_HEIGHT" -> 5.0
-                "MIN_TOUCH_TARGET" -> 7.0
-                "NEGATIVE_COORDINATES" -> 5.0
-                "CHILD_AMPUTATION_WIDTH" -> 7.0
-                "NO_EMOJI" -> 5.0
-                "AD_HOC_DETACHED_SPECIMEN" -> 8.0
-                "CANVAS_SPATIAL_TOPOLOGY" -> 5.0
-                "WCAG_CONTRAST" -> 6.0
-                else -> 5.0
-            }
-        }
-
-        if (unboundViolationCount > 0) {
-            val totalNodes = store.countFigmaNodes(fileKey)
-            val unboundDeduction = if (totalNodes > 0) {
-                val ratio = unboundViolationCount.toDouble() / totalNodes.toDouble()
-                val excessPct = ((ratio - 0.05).coerceAtLeast(0.0)) * 100.0
-                min(25.0, 2.0 + excessPct)
             } else {
-                min(25.0, unboundViolationCount * 2.0)
+                deductions += RULE_DEDUCTION_WEIGHTS[v.rule] ?: 5.0
             }
-            deductions += unboundDeduction
         }
+        deductions += computeUnboundTokenDeduction(fileKey, unboundViolationCount)
 
-        val rawScore = 100.0 - deductions
-        val score = max(0.0, min(100.0, rawScore))
-
+        val score = (100.0 - deductions).coerceIn(0.0, 100.0)
         val resultViolations = violations.toMutableList()
         if (score < 80.0) {
             resultViolations.add(
@@ -211,6 +199,15 @@ class FigmaDesignAuditor(private val store: SqliteGraphStore) {
             )
         }
         return Pair(score, resultViolations)
+    }
+
+    private fun computeUnboundTokenDeduction(fileKey: String, unboundViolationCount: Int): Double {
+        if (unboundViolationCount <= 0) return 0.0
+        val totalNodes = store.countFigmaNodes(fileKey)
+        if (totalNodes <= 0) return min(25.0, unboundViolationCount * 2.0)
+        val ratio = unboundViolationCount.toDouble() / totalNodes.toDouble()
+        val excessPct = ((ratio - 0.05).coerceAtLeast(0.0)) * 100.0
+        return min(25.0, 2.0 + excessPct)
     }
 
     private fun normalizeSeedIdentifier(seed: String): String {
