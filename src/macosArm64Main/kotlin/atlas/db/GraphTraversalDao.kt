@@ -1,5 +1,6 @@
 package atlas.db
 
+import atlas.extract.ComplexityExtractor
 import atlas.extract.UrlTargetResolver
 import atlas.model.ComplexityScoreRecord
 import atlas.model.GraphEdge
@@ -9,7 +10,6 @@ import atlas.model.ImpactRadiusResult
 import atlas.model.LiveSourceSlice
 import atlas.util.PlatformFiles
 import atlas.util.Sha256
-import kotlin.math.ln
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.addJsonObject
@@ -748,14 +748,12 @@ internal class GraphTraversalDao(
                complexity_score
             FROM nodes
             WHERE project_id = ? AND kind IN ('function', 'method', 'composable') AND cognitive_complexity > 0
-            ORDER BY (cognitive_complexity * (1.0 + in_degree)) DESC
-            LIMIT ?;
+            ORDER BY cognitive_complexity DESC, in_degree DESC;
             """.trimIndent()
         )
         val results = mutableListOf<ComplexityScoreRecord>()
         try {
             stmt.bindString(1, projectId)
-            stmt.bindInt(2, (limit * 2).coerceAtLeast(100))
             while (stmt.step()) {
                 val rec = rowToComplexityScoreRecord(stmt)
                 if (rec.riskIndex >= minRisk) {
@@ -766,14 +764,6 @@ internal class GraphTraversalDao(
             stmt.close()
         }
         return results.sortedByDescending { it.riskIndex }.take(limit)
-    }
-
-    private fun scoreToGrade(score: Double): String = when {
-        score >= 90.0 -> "A"
-        score >= 80.0 -> "B"
-        score >= 70.0 -> "C"
-        score >= 60.0 -> "D"
-        else -> "F"
     }
 
     private fun rowToComplexityScoreRecord(stmt: NativeSqliteStatement): ComplexityScoreRecord {
@@ -793,8 +783,8 @@ internal class GraphTraversalDao(
             maxNesting = stmt.columnInt(8),
             inDegree = inDeg,
             overallScore = score,
-            grade = scoreToGrade(score),
-            riskIndex = cog.toDouble() * (1.0 + ln(1.0 + inDeg.toDouble()))
+            grade = ComplexityExtractor.computeGrade(score),
+            riskIndex = ComplexityExtractor.computeRiskIndex(cog, inDeg)
         )
     }
 }

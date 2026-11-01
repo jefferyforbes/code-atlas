@@ -103,82 +103,84 @@ class WorkspaceIndexer(
         return subpaths.any { cleanSp -> relStr == cleanSp || relStr.startsWith("$cleanSp/") }
     }
 
+    private data class DiscoveredFileMeta(
+        val filePath: String,
+        val relStr: String,
+        val ext: String,
+        val lang: String,
+        val isUnchanged: Boolean,
+        val sha256: String,
+        val mtime: Double
+    )
+
     private fun processMarkdownFile(
-        relStr: String,
-        filePath: String,
-        isUnchanged: Boolean,
-        sha256: String,
-        mtime: Double,
+        meta: DiscoveredFileMeta,
         rawBytes: ByteArray,
         projectId: String,
         scan: ScanCollector
     ) {
-        if (!isUnchanged) {
+        if (!meta.isUnchanged) {
             val sourceText = rawBytes.decodeToString()
-            scan.markdownQueue.add(Pair(relStr, sourceText))
+            scan.markdownQueue.add(Pair(meta.relStr, sourceText))
             store.upsertFileRecord(
                 SqliteGraphStore.FileRecordUpsert(
                     projectId = projectId,
-                    relPath = relStr,
+                    relPath = meta.relStr,
                     language = "markdown",
-                    moduleId = if (relStr.startsWith("plans/")) "plans" else "vault",
+                    moduleId = if (meta.relStr.startsWith("plans/")) "plans" else "vault",
                     sourceSet = "docs",
-                    semioticLayer = if (relStr.startsWith("plans/")) "syntactic" else "semantic",
+                    semioticLayer = if (meta.relStr.startsWith("plans/")) "syntactic" else "semantic",
                     archLayer = "infrastructure",
-                    sha256 = sha256,
-                    mtime = mtime,
+                    sha256 = meta.sha256,
+                    mtime = meta.mtime,
                     loc = sourceText.lines().size,
                     topLevelDeclCount = 1
                 )
             )
             scan.filesIndexed++
         } else {
-            scan.unchangedMarkdownQueue.add(Pair(relStr, filePath))
+            scan.unchangedMarkdownQueue.add(Pair(meta.relStr, meta.filePath))
             scan.filesSkipped++
         }
     }
 
     private fun processCodeFile(
-        relStr: String,
-        lang: String,
-        isUnchanged: Boolean,
-        sha256: String,
-        mtime: Double,
+        meta: DiscoveredFileMeta,
         rawBytes: ByteArray,
         ctx: WorkspaceScanContext,
         scan: ScanCollector
     ) {
-        val fileId = "${ctx.projectId}:$relStr"
-        if (isUnchanged && fileId in ctx.filesWithRawEdges) {
+        val fileId = "${ctx.projectId}:${meta.relStr}"
+        if (meta.isUnchanged && fileId in ctx.filesWithRawEdges) {
             scan.filesSkipped++
             return
         }
 
         val sourceText = rawBytes.decodeToString()
         val (fNodes, fEdges, topDeclCount) = PolyglotAstExtractor.extractFile(
-            ctx.projectId, relStr, sourceText, ctx.knownModules
+            ctx.projectId, meta.relStr, sourceText, ctx.knownModules
         )
-        val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
-        val modId = ModuleBoundaryDetector.resolveModuleId(relStr, ctx.knownModules)
-        val srcSet = SemioticLayerClassifier.detectSourceSet(relStr)
+        val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(meta.relStr)
+        val modId = ModuleBoundaryDetector.resolveModuleId(meta.relStr, ctx.knownModules)
+        val srcSet = SemioticLayerClassifier.detectSourceSet(meta.relStr)
 
         store.upsertFileRecord(
             SqliteGraphStore.FileRecordUpsert(
                 projectId = ctx.projectId,
-                relPath = relStr,
-                language = lang,
+                relPath = meta.relStr,
+                language = meta.lang,
                 moduleId = modId,
                 sourceSet = srcSet,
                 semioticLayer = semLayer,
                 archLayer = archLayer,
-                sha256 = sha256,
-                mtime = mtime,
+                sha256 = meta.sha256,
+                mtime = meta.mtime,
                 loc = sourceText.lines().size,
                 topLevelDeclCount = topDeclCount
             )
         )
-        if (lang == "kotlin") {
-            scan.pendingKotlinComposeFiles.add(Triple(relStr, sourceText, fEdges))
+        if (meta.lang == "kotlin") {
+            scan.pendingKotlinComposeFiles.add(Triple(meta.relStr, sourceText, fEdges))
         } else {
             scan.pendingRawEdges[fileId] = fEdges
         }
@@ -201,11 +203,12 @@ class WorkspaceIndexer(
         val rawBytes: ByteArray by lazy { PlatformFiles.readBytes(filePath) }
         val sha256 = if (mtimeUnchanged) cached.first else Sha256.digest(rawBytes)
         val isUnchanged = !ctx.effectiveForce && (mtimeUnchanged || (cached != null && cached.first == sha256))
+        val meta = DiscoveredFileMeta(filePath, relStr, ext, lang, isUnchanged, sha256, mtime)
 
         if (ext == ".md") {
-            processMarkdownFile(relStr, filePath, isUnchanged, sha256, mtime, rawBytes, ctx.projectId, scan)
+            processMarkdownFile(meta, rawBytes, ctx.projectId, scan)
         } else {
-            processCodeFile(relStr, lang, isUnchanged, sha256, mtime, rawBytes, ctx, scan)
+            processCodeFile(meta, rawBytes, ctx, scan)
         }
     }
 
@@ -289,13 +292,18 @@ class WorkspaceIndexer(
         }
     }
 
+    private data class ComposeFileSyncContext(
+        val projectId: String,
+        val fileId: String,
+        val relStr: String,
+        val modId: String,
+        val semLayer: String,
+        val archLayer: String
+    )
+
     private fun syncComposeNodeRecords(
         bundleNodes: List<ComposeNodeRecord>,
-        projectId: String,
-        fileId: String,
-        modId: String,
-        semLayer: String,
-        archLayer: String,
+        syncCtx: ComposeFileSyncContext,
         mergedNodeMap: MutableMap<String, GraphNode>,
         changedNodes: MutableList<GraphNode>
     ) {
@@ -307,18 +315,18 @@ class WorkspaceIndexer(
             } else {
                 GraphNode(
                     nodeId = cn.nodeId,
-                    projectId = projectId,
-                    fileId = fileId,
+                    projectId = syncCtx.projectId,
+                    fileId = syncCtx.fileId,
                     name = shortName,
                     qualifiedName = cn.fqName,
                     kind = "composable",
                     signature = "@Composable fun $shortName",
                     startLine = cn.startLine,
                     endLine = cn.endLine,
-                    moduleId = modId,
+                    moduleId = syncCtx.modId,
                     sourceSet = cn.sourceSet,
-                    semioticLayer = semLayer,
-                    archLayer = archLayer,
+                    semioticLayer = syncCtx.semLayer,
+                    archLayer = syncCtx.archLayer,
                     isTestDouble = false
                 )
             }
@@ -329,12 +337,7 @@ class WorkspaceIndexer(
 
     private fun syncComposeEdgeEntities(
         bundleEdges: List<GraphEdge>,
-        projectId: String,
-        fileId: String,
-        relStr: String,
-        modId: String,
-        semLayer: String,
-        archLayer: String,
+        syncCtx: ComposeFileSyncContext,
         mergedNodeMap: MutableMap<String, GraphNode>,
         changedNodes: MutableList<GraphNode>
     ) {
@@ -342,18 +345,18 @@ class WorkspaceIndexer(
             if (ce.sourceNodeId.endsWith("#file") && ce.sourceNodeId !in mergedNodeMap) {
                 val fileNode = GraphNode(
                     nodeId = ce.sourceNodeId,
-                    projectId = projectId,
-                    fileId = fileId,
-                    name = relStr.substringAfterLast('/'),
-                    qualifiedName = relStr,
+                    projectId = syncCtx.projectId,
+                    fileId = syncCtx.fileId,
+                    name = syncCtx.relStr.substringAfterLast('/'),
+                    qualifiedName = syncCtx.relStr,
                     kind = "file_scope",
-                    signature = relStr,
+                    signature = syncCtx.relStr,
                     startLine = 1,
                     endLine = 1,
-                    moduleId = modId,
-                    sourceSet = SemioticLayerClassifier.detectSourceSet(relStr),
-                    semioticLayer = semLayer,
-                    archLayer = archLayer
+                    moduleId = syncCtx.modId,
+                    sourceSet = SemioticLayerClassifier.detectSourceSet(syncCtx.relStr),
+                    semioticLayer = syncCtx.semLayer,
+                    archLayer = syncCtx.archLayer
                 )
                 mergedNodeMap[fileNode.nodeId] = fileNode
                 changedNodes.add(fileNode)
@@ -361,21 +364,21 @@ class WorkspaceIndexer(
             if (ce.edgeType in setOf("MUTATES_PROPERTY", "PROVIDES_COMPOSITION_LOCAL", "CONSUMES_COMPOSITION_LOCAL", "OBSERVES_STATE")) {
                 val symName = ce.targetNodeId.removePrefix("sym:")
                 if (mergedNodeMap.values.none { it.name == symName }) {
-                    val syntheticId = "$fileId#$symName"
+                    val syntheticId = "${syncCtx.fileId}#$symName"
                     val synNode = GraphNode(
                         nodeId = syntheticId,
-                        projectId = projectId,
-                        fileId = fileId,
+                        projectId = syncCtx.projectId,
+                        fileId = syncCtx.fileId,
                         name = symName,
                         qualifiedName = symName,
                         kind = "variable",
                         signature = symName,
                         startLine = ce.lineNumber,
                         endLine = ce.lineNumber,
-                        moduleId = modId,
-                        sourceSet = SemioticLayerClassifier.detectSourceSet(relStr),
-                        semioticLayer = semLayer,
-                        archLayer = archLayer
+                        moduleId = syncCtx.modId,
+                        sourceSet = SemioticLayerClassifier.detectSourceSet(syncCtx.relStr),
+                        semioticLayer = syncCtx.semLayer,
+                        archLayer = syncCtx.archLayer
                     )
                     mergedNodeMap[syntheticId] = synNode
                     changedNodes.add(synNode)
@@ -385,28 +388,25 @@ class WorkspaceIndexer(
     }
 
     private fun processComposeFiles(
-        projectId: String,
+        ctx: WorkspaceScanContext,
         stabilityPatterns: List<Regex>,
-        pendingKotlinComposeFiles: List<Triple<String, String, List<GraphEdge>>>,
-        mergedNodeMap: MutableMap<String, GraphNode>,
-        changedNodes: MutableList<GraphNode>,
-        knownModules: List<String>,
-        pendingRawEdges: MutableMap<String, List<GraphEdge>>
+        scan: ScanCollector,
+        mergedNodeMap: MutableMap<String, GraphNode>
     ): Pair<List<ComposeNodeRecord>, List<ComposeParamRecord>> {
         val workspaceNodesSnapshot = mergedNodeMap.values.toList()
         val precomputedStability = mutableMapOf<String, Pair<String, String>>()
-        for ((_, sourceText, _) in pendingKotlinComposeFiles) {
+        for ((_, sourceText, _) in scan.pendingKotlinComposeFiles) {
             val masked = PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "kotlin")
             precomputedStability.putAll(composeExtractor.analyzeClassesInSource(sourceText, masked, stabilityPatterns))
         }
 
         val allNewComposeNodes = mutableListOf<ComposeNodeRecord>()
         val allNewComposeParams = mutableListOf<ComposeParamRecord>()
-        for ((relStr, sourceText, baseEdges) in pendingKotlinComposeFiles) {
-            val fileId = "$projectId:$relStr"
-            store.deleteComposeNodesForFile(projectId, relStr)
+        for ((relStr, sourceText, baseEdges) in scan.pendingKotlinComposeFiles) {
+            val fileId = "${ctx.projectId}:$relStr"
+            store.deleteComposeNodesForFile(ctx.projectId, relStr)
             val bundle = composeExtractor.extractKotlinFile(
-                projectSlug = projectId,
+                projectSlug = ctx.projectId,
                 relPath = relStr,
                 sourceText = sourceText,
                 stabilityPatterns = stabilityPatterns,
@@ -418,14 +418,15 @@ class WorkspaceIndexer(
                 allNewComposeParams.addAll(bundle.params)
 
                 val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
-                val modId = ModuleBoundaryDetector.resolveModuleId(relStr, knownModules)
+                val modId = ModuleBoundaryDetector.resolveModuleId(relStr, ctx.knownModules)
+                val syncCtx = ComposeFileSyncContext(ctx.projectId, fileId, relStr, modId, semLayer, archLayer)
 
-                syncComposeNodeRecords(bundle.nodes, projectId, fileId, modId, semLayer, archLayer, mergedNodeMap, changedNodes)
-                syncComposeEdgeEntities(bundle.edges, projectId, fileId, relStr, modId, semLayer, archLayer, mergedNodeMap, changedNodes)
+                syncComposeNodeRecords(bundle.nodes, syncCtx, mergedNodeMap, scan.changedNodes)
+                syncComposeEdgeEntities(bundle.edges, syncCtx, mergedNodeMap, scan.changedNodes)
 
-                pendingRawEdges[fileId] = baseEdges + bundle.edges
+                scan.pendingRawEdges[fileId] = baseEdges + bundle.edges
             } else {
-                pendingRawEdges[fileId] = baseEdges
+                scan.pendingRawEdges[fileId] = baseEdges
             }
         }
         return Pair(allNewComposeNodes, allNewComposeParams)
@@ -452,23 +453,19 @@ class WorkspaceIndexer(
     }
 
     private fun reevaluateMarkdownFiles(
-        projectId: String,
-        root: String,
-        markdownQueue: MutableList<Pair<String, String>>,
-        unchangedMarkdownQueue: List<Pair<String, String>>,
-        cachedFiles: Map<String, Pair<String, Double>>,
-        normalizedSubpaths: List<String>?,
+        ctx: WorkspaceScanContext,
+        scan: ScanCollector,
         reEvaluate: Boolean
     ) {
         if (!reEvaluate) return
-        val queuedRels = markdownQueue.mapTo(mutableSetOf()) { it.first }
-        for ((relMd, filePath) in unchangedMarkdownQueue) {
-            queueMarkdownIfReadable(projectId, relMd, filePath, queuedRels, markdownQueue)
+        val queuedRels = scan.markdownQueue.mapTo(mutableSetOf()) { it.first }
+        for ((relMd, filePath) in scan.unchangedMarkdownQueue) {
+            queueMarkdownIfReadable(ctx.projectId, relMd, filePath, queuedRels, scan.markdownQueue)
         }
-        if (normalizedSubpaths != null && normalizedSubpaths.isNotEmpty()) {
-            for (indexedRel in cachedFiles.keys) {
+        if (ctx.normalizedSubpaths != null && ctx.normalizedSubpaths.isNotEmpty()) {
+            for (indexedRel in ctx.cachedFiles.keys) {
                 if (indexedRel.endsWith(".md")) {
-                    queueMarkdownIfReadable(projectId, indexedRel, "$root/$indexedRel", queuedRels, markdownQueue)
+                    queueMarkdownIfReadable(ctx.projectId, indexedRel, "${ctx.root}/$indexedRel", queuedRels, scan.markdownQueue)
                 }
             }
         }
@@ -568,13 +565,10 @@ class WorkspaceIndexer(
         for (n in scan.changedNodes) mergedNodeMap[n.nodeId] = n
 
         val (allNewComposeNodes, allNewComposeParams) = processComposeFiles(
-            projectId = projectId,
+            ctx = scanCtx,
             stabilityPatterns = stabilityPatterns,
-            pendingKotlinComposeFiles = scan.pendingKotlinComposeFiles,
-            mergedNodeMap = mergedNodeMap,
-            changedNodes = scan.changedNodes,
-            knownModules = knownModules,
-            pendingRawEdges = scan.pendingRawEdges
+            scan = scan,
+            mergedNodeMap = mergedNodeMap
         )
 
         val combinedNodes = mergedNodeMap.values.toList()
@@ -587,12 +581,8 @@ class WorkspaceIndexer(
         )
 
         reevaluateMarkdownFiles(
-            projectId = projectId,
-            root = root,
-            markdownQueue = scan.markdownQueue,
-            unchangedMarkdownQueue = scan.unchangedMarkdownQueue,
-            cachedFiles = cachedFiles,
-            normalizedSubpaths = normalizedSubpaths,
+            ctx = scanCtx,
+            scan = scan,
             reEvaluate = scan.codeFilesIndexed > 0 || filesDeleted > 0
         )
 

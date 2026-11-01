@@ -80,7 +80,7 @@ class ScopeSynthesizer(private val store: SqliteGraphStore) {
         if (cleanTarget.endsWith('/')) {
             return resolveDirTarget(projectId, cleanTarget)
         }
-        if (cleanTarget.contains('.')) {
+        if (cleanTarget.contains('.') && !cleanTarget.contains('#')) {
             return store.getNodesForFile(projectId, cleanTarget)
         }
         return emptyList()
