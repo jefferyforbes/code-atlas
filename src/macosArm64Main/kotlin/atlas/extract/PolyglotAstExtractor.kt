@@ -770,18 +770,19 @@ class PolyglotAstExtractor {
         internal fun lineNumberAtOffset(text: String, offset: Int): Int =
             countNewlinesBefore(text, offset) + 1
 
-        private fun skipQuotedInterpolation(line: String, startPos: Int): Int {
+        private fun skipQuotedInterpolation(line: String, startPos: Int, closeChar: Char): Int {
+            val openChar = if (closeChar == ')') '(' else '{'
             var pos = startPos + 2
             var depth = 1
             while (pos < line.length && depth > 0) {
                 val c = line[pos]
                 when {
                     c == '"' || c == '\'' -> pos = skipQuotedString(line, pos, c)
-                    c == '{' -> {
+                    c == openChar -> {
                         depth++
                         pos++
                     }
-                    c == '}' -> {
+                    c == closeChar -> {
                         depth--
                         pos++
                     }
@@ -791,17 +792,25 @@ class PolyglotAstExtractor {
             return pos
         }
 
-        private fun isInterpolationStartAt(line: String, pos: Int, delimiter: Char): Boolean {
-            return delimiter == '"' && line[pos] == '$' && pos + 1 < line.length && line[pos + 1] == '{'
+        private fun interpolationCloseChar(line: String, pos: Int, delimiter: Char): Char? {
+            if (delimiter != '"' || pos + 1 >= line.length) return null
+            val c = line[pos]
+            val next = line[pos + 1]
+            return when {
+                c == '$' && next == '{' -> '}'
+                c == '\\' && next == '(' -> ')'
+                else -> null
+            }
         }
 
         private fun skipQuotedString(line: String, startPos: Int, delimiter: Char): Int {
             var pos = startPos + 1
             while (pos < line.length && line[pos] != delimiter) {
-                if (line[pos] == '\\' && pos + 1 < line.length) {
+                val interpClose = interpolationCloseChar(line, pos, delimiter)
+                if (interpClose != null) {
+                    pos = skipQuotedInterpolation(line, pos, interpClose)
+                } else if (line[pos] == '\\' && pos + 1 < line.length) {
                     pos += 2
-                } else if (isInterpolationStartAt(line, pos, delimiter)) {
-                    pos = skipQuotedInterpolation(line, pos)
                 } else {
                     pos++
                 }
