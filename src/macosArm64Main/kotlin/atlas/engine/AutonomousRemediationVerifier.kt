@@ -120,20 +120,20 @@ class AutonomousRemediationVerifier(
         req: VerificationRequest,
         fullPath: String,
         details: MutableList<String>
-    ): Pair<String?, RemediationVerificationResult?> {
+    ): Pair<String, RemediationVerificationResult?> {
         if (!req.writeSiteSafe) {
             val msg = "Pre-flight failed: Write-site mutations exist in call graph for ${req.ruleId} in ${req.relPath}."
             details.add("Write-site safety check failed (writeSiteSafe=false). Autonomous modification rejected.")
-            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
+            return Pair("", failResult("PRE_FLIGHT", req, msg, details))
         }
 
         val storeErr = checkGraphStoreSafety(req, details)
-        if (storeErr != null) return Pair(null, storeErr)
+        if (storeErr != null) return Pair("", storeErr)
 
         if (!PlatformFiles.exists(fullPath)) {
             val msg = "Pre-flight failed: File does not exist at ${req.relPath}."
             details.add("File not found on disk: $fullPath")
-            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
+            return Pair("", failResult("PRE_FLIGHT", req, msg, details))
         }
 
         val originalContent = try {
@@ -141,26 +141,26 @@ class AutonomousRemediationVerifier(
         } catch (e: Exception) {
             val msg = "Pre-flight failed: Cannot read ${req.relPath}: ${e.message}"
             details.add(msg)
-            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
+            return Pair("", failResult("PRE_FLIGHT", req, msg, details))
         }
 
         if (req.beforeSnippet.isBlank()) {
             val msg = "Pre-flight failed: beforeSnippet is empty."
             details.add("Empty beforeSnippet provided for remediation of ${req.relPath}.")
-            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
+            return Pair("", failResult("PRE_FLIGHT", req, msg, details))
         }
 
         if (!originalContent.contains(req.beforeSnippet)) {
             val msg = "Pre-flight failed: Target code snippet not found in ${req.relPath}."
             details.add("Expected beforeSnippet not present in source text.")
-            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
+            return Pair("", failResult("PRE_FLIGHT", req, msg, details))
         }
 
         val occurrences = countOccurrences(originalContent, req.beforeSnippet)
         if (occurrences > 1) {
             val msg = "Pre-flight failed: Ambiguous replacement; target snippet occurs $occurrences times in ${req.relPath}."
             details.add("Target snippet is ambiguous ($occurrences occurrences).")
-            return Pair(null, failResult("PRE_FLIGHT", req, msg, details))
+            return Pair("", failResult("PRE_FLIGHT", req, msg, details))
         }
 
         details.add("Pre-flight validation passed: File exists, writeSiteSafe=true, unique beforeSnippet located.")
@@ -171,12 +171,12 @@ class AutonomousRemediationVerifier(
         originalContent: String,
         req: VerificationRequest,
         details: MutableList<String>
-    ): Pair<String?, RemediationVerificationResult?> {
+    ): Pair<String, RemediationVerificationResult?> {
         val modifiedContent = originalContent.replace(req.beforeSnippet, req.afterSnippet)
         if (modifiedContent == originalContent) {
             val msg = "Application failed: Replacement produced identical content."
             details.add("No changes resulted from replacing beforeSnippet with afterSnippet.")
-            return Pair(null, failResult("APPLICATION", req, msg, details, PassedStage.PRE_FLIGHT))
+            return Pair("", failResult("APPLICATION", req, msg, details, PassedStage.PRE_FLIGHT))
         }
         return Pair(modifiedContent, null)
     }
@@ -473,10 +473,10 @@ class AutonomousRemediationVerifier(
         val (originalContent, preFlightErr) = validatePreFlight(req, fullPath, details)
         if (preFlightErr != null) return preFlightErr
 
-        val (modifiedContent, stageErr) = stageReplacement(originalContent!!, req, details)
+        val (modifiedContent, stageErr) = stageReplacement(originalContent, req, details)
         if (stageErr != null) return stageErr
 
-        val astResult = validateAstIntegrity(req.projectSlug, req.relPath, originalContent, modifiedContent!!, details)
+        val astResult = validateAstIntegrity(req.projectSlug, req.relPath, originalContent, modifiedContent, details)
         if (!astResult.astValid) {
             val msg = "Post-remediation verification failed: Modified source produces an invalid AST."
             return failResult("POST_VERIFICATION", req, msg, details, PassedStage.PRE_FLIGHT)

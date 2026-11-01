@@ -189,6 +189,15 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         )
     }
 
+    private data class ComposeQueryMetrics(
+        val projectSlug: String,
+        val strongSkipping: Boolean,
+        val total: Int,
+        val skippableCount: Int,
+        val skippablePct: Double,
+        val unstableParamTotal: Int
+    )
+
     fun queryCompose(
         projectSlug: String,
         action: String,
@@ -202,20 +211,19 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         val skippableCount = allNodes.count { it.isSkippable }
         val skippablePct = if (total == 0) 100.0 else round1((skippableCount.toDouble() / total.toDouble()) * 100.0)
         val unstableParamTotal = allNodes.sumOf { it.unstableParamCount + it.runtimeParamCount }
+        val metrics = ComposeQueryMetrics(
+            projectSlug = projectSlug,
+            strongSkipping = strongSkipping,
+            total = total,
+            skippableCount = skippableCount,
+            skippablePct = skippablePct,
+            unstableParamTotal = unstableParamTotal
+        )
 
         return when (action.lowercase()) {
-            "cascade", "compose_cascade" -> queryCascade(
-                projectSlug, allNodes, target, maxDepth, strongSkipping,
-                total, skippableCount, skippablePct, unstableParamTotal
-            )
-            "blame", "compose_blame" -> queryBlame(
-                projectSlug, allNodes, target, strongSkipping,
-                total, skippableCount, skippablePct, unstableParamTotal
-            )
-            else -> querySummary(
-                projectSlug, allNodes, paramsByNode, target, strongSkipping,
-                total, skippableCount, skippablePct, unstableParamTotal
-            )
+            "cascade", "compose_cascade" -> queryCascade(metrics, allNodes, target, maxDepth)
+            "blame", "compose_blame" -> queryBlame(metrics, allNodes, target)
+            else -> querySummary(metrics, allNodes, paramsByNode, target)
         }
     }
 
@@ -227,68 +235,53 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
     }
 
     private fun queryCascade(
-        projectSlug: String,
+        metrics: ComposeQueryMetrics,
         allNodes: List<ComposeNodeRecord>,
         target: String?,
-        maxDepth: Int,
-        strongSkipping: Boolean,
-        total: Int,
-        skippableCount: Int,
-        skippablePct: Double,
-        unstableParamTotal: Int
+        maxDepth: Int
     ): ComposeQueryResult {
-        val rootNode = resolveTargetOrFirstUnskippable(projectSlug, allNodes, target)
+        val rootNode = resolveTargetOrFirstUnskippable(metrics.projectSlug, allNodes, target)
         val cascade = if (rootNode != null) {
-            store.queryComposeCascade(projectSlug, rootNode.nodeId, maxDepth)
+            store.queryComposeCascade(metrics.projectSlug, rootNode.nodeId, maxDepth)
         } else emptyList()
         return ComposeQueryResult(
-            project = projectSlug,
+            project = metrics.projectSlug,
             action = "cascade",
-            strongSkipping = strongSkipping,
-            totalComposables = total,
-            skippableCount = skippableCount,
-            skippablePct = skippablePct,
-            unstableParamTotal = unstableParamTotal,
+            strongSkipping = metrics.strongSkipping,
+            totalComposables = metrics.total,
+            skippableCount = metrics.skippableCount,
+            skippablePct = metrics.skippablePct,
+            unstableParamTotal = metrics.unstableParamTotal,
             cascade = cascade
         )
     }
 
     private fun queryBlame(
-        projectSlug: String,
+        metrics: ComposeQueryMetrics,
         allNodes: List<ComposeNodeRecord>,
-        target: String?,
-        strongSkipping: Boolean,
-        total: Int,
-        skippableCount: Int,
-        skippablePct: Double,
-        unstableParamTotal: Int
+        target: String?
     ): ComposeQueryResult {
-        val targetNode = resolveTargetOrFirstUnskippable(projectSlug, allNodes, target)
+        val targetNode = resolveTargetOrFirstUnskippable(metrics.projectSlug, allNodes, target)
         val blame = if (targetNode != null) {
-            store.queryComposeBlame(projectSlug, targetNode.nodeId)
+            store.queryComposeBlame(metrics.projectSlug, targetNode.nodeId)
         } else emptyList()
         return ComposeQueryResult(
-            project = projectSlug,
+            project = metrics.projectSlug,
             action = "blame",
-            strongSkipping = strongSkipping,
-            totalComposables = total,
-            skippableCount = skippableCount,
-            skippablePct = skippablePct,
-            unstableParamTotal = unstableParamTotal,
+            strongSkipping = metrics.strongSkipping,
+            totalComposables = metrics.total,
+            skippableCount = metrics.skippableCount,
+            skippablePct = metrics.skippablePct,
+            unstableParamTotal = metrics.unstableParamTotal,
             blame = blame
         )
     }
 
     private fun querySummary(
-        projectSlug: String,
+        metrics: ComposeQueryMetrics,
         allNodes: List<ComposeNodeRecord>,
         paramsByNode: Map<String, List<ComposeParamRecord>>,
-        target: String?,
-        strongSkipping: Boolean,
-        total: Int,
-        skippableCount: Int,
-        skippablePct: Double,
-        unstableParamTotal: Int
+        target: String?
     ): ComposeQueryResult {
         val filteredNodes = if (!target.isNullOrBlank()) {
             allNodes.filter {
@@ -311,13 +304,13 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
             )
         }
         return ComposeQueryResult(
-            project = projectSlug,
+            project = metrics.projectSlug,
             action = "summary",
-            strongSkipping = strongSkipping,
-            totalComposables = total,
-            skippableCount = skippableCount,
-            skippablePct = skippablePct,
-            unstableParamTotal = unstableParamTotal,
+            strongSkipping = metrics.strongSkipping,
+            totalComposables = metrics.total,
+            skippableCount = metrics.skippableCount,
+            skippablePct = metrics.skippablePct,
+            unstableParamTotal = metrics.unstableParamTotal,
             nodes = summaries
         )
     }
@@ -505,6 +498,15 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         val afterSnippet: String
     )
 
+    private data class CandidateEvalContext(
+        val projectSlug: String,
+        val node: ComposeNodeRecord,
+        val nodeMode: String,
+        val cascadeCount: Int,
+        val workspaceRoot: String?,
+        val candidates: MutableList<RawCandidate>
+    )
+
     fun runDoctor(
         projectSlug: String,
         target: String? = null,
@@ -526,8 +528,10 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
             val nodeParams = paramsByNode[node.nodeId] ?: emptyList()
             val cascadeCount = store.queryComposeCascade(projectSlug, node.nodeId, maxDepth = 4).size
             val trace = traceMetrics[node.nodeId]
+            val nodeMode = if (trace != null) "MEASURED" else "ESTIMATED"
+            val evalCtx = CandidateEvalContext(projectSlug, node, nodeMode, cascadeCount, workspaceRoot, candidates)
 
-            collectStabilityParamCandidates(projectSlug, node, nodeParams, trace, cascadeCount, workspaceRoot, candidates)
+            collectStabilityParamCandidates(evalCtx, nodeParams, trace)
             collectStateAndPerfCandidates(node, trace, cascadeCount, candidates)
         }
 
@@ -550,35 +554,30 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
     }
 
     private fun collectStabilityParamCandidates(
-        projectSlug: String,
-        node: ComposeNodeRecord,
+        ctx: CandidateEvalContext,
         nodeParams: List<ComposeParamRecord>,
-        trace: Triple<Int, Int, String>?,
-        cascadeCount: Int,
-        workspaceRoot: String?,
-        candidates: MutableList<RawCandidate>
+        trace: Triple<Int, Int, String>?
     ) {
-        if ((node.violationMask and (ComposeStabilityExtractor.BIT_STAB_001 or ComposeStabilityExtractor.BIT_STAB_002)) == 0) return
-        val nodeMode = if (trace != null) "MEASURED" else "ESTIMATED"
+        if ((ctx.node.violationMask and (ComposeStabilityExtractor.BIT_STAB_001 or ComposeStabilityExtractor.BIT_STAB_002)) == 0) return
 
         for (p in nodeParams.filter { it.stability in setOf("UNSTABLE", "RUNTIME", "UNCERTAIN") }) {
             val reason = p.stabilityReason
             when {
                 reason.startsWith("MUTABLE_VAR_PROPERTY:") || reason.startsWith("BROKEN_STABILITY_CONTRACT:") -> {
-                    val priority = computeCandidatePriority(trace, node, cascadeCount, 2.0)
-                    prescribeVarToValConversion(projectSlug, node, p, priority, nodeMode, cascadeCount, workspaceRoot, candidates)
+                    val priority = computeCandidatePriority(trace, ctx.node, ctx.cascadeCount, 2.0)
+                    prescribeVarToValConversion(ctx, p, priority)
                 }
                 reason.startsWith("STANDARD_COLLECTION_INTERFACE:") || reason.startsWith("UNSTABLE_COLLECTION_PROPERTY:") -> {
-                    val priority = computeCandidatePriority(trace, node, cascadeCount, 1.6)
-                    prescribePersistentList(node, p, priority, nodeMode, cascadeCount, candidates)
+                    val priority = computeCandidatePriority(trace, ctx.node, ctx.cascadeCount, 1.6)
+                    prescribePersistentList(ctx.node, p, priority, ctx.nodeMode, ctx.cascadeCount, ctx.candidates)
                 }
                 reason.startsWith("EXTERNAL_MODULE_TYPE:") -> {
-                    val priority = computeCandidatePriority(trace, node, cascadeCount, 1.2)
-                    prescribeStabilityConfig(node, p, priority, nodeMode, cascadeCount, candidates)
+                    val priority = computeCandidatePriority(trace, ctx.node, ctx.cascadeCount, 1.2)
+                    prescribeStabilityConfig(ctx.node, p, priority, ctx.nodeMode, ctx.cascadeCount, ctx.candidates)
                 }
                 else -> {
-                    val priority = computeCandidatePriority(trace, node, cascadeCount, 1.4)
-                    prescribeImmutableAnnotation(projectSlug, node, p, priority, nodeMode, cascadeCount, workspaceRoot, candidates)
+                    val priority = computeCandidatePriority(trace, ctx.node, ctx.cascadeCount, 1.4)
+                    prescribeImmutableAnnotation(ctx, p, priority)
                 }
             }
         }
@@ -620,52 +619,44 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         targetFilePath: String,
         classNode: GraphNode?,
         propName: String,
-        defaultLine: Int,
-        defaultBefore: String,
-        defaultAfter: String
+        defaultSnippet: Triple<Int, String, String>
     ): Triple<Int, String, String> {
         if (workspaceRoot == null || !writeSiteSafe) {
-            return Triple(defaultLine, defaultBefore, defaultAfter)
+            return defaultSnippet
         }
-        return findVarSnippetOnDisk(workspaceRoot, targetFilePath, classNode, propName)
-            ?: Triple(defaultLine, defaultBefore, defaultAfter)
+        return findVarSnippetOnDisk(workspaceRoot, targetFilePath, classNode, propName) ?: defaultSnippet
     }
 
     private fun prescribeVarToValConversion(
-        projectSlug: String,
-        node: ComposeNodeRecord,
+        ctx: CandidateEvalContext,
         p: ComposeParamRecord,
-        priority: Double,
-        nodeMode: String,
-        cascadeCount: Int,
-        workspaceRoot: String?,
-        candidates: MutableList<RawCandidate>
+        priority: Double
     ) {
         val reason = p.stabilityReason
         val propName = reason.substringAfterLast(':').substringAfterLast('.')
         val className = p.typeSignature.substringBefore('<').substringAfterLast('.')
-        val mutationCount = store.countPropertyMutations(projectSlug, propName, className)
+        val mutationCount = store.countPropertyMutations(ctx.projectSlug, propName, className)
         val writeSiteSafe = mutationCount == 0
 
         val (defBefore, defAfter, rationale) = buildVarToValTemplates(writeSiteSafe, className, propName, mutationCount)
-        val classNode = resolveTargetClassNode(projectSlug, className)
-        val targetFilePath = resolveTargetFilePath(classNode, node.filePath)
+        val classNode = resolveTargetClassNode(ctx.projectSlug, className)
+        val targetFilePath = resolveTargetFilePath(classNode, ctx.node.filePath)
+        val defaultSnippet = Triple(classNode?.startLine ?: ctx.node.startLine, defBefore, defAfter)
         val (targetLine, before, after) = resolveDiskVarSnippet(
-            workspaceRoot, writeSiteSafe, targetFilePath, classNode, propName,
-            classNode?.startLine ?: node.startLine, defBefore, defAfter
+            ctx.workspaceRoot, writeSiteSafe, targetFilePath, classNode, propName, defaultSnippet
         )
 
-        candidates.add(
+        ctx.candidates.add(
             RawCandidate(
                 priorityScore = priority,
-                scoringMode = nodeMode,
+                scoringMode = ctx.nodeMode,
                 ruleId = if (reason.startsWith("BROKEN")) "COMPOSE-STAB-002" else "COMPOSE-STAB-001",
                 fixStrategy = "VAL_CONVERSION",
                 writeSiteSafe = writeSiteSafe,
-                targetNodeId = classNode?.nodeId ?: node.nodeId,
+                targetNodeId = classNode?.nodeId ?: ctx.node.nodeId,
                 filePath = targetFilePath,
                 line = targetLine,
-                downstreamCascadeCount = cascadeCount,
+                downstreamCascadeCount = ctx.cascadeCount,
                 rationale = rationale,
                 beforeSnippet = before,
                 afterSnippet = after
@@ -788,30 +779,25 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
     }
 
     private fun prescribeImmutableAnnotation(
-        projectSlug: String,
-        node: ComposeNodeRecord,
+        ctx: CandidateEvalContext,
         p: ComposeParamRecord,
-        priority: Double,
-        nodeMode: String,
-        cascadeCount: Int,
-        workspaceRoot: String?,
-        candidates: MutableList<RawCandidate>
+        priority: Double
     ) {
         var before = "interface ${p.typeSignature}"
         var after = "@Stable\ninterface ${p.typeSignature}"
         val typeName = p.typeSignature.substringBefore('<').substringAfterLast('.').trim()
-        val classNode = store.listNodes(projectSlug).firstOrNull {
+        val classNode = store.listNodes(ctx.projectSlug).firstOrNull {
             (it.name == typeName || it.qualifiedName.endsWith(".$typeName")) &&
                 it.kind in setOf("class", "data class", "value class", "interface")
         }
         val targetFilePath = classNode?.let {
             val f = it.fileId
             if (f.contains(':')) f.substringAfter(':') else f
-        } ?: node.filePath
-        var targetLine = classNode?.startLine ?: node.startLine
+        } ?: ctx.node.filePath
+        var targetLine = classNode?.startLine ?: ctx.node.startLine
 
-        if (workspaceRoot != null) {
-            val diskSnippet = findDeclSnippetOnDisk(workspaceRoot, targetFilePath, classNode, typeName)
+        if (ctx.workspaceRoot != null) {
+            val diskSnippet = findDeclSnippetOnDisk(ctx.workspaceRoot, targetFilePath, classNode, typeName)
             if (diskSnippet != null) {
                 targetLine = diskSnippet.first
                 before = diskSnippet.second
@@ -819,17 +805,17 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
             }
         }
 
-        candidates.add(
+        ctx.candidates.add(
             RawCandidate(
                 priorityScore = priority,
-                scoringMode = nodeMode,
+                scoringMode = ctx.nodeMode,
                 ruleId = "COMPOSE-STAB-001",
                 fixStrategy = "IMMUTABLE_ANNOTATION",
                 writeSiteSafe = true,
-                targetNodeId = classNode?.nodeId ?: node.nodeId,
+                targetNodeId = classNode?.nodeId ?: ctx.node.nodeId,
                 filePath = targetFilePath,
                 line = targetLine,
-                downstreamCascadeCount = cascadeCount,
+                downstreamCascadeCount = ctx.cascadeCount,
                 rationale = "Annotate '${p.typeSignature}' with @Immutable or @Stable after verifying all properties are read-only.",
                 beforeSnippet = before,
                 afterSnippet = after

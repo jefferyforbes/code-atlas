@@ -6,7 +6,7 @@ contract:
   task: pr-10-extractor-and-lexer-fixes
   objective: Harden polyglot lexer string interpolation, scope complexity branch keywords by language, make cross-file symbol disambiguation deterministic, eliminate prefix substring allocations, and encapsulate 17 HIGH-parameter extractor functions.
 
-status: approved
+status: merged
 
 size:
   complexity: medium

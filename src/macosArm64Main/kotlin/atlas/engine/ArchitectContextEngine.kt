@@ -55,7 +55,7 @@ class ArchitectContextEngine(
 
         val seedNodes = resolveSeedNodes(projectId, effectiveSeeds)
         val resolvedTargetStrings = if (seedNodes.isNotEmpty()) {
-            seedNodes.map { it.name }.distinct()
+            seedNodes.map { it.nodeId }.distinct()
         } else {
             effectiveSeeds
         }

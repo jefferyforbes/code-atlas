@@ -211,22 +211,17 @@ class ArchitectureRemediationEngine(
     }
 
     private fun checkCollision(
-        root: String,
-        dir: String,
-        ext: String,
-        targetRenameRelPath: String?,
-        secondaryNodes: List<GraphNode>,
-        relPath: String,
-        primaryNode: GraphNode
+        req: AstSplitRequest,
+        dir: String
     ): ArchitectureRemediationPrescription? {
-        if (targetRenameRelPath != null && PlatformFiles.exists("$root/$targetRenameRelPath")) {
-            return buildCollisionPrescription(relPath, targetRenameRelPath, primaryNode, secondaryNodes)
+        if (req.targetRenameRelPath != null && PlatformFiles.exists("${req.root}/${req.targetRenameRelPath}")) {
+            return buildCollisionPrescription(req.relPath, req.targetRenameRelPath, req.primaryNode, req.secondaryNodes)
         }
-        for (sec in secondaryNodes) {
-            val newFileName = "${sec.name}$ext"
+        for (sec in req.secondaryNodes) {
+            val newFileName = "${sec.name}${req.ext}"
             val newRelPath = if (dir.isEmpty()) newFileName else "$dir/$newFileName"
-            if (PlatformFiles.exists("$root/$newRelPath")) {
-                return buildCollisionPrescription(relPath, newRelPath, primaryNode, secondaryNodes)
+            if (PlatformFiles.exists("${req.root}/$newRelPath")) {
+                return buildCollisionPrescription(req.relPath, newRelPath, req.primaryNode, req.secondaryNodes)
             }
         }
         return null
@@ -371,38 +366,34 @@ class ArchitectureRemediationEngine(
     }
 
     private fun applyFilesAndRunTest(
-        root: String,
-        fullPath: String,
+        req: AstSplitRequest,
         primaryNewFullPath: String,
-        targetRenameRelPath: String?,
         cleanModified: String,
-        originalContent: String,
         spawnedFiles: List<SpawnedFileRecord>,
-        testCommand: String?,
         details: MutableList<String>
     ): Boolean {
         val writtenPaths = mutableListOf<String>()
         return try {
-            writeSpawnedFiles(root, spawnedFiles, writtenPaths)
-            if (targetRenameRelPath != null) {
-                deleteFileIfPresent(fullPath)
+            writeSpawnedFiles(req.root, spawnedFiles, writtenPaths)
+            if (req.targetRenameRelPath != null) {
+                deleteFileIfPresent(req.fullPath)
                 PlatformFiles.writeText(primaryNewFullPath, cleanModified)
                 writtenPaths.add(primaryNewFullPath)
             } else {
-                PlatformFiles.writeText(fullPath, cleanModified)
+                PlatformFiles.writeText(req.fullPath, cleanModified)
             }
 
-            if (!testCommand.isNullOrBlank()) {
-                val passed = executeTestCommand(testCommand, details)
+            if (!req.testCommand.isNullOrBlank()) {
+                val passed = executeTestCommand(req.testCommand, details)
                 if (!passed) {
-                    rollbackFiles(writtenPaths, fullPath, originalContent)
+                    rollbackFiles(writtenPaths, req.fullPath, req.originalContent)
                     return false
                 }
             }
             true
         } catch (e: Exception) {
             details.add("Disk application error: ${e.message}. Performing rollback.")
-            rollbackFiles(writtenPaths, fullPath, originalContent)
+            rollbackFiles(writtenPaths, req.fullPath, req.originalContent)
             false
         }
     }
@@ -430,30 +421,27 @@ class ArchitectureRemediationEngine(
     }
 
     private fun buildFinalSplitPrescription(
-        relPath: String,
-        primaryNode: GraphNode,
-        secondaryNodes: List<GraphNode>,
+        req: AstSplitRequest,
         spawnedFiles: List<SpawnedFileRecord>,
         diffPreview: String,
-        targetRenameRelPath: String?,
         verified: Boolean,
         applied: Boolean,
         details: List<String>
     ): ArchitectureRemediationPrescription {
-        val rationaleMsg = if (targetRenameRelPath != null) {
-            "Split ${secondaryNodes.size} secondary top-level declaration(s) and renamed original file to '$targetRenameRelPath' to match Single Declaration Principle (Rule 6 / BOOST-003)."
+        val rationaleMsg = if (req.targetRenameRelPath != null) {
+            "Split ${req.secondaryNodes.size} secondary top-level declaration(s) and renamed original file to '${req.targetRenameRelPath}' to match Single Declaration Principle (Rule 6 / BOOST-003)."
         } else {
-            "Split ${secondaryNodes.size} secondary top-level declaration(s) into dedicated source files matching Single Declaration Principle (Rule 6 / BOOST-003)."
+            "Split ${req.secondaryNodes.size} secondary top-level declaration(s) into dedicated source files matching Single Declaration Principle (Rule 6 / BOOST-003)."
         }
         return ArchitectureRemediationPrescription(
-            id = "rx-boost003-${relPath.replace('/', '_')}",
+            id = "rx-boost003-${req.relPath.replace('/', '_')}",
             ruleId = "BOOST-003",
-            filePath = relPath,
-            line = primaryNode.startLine,
+            filePath = req.relPath,
+            line = req.primaryNode.startLine,
             fixStrategy = "AST_FILE_SPLIT",
             rationale = rationaleMsg,
-            primaryDeclaration = primaryNode.name,
-            secondaryDeclarations = secondaryNodes.map { it.name },
+            primaryDeclaration = req.primaryNode.name,
+            secondaryDeclarations = req.secondaryNodes.map { it.name },
             spawnedFiles = spawnedFiles,
             diffPreview = diffPreview,
             verified = verified,
@@ -485,10 +473,7 @@ class ArchitectureRemediationEngine(
         details: MutableList<String>
     ): Boolean {
         if (!req.dryRun) {
-            return applyFilesAndRunTest(
-                req.root, req.fullPath, primaryNewFullPath, req.targetRenameRelPath,
-                cleanModified, req.originalContent, spawnedFiles, req.testCommand, details
-            )
+            return applyFilesAndRunTest(req, primaryNewFullPath, cleanModified, spawnedFiles, details)
         }
         details.add("Dry-run mode: verified AST valid and Single Declaration compliant without modifying disk.")
         return true
@@ -499,10 +484,7 @@ class ArchitectureRemediationEngine(
         details: MutableList<String>
     ): ArchitectureRemediationPrescription {
         val dir = if (req.relPath.contains('/')) req.relPath.substringBeforeLast('/') else ""
-        val collisionPrescription = checkCollision(
-            req.root, dir, req.ext, req.targetRenameRelPath,
-            req.secondaryNodes, req.relPath, req.primaryNode
-        )
+        val collisionPrescription = checkCollision(req, dir)
         if (collisionPrescription != null) return collisionPrescription
 
         val originalLines = req.originalContent.lines()
@@ -527,10 +509,7 @@ class ArchitectureRemediationEngine(
 
         val success = astValid && testsPreserved
         val applied = !req.dryRun && success
-        return buildFinalSplitPrescription(
-            req.relPath, req.primaryNode, req.secondaryNodes, spawnedFiles, diffPreview,
-            req.targetRenameRelPath, success, applied, details
-        )
+        return buildFinalSplitPrescription(req, spawnedFiles, diffPreview, success, applied, details)
     }
 
     private fun remediateBoost003(
@@ -565,30 +544,26 @@ class ArchitectureRemediationEngine(
             return buildManualSplitPrescription(relPath, primaryNode, secondaryNodes, topNodes.size)
         }
 
+        val splitReq = AstSplitRequest(
+            projectId = projectId,
+            relPath = relPath,
+            root = root,
+            fullPath = fullPath,
+            originalContent = content,
+            ext = ext,
+            lang = lang,
+            primaryNode = primaryNode,
+            secondaryNodes = secondaryNodes,
+            targetRenameRelPath = targetRenameRelPath,
+            dryRun = dryRun,
+            testCommand = testCommand
+        )
+
         if (makePrivate) {
-            return remediateBoost003MakePrivate(
-                projectId, relPath, fullPath, content,
-                primaryNode, secondaryNodes, lang, dryRun, testCommand
-            )
+            return remediateBoost003MakePrivate(splitReq)
         }
 
-        return executeAstSplitRemediation(
-            AstSplitRequest(
-                projectId = projectId,
-                relPath = relPath,
-                root = root,
-                fullPath = fullPath,
-                originalContent = content,
-                ext = ext,
-                lang = lang,
-                primaryNode = primaryNode,
-                secondaryNodes = secondaryNodes,
-                targetRenameRelPath = targetRenameRelPath,
-                dryRun = dryRun,
-                testCommand = testCommand
-            ),
-            details
-        )
+        return executeAstSplitRemediation(splitReq, details)
     }
 
     private fun privatizeKotlinSubTrimmed(rest: String): String {
@@ -722,52 +697,44 @@ class ArchitectureRemediationEngine(
     }
 
     private fun remediateBoost003MakePrivate(
-        projectId: String,
-        relPath: String,
-        fullPath: String,
-        originalContent: String,
-        primaryNode: GraphNode,
-        secondaryNodes: List<GraphNode>,
-        lang: String,
-        dryRun: Boolean,
-        testCommand: String?
+        req: AstSplitRequest
     ): ArchitectureRemediationPrescription {
         val details = mutableListOf<String>()
-        val workingLines = originalContent.lines().toMutableList()
-        val modifiedContent = privatizeSecondaryDeclarations(workingLines, secondaryNodes, lang, details)
+        val workingLines = req.originalContent.lines().toMutableList()
+        val modifiedContent = privatizeSecondaryDeclarations(workingLines, req.secondaryNodes, req.lang, details)
 
-        val astValid = verifyPrivatizedAst(projectId, relPath, modifiedContent, lang, details)
+        val astValid = verifyPrivatizedAst(req.projectId, req.relPath, modifiedContent, req.lang, details)
         if (!astValid) {
             return ArchitectureRemediationPrescription(
-                id = "rx-boost003-${relPath.replace('/', '_')}",
+                id = "rx-boost003-${req.relPath.replace('/', '_')}",
                 ruleId = "BOOST-003",
-                filePath = relPath,
+                filePath = req.relPath,
                 fixStrategy = "MAKE_PRIVATE",
                 rationale = "Privatization produced syntax errors or failed to reduce public declaration count.",
-                primaryDeclaration = primaryNode.name,
-                secondaryDeclarations = secondaryNodes.map { it.name },
+                primaryDeclaration = req.primaryNode.name,
+                secondaryDeclarations = req.secondaryNodes.map { it.name },
                 verified = false,
                 applied = false,
                 details = details
             )
         }
 
-        val diffPreview = buildDiffPreview(relPath, originalContent, modifiedContent, emptyList())
-        val testsPreserved = applyPrivatizedAndRunTest(fullPath, originalContent, modifiedContent, testCommand, dryRun, details)
+        val diffPreview = buildDiffPreview(req.relPath, req.originalContent, modifiedContent, emptyList())
+        val testsPreserved = applyPrivatizedAndRunTest(req.fullPath, req.originalContent, modifiedContent, req.testCommand, req.dryRun, details)
         val isSuccess = astValid && testsPreserved
 
         return ArchitectureRemediationPrescription(
-            id = "rx-boost003-${relPath.replace('/', '_')}",
+            id = "rx-boost003-${req.relPath.replace('/', '_')}",
             ruleId = "BOOST-003",
-            filePath = relPath,
-            line = primaryNode.startLine,
+            filePath = req.relPath,
+            line = req.primaryNode.startLine,
             fixStrategy = "MAKE_PRIVATE",
-            rationale = "Converted ${secondaryNodes.size} secondary top-level helper declaration(s) to private visibility per Rule 6 exceptions.",
-            primaryDeclaration = primaryNode.name,
-            secondaryDeclarations = secondaryNodes.map { it.name },
+            rationale = "Converted ${req.secondaryNodes.size} secondary top-level helper declaration(s) to private visibility per Rule 6 exceptions.",
+            primaryDeclaration = req.primaryNode.name,
+            secondaryDeclarations = req.secondaryNodes.map { it.name },
             diffPreview = diffPreview,
             verified = isSuccess,
-            applied = !dryRun && isSuccess,
+            applied = !req.dryRun && isSuccess,
             details = details
         )
     }
