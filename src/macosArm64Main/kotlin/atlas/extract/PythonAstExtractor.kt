@@ -421,7 +421,7 @@ internal object PythonAstExtractor {
     private fun extractPythonImports(maskedText: String): List<Pair<String, Int>> {
         return PY_IMP_RE.findAll(maskedText).map { match ->
             val mod = match.groupValues[1].ifEmpty { match.groupValues[2] }
-            Pair(mod, maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
+            Pair(mod, PolyglotAstExtractor.lineNumberAtOffset(maskedText, match.range.first))
         }.toList()
     }
 
@@ -544,7 +544,7 @@ internal object PythonAstExtractor {
         edges: MutableList<GraphEdge>
     ): Boolean {
         val (indent, kw, name) = extractDeclHeader(match) ?: return false
-        val startLine = ctx.maskedText.substring(0, match.range.first).count { it == '\n' } + 1
+        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, match.range.first)
         val endLine = findPythonBlockEndLine(ctx.lines, ctx.maskedLines, startLine)
 
         PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
@@ -579,7 +579,7 @@ internal object PythonAstExtractor {
         if (!isAllowedPythonCallee(callee, node.name, receiver) || !seenCallees.add(targetSym)) {
             return null
         }
-        val callLine = scanStartLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+        val callLine = scanStartLine + PolyglotAstExtractor.countNewlinesBefore(body, callMatch.range.first)
         return GraphEdge(
             edgeId = "${node.nodeId}:call:$targetSym:$callLine",
             projectId = node.projectId,

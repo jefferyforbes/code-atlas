@@ -88,6 +88,17 @@ class ModuleBoundaryDetector {
             return null
         }
 
+        private data class BuildExtractionContext(
+            val projectId: String,
+            val relPath: String,
+            val sourceText: String,
+            val parentModule: String,
+            val srcNodeId: String,
+            val nodes: MutableList<GraphNode>,
+            val edges: MutableList<GraphEdge>,
+            val seenEdgeIds: MutableSet<String>
+        )
+
         fun extractFromBuildContent(
             projectId: String,
             relPath: String,
@@ -102,8 +113,18 @@ class ModuleBoundaryDetector {
             val srcNode = createModuleNode(projectId, relPath, parentModule)
             nodes.add(srcNode)
 
-            extractProjectDeps(sourceText, projectId, relPath, parentModule, srcNode.nodeId, nodes, edges, seenEdgeIds)
-            extractTypeSafeDeps(sourceText, projectId, relPath, parentModule, knownModules, srcNode.nodeId, nodes, edges, seenEdgeIds)
+            val ctx = BuildExtractionContext(
+                projectId = projectId,
+                relPath = relPath,
+                sourceText = sourceText,
+                parentModule = parentModule,
+                srcNodeId = srcNode.nodeId,
+                nodes = nodes,
+                edges = edges,
+                seenEdgeIds = seenEdgeIds
+            )
+            extractProjectDeps(ctx)
+            extractTypeSafeDeps(ctx, knownModules)
 
             return Pair(nodes, edges)
         }
@@ -124,22 +145,18 @@ class ModuleBoundaryDetector {
         }
 
         private fun addModuleDependencyEdge(
-            projectId: String,
-            parentModule: String,
+            ctx: BuildExtractionContext,
             targetMod: String,
-            srcNodeId: String,
             tgtNodeId: String,
-            lineIndex: Int,
-            edges: MutableList<GraphEdge>,
-            seenEdgeIds: MutableSet<String>
+            lineIndex: Int
         ) {
-            val edgeId = "$projectId:mod_dep:$parentModule->$targetMod"
-            if (seenEdgeIds.add(edgeId)) {
-                edges.add(
+            val edgeId = "${ctx.projectId}:mod_dep:${ctx.parentModule}->$targetMod"
+            if (ctx.seenEdgeIds.add(edgeId)) {
+                ctx.edges.add(
                     GraphEdge(
                         edgeId = edgeId,
-                        projectId = projectId,
-                        sourceNodeId = srcNodeId,
+                        projectId = ctx.projectId,
+                        sourceNodeId = ctx.srcNodeId,
                         targetNodeId = tgtNodeId,
                         edgeType = "MODULE_DEPENDS_ON",
                         provenance = "EXTRACTED_GRADLE",
@@ -150,44 +167,28 @@ class ModuleBoundaryDetector {
             }
         }
 
-        private fun extractProjectDeps(
-            sourceText: String,
-            projectId: String,
-            relPath: String,
-            parentModule: String,
-            srcNodeId: String,
-            nodes: MutableList<GraphNode>,
-            edges: MutableList<GraphEdge>,
-            seenEdgeIds: MutableSet<String>
-        ) {
-            for (match in GRADLE_PROJECT_DEP_REGEX.findAll(sourceText)) {
+        private fun extractProjectDeps(ctx: BuildExtractionContext) {
+            for (match in GRADLE_PROJECT_DEP_REGEX.findAll(ctx.sourceText)) {
                 var targetMod = match.groupValues[1]
                 if (!targetMod.startsWith(":")) targetMod = ":$targetMod"
-                val tgtNode = createModuleNode(projectId, relPath, targetMod)
-                nodes.add(tgtNode)
-                val line = sourceText.substring(0, match.range.first).count { it == '\n' } + 1
-                addModuleDependencyEdge(projectId, parentModule, targetMod, srcNodeId, tgtNode.nodeId, line, edges, seenEdgeIds)
+                val tgtNode = createModuleNode(ctx.projectId, ctx.relPath, targetMod)
+                ctx.nodes.add(tgtNode)
+                val line = PolyglotAstExtractor.lineNumberAtOffset(ctx.sourceText, match.range.first)
+                addModuleDependencyEdge(ctx, targetMod, tgtNode.nodeId, line)
             }
         }
 
         private fun extractTypeSafeDeps(
-            sourceText: String,
-            projectId: String,
-            relPath: String,
-            parentModule: String,
-            knownModules: List<String>,
-            srcNodeId: String,
-            nodes: MutableList<GraphNode>,
-            edges: MutableList<GraphEdge>,
-            seenEdgeIds: MutableSet<String>
+            ctx: BuildExtractionContext,
+            knownModules: List<String>
         ) {
-            for (match in GRADLE_TYPE_SAFE_REGEX.findAll(sourceText)) {
+            for (match in GRADLE_TYPE_SAFE_REGEX.findAll(ctx.sourceText)) {
                 val accessor = match.groupValues[1]
                 val converted = convertTypesafeAccessorToModuleId(accessor, knownModules)
-                val tgtNode = createModuleNode(projectId, relPath, converted)
-                nodes.add(tgtNode)
-                val line = sourceText.substring(0, match.range.first).count { it == '\n' } + 1
-                addModuleDependencyEdge(projectId, parentModule, converted, srcNodeId, tgtNode.nodeId, line, edges, seenEdgeIds)
+                val tgtNode = createModuleNode(ctx.projectId, ctx.relPath, converted)
+                ctx.nodes.add(tgtNode)
+                val line = PolyglotAstExtractor.lineNumberAtOffset(ctx.sourceText, match.range.first)
+                addModuleDependencyEdge(ctx, converted, tgtNode.nodeId, line)
             }
         }
 

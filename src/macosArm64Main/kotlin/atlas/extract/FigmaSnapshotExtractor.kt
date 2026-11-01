@@ -103,28 +103,30 @@ class FigmaSnapshotExtractor {
         )
     }
 
+    private data class FigmaTraversalCollector(
+        val fileKey: String,
+        val nodes: MutableList<FigmaNode>,
+        val edges: MutableMap<String, FigmaEdge>
+    )
+
     private fun traverseNodesMap(
         nodesMap: JsonObject,
-        fileKey: String,
-        nodes: MutableList<FigmaNode>,
-        edges: MutableMap<String, FigmaEdge>
+        collector: FigmaTraversalCollector
     ) {
         for ((_, nodeVal) in nodesMap) {
             val targetNode = (nodeVal as? JsonObject)?.let { it["document"]?.jsonObject ?: it }
             if (targetNode != null) {
-                traverseNodeTree(fileKey, targetNode, null, "Page 1", null, nodes, edges)
+                traverseNodeTree(collector, targetNode, null, "Page 1", null)
             }
         }
     }
 
     private fun traverseRootArray(
         rootElement: JsonArray,
-        fileKey: String,
-        nodes: MutableList<FigmaNode>,
-        edges: MutableMap<String, FigmaEdge>
+        collector: FigmaTraversalCollector
     ) {
         for (item in rootElement.filterIsInstance<JsonObject>()) {
-            traverseNodeTree(fileKey, item, null, "Page 1", null, nodes, edges)
+            traverseNodeTree(collector, item, null, "Page 1", null)
         }
     }
 
@@ -135,25 +137,26 @@ class FigmaSnapshotExtractor {
         nodes: MutableList<FigmaNode>,
         edges: MutableMap<String, FigmaEdge>
     ) {
+        val collector = FigmaTraversalCollector(fileKey, nodes, edges)
         val docObj = rootObj?.get("document")?.jsonObject
         if (docObj != null) {
-            traverseNodeTree(fileKey, docObj, null, "Document", null, nodes, edges)
+            traverseNodeTree(collector, docObj, null, "Document", null)
             return
         }
 
         val nodesMap = rootObj?.get("nodes")?.jsonObject
         if (nodesMap != null) {
-            traverseNodesMap(nodesMap, fileKey, nodes, edges)
+            traverseNodesMap(nodesMap, collector)
             return
         }
 
         if (rootObj != null && (rootObj.containsKey("id") || rootObj.containsKey("type"))) {
-            traverseNodeTree(fileKey, rootObj, null, "Page 1", null, nodes, edges)
+            traverseNodeTree(collector, rootObj, null, "Page 1", null)
             return
         }
 
         if (rootElement is JsonArray) {
-            traverseRootArray(rootElement, fileKey, nodes, edges)
+            traverseRootArray(rootElement, collector)
         }
     }
 
@@ -312,17 +315,15 @@ class FigmaSnapshotExtractor {
     }
 
     private fun traverseChildren(
+        collector: FigmaTraversalCollector,
         children: JsonArray?,
-        fileKey: String,
         parentId: String,
         pageName: String,
-        sectionId: String?,
-        nodes: MutableList<FigmaNode>,
-        edges: MutableMap<String, FigmaEdge>
+        sectionId: String?
     ) {
         if (children == null) return
         for (child in children.filterIsInstance<JsonObject>()) {
-            traverseNodeTree(fileKey, child, parentId, pageName, sectionId, nodes, edges)
+            traverseNodeTree(collector, child, parentId, pageName, sectionId)
         }
     }
 
@@ -339,13 +340,11 @@ class FigmaSnapshotExtractor {
     }
 
     private fun traverseNodeTree(
-        fileKey: String,
+        collector: FigmaTraversalCollector,
         nodeObj: JsonObject,
         parentId: String?,
         pageName: String,
-        sectionId: String?,
-        nodes: MutableList<FigmaNode>,
-        edges: MutableMap<String, FigmaEdge>
+        sectionId: String?
     ) {
         val nodeId = nodeObj["id"].asString() ?: nodeObj["nodeId"].asString() ?: return
         val name = nodeObj["name"].asString() ?: ""
@@ -355,19 +354,19 @@ class FigmaSnapshotExtractor {
         val (currentSectionId, nextSectionId) = resolveNodeSectionScope(nodeObj, nodeId, rawType, sectionId)
 
         val hasEmoji = detectEmoji(nodeObj, name)
-        val hasReaction = extractReactions(fileKey, nodeId, nodeObj, edges)
+        val hasReaction = extractReactions(collector.fileKey, nodeId, nodeObj, collector.edges)
         val isInteractive = detectInteractive(nodeObj, rawType, name, hasReaction)
 
-        extractBoundVariableEdges(fileKey, nodeId, nodeObj, edges)
+        extractBoundVariableEdges(collector.fileKey, nodeId, nodeObj, collector.edges)
         if (rawType == "INSTANCE") {
-            extractInstantiates(fileKey, nodeId, nodeObj, edges)
+            extractInstantiates(collector.fileKey, nodeId, nodeObj, collector.edges)
         }
-        recordContainsEdge(fileKey, parentId, nodeId, edges)
+        recordContainsEdge(collector.fileKey, parentId, nodeId, collector.edges)
 
         val figmaNode = buildFigmaNode(
             identity = FigmaNodeIdentity(
                 nodeId = nodeId,
-                fileKey = fileKey,
+                fileKey = collector.fileKey,
                 pageName = effectivePageName,
                 sectionId = currentSectionId,
                 parentId = parentId,
@@ -377,9 +376,9 @@ class FigmaSnapshotExtractor {
             nodeObj = nodeObj,
             flags = Triple(isInteractive, hasEmoji, hasReaction)
         )
-        nodes.add(figmaNode)
+        collector.nodes.add(figmaNode)
 
-        traverseChildren(nodeObj["children"]?.jsonArray, fileKey, nodeId, effectivePageName, nextSectionId, nodes, edges)
+        traverseChildren(collector, nodeObj["children"]?.jsonArray, nodeId, effectivePageName, nextSectionId)
     }
 
     private fun resolveFallbackSizing(

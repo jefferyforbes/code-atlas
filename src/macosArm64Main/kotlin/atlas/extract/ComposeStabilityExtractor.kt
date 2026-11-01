@@ -389,24 +389,17 @@ class ComposeStabilityExtractor {
         return mask
     }
 
-    private fun computeApiViolationBits(
-        maskedBodySlice: String,
-        funName: String,
-        isPrivate: Boolean,
-        isPreview: Boolean,
-        returnsUnit: Boolean,
-        modifierFlags: ModifierParamFlags,
-        parsedParams: List<ComposeParamRecord>
-    ): Int {
+    private fun computeApiViolationBits(declCtx: ComposableDeclContext): Int {
         var mask = 0
-        val emitsUi = UI_EMITTING_CALL_RE.containsMatchIn(maskedBodySlice)
-        val isScreenRoot = funName.endsWith("Screen") || funName.endsWith("Route")
-        val requiresModifier = !isPrivate && !isPreview && !isScreenRoot && returnsUnit && emitsUi
+        val emitsUi = UI_EMITTING_CALL_RE.containsMatchIn(declCtx.slices.maskedBodySlice)
+        val isScreenRoot = declCtx.funName.endsWith("Screen") || declCtx.funName.endsWith("Route")
+        val requiresModifier = !declCtx.header.isPrivate && !declCtx.header.isPreview && !isScreenRoot && declCtx.slices.returnsUnit && emitsUi
         if (requiresModifier) {
-            val invalidModifier = !modifierFlags.hasModifierParam || !modifierFlags.modifierHasDefault || !modifierFlags.modifierIsFirstOptional
+            val modFlags = declCtx.modFlags
+            val invalidModifier = !modFlags.hasModifierParam || !modFlags.modifierHasDefault || !modFlags.modifierIsFirstOptional
             if (invalidModifier) mask = mask or BIT_API_001
         }
-        if (parsedParams.any { SIDE_EFFECT_CALLBACK_RE.matches(it.paramName) }) mask = mask or BIT_API_002
+        if (declCtx.parsedParams.any { SIDE_EFFECT_CALLBACK_RE.matches(it.paramName) }) mask = mask or BIT_API_002
         return mask
     }
 
@@ -442,15 +435,7 @@ class ComposeStabilityExtractor {
             declCtx.parsedParams
         ) or
             computeStateViolationBits(declCtx.slices.maskedBodySlice, declCtx.parsedParams) or
-            computeApiViolationBits(
-                declCtx.slices.maskedBodySlice,
-                declCtx.funName,
-                declCtx.header.isPrivate,
-                declCtx.header.isPreview,
-                declCtx.slices.returnsUnit,
-                declCtx.modFlags,
-                declCtx.parsedParams
-            ) or
+            computeApiViolationBits(declCtx) or
             computePerfAndArchViolationBits(
                 declCtx.slices.maskedBodySlice,
                 declCtx.slices.rawBodySlice,
@@ -669,16 +654,7 @@ class ComposeStabilityExtractor {
         val nodeId = "${fileCtx.fileId}#$funName"
         val fqName = resolveFqName(fileCtx.pkg, funName)
 
-        val parsedParams = parseParameters(
-            nodeId = nodeId,
-            rawParamSlice = slices.rawParamSlice,
-            maskedParamSlice = slices.maskedParamSlice,
-            maskedBodySlice = slices.maskedBodySlice,
-            pkg = fileCtx.pkg,
-            stabilityPatterns = fileCtx.stabilityPatterns,
-            localClassStability = fileCtx.localClassStability,
-            workspaceNodes = fileCtx.workspaceNodes
-        )
+        val parsedParams = parseParameters(nodeId, slices, fileCtx)
         composeParams.addAll(parsedParams)
 
         val receiverStability = resolveReceiverStability(
@@ -725,7 +701,7 @@ class ComposeStabilityExtractor {
         val fileId = "$projectSlug:$relPath"
 
         val localClassStability = analyzeLocalClasses(
-            projectSlug, relPath, sourceText, masked, stabilityPatterns, workspaceNodes, precomputedClassStability
+            sourceText, masked, stabilityPatterns, workspaceNodes, precomputedClassStability
         )
         val hasPreviewInFile = Regex("""@Preview[A-Za-z0-9_]*""").containsMatchIn(masked)
         val fileCtx = ComposeFileContext(
@@ -1202,8 +1178,6 @@ class ComposeStabilityExtractor {
     }
 
     private fun analyzeLocalClasses(
-        projectSlug: String,
-        relPath: String,
         sourceText: String,
         maskedText: String,
         stabilityPatterns: List<Regex>,
@@ -1244,10 +1218,7 @@ class ComposeStabilityExtractor {
         seg: String,
         rawSeg: String,
         maskedBodySlice: String,
-        pkg: String,
-        stabilityPatterns: List<Regex>,
-        localClassStability: Map<String, Pair<String, String>>,
-        workspaceNodes: List<GraphNode>
+        fileCtx: ComposeFileContext
     ): ComposeParamRecord? {
         val eqIdx = findTopLevelEquals(seg)
         val hasDefault = eqIdx >= 0
@@ -1263,10 +1234,10 @@ class ComposeStabilityExtractor {
 
         val (stability, reason) = inferTypeStability(
             typeSig = typeSig,
-            pkg = pkg,
-            stabilityPatterns = stabilityPatterns,
-            localClassStability = localClassStability,
-            workspaceNodes = workspaceNodes
+            pkg = fileCtx.pkg,
+            stabilityPatterns = fileCtx.stabilityPatterns,
+            localClassStability = fileCtx.localClassStability,
+            workspaceNodes = fileCtx.workspaceNodes
         )
         val prov = if (reason.startsWith("STABILITY_CONFIG_MATCH")) "STABILITY_CONFIG" else "STATIC_INFERRED"
 
@@ -1285,17 +1256,12 @@ class ComposeStabilityExtractor {
 
     private fun parseParameters(
         nodeId: String,
-        rawParamSlice: String,
-        maskedParamSlice: String,
-        maskedBodySlice: String,
-        pkg: String,
-        stabilityPatterns: List<Regex>,
-        localClassStability: Map<String, Pair<String, String>>,
-        workspaceNodes: List<GraphNode>
+        slices: ComposableSlices,
+        fileCtx: ComposeFileContext
     ): List<ComposeParamRecord> {
-        if (maskedParamSlice.isBlank()) return emptyList()
-        val rawSegments = splitTopLevelComma(rawParamSlice)
-        val maskedSegments = splitTopLevelComma(maskedParamSlice)
+        if (slices.maskedParamSlice.isBlank()) return emptyList()
+        val rawSegments = splitTopLevelComma(slices.rawParamSlice)
+        val maskedSegments = splitTopLevelComma(slices.maskedParamSlice)
         val params = mutableListOf<ComposeParamRecord>()
 
         for (idx in maskedSegments.indices) {
@@ -1308,11 +1274,8 @@ class ComposeStabilityExtractor {
                 idx = idx,
                 seg = seg,
                 rawSeg = rawSeg,
-                maskedBodySlice = maskedBodySlice,
-                pkg = pkg,
-                stabilityPatterns = stabilityPatterns,
-                localClassStability = localClassStability,
-                workspaceNodes = workspaceNodes
+                maskedBodySlice = slices.maskedBodySlice,
+                fileCtx = fileCtx
             )
             if (param != null) {
                 params.add(param)
@@ -1343,13 +1306,13 @@ class ComposeStabilityExtractor {
 
     private fun inferImmutableCollectionStability(
         outerType: String,
-        shortOuter: String,
         genericArgs: List<String>,
         pkg: String,
         stabilityPatterns: List<Regex>,
         localClassStability: Map<String, Pair<String, String>>,
         workspaceNodes: List<GraphNode>
     ): Pair<String, String>? {
+        val shortOuter = outerType.substringAfterLast('.')
         if (!IMMUTABLE_COLLECTION_PREFIXES.any { outerType == it || shortOuter == it }) {
             return null
         }
@@ -1395,7 +1358,7 @@ class ComposeStabilityExtractor {
 
         val genericArgs = extractTopLevelGenericArgs(clean)
         val immutableHit = inferImmutableCollectionStability(
-            outerType, shortOuter, genericArgs, pkg, stabilityPatterns, localClassStability, workspaceNodes
+            outerType, genericArgs, pkg, stabilityPatterns, localClassStability, workspaceNodes
         )
         return immutableHit ?: inferFallbackTypeStability(outerType, shortOuter, localClassStability)
     }
