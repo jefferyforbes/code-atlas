@@ -64,7 +64,7 @@ internal object NativeSystemsAstExtractor {
 
     private fun extractSwiftImports(maskedText: String): List<Pair<String, Int>> =
         SWIFT_IMP_RE.findAll(maskedText).map { match ->
-            Pair(match.groupValues[1], maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
+            Pair(match.groupValues[1], PolyglotAstExtractor.lineNumberAtOffset(maskedText, match.range.first))
         }.toList()
 
     private fun parseSwiftCallEdge(
@@ -80,7 +80,7 @@ internal object NativeSystemsAstExtractor {
         val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
         if (!seenCallees.add(targetSym)) return null
 
-        val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+        val callLine = node.startLine + PolyglotAstExtractor.countNewlinesBefore(body, callMatch.range.first)
         return GraphEdge(
             edgeId = "${node.nodeId}:call:$targetSym:$callLine",
             projectId = node.projectId,
@@ -219,7 +219,7 @@ internal object NativeSystemsAstExtractor {
         edges: MutableList<GraphEdge>
     ): Boolean {
         val (indent, kw, name) = extractSwiftDeclHeader(match) ?: return false
-        val startLine = ctx.maskedText.substring(0, match.range.first).count { it == '\n' } + 1
+        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, match.range.first)
         val endLine = PolyglotAstExtractor.findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
 
         PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
@@ -288,7 +288,7 @@ internal object NativeSystemsAstExtractor {
     private fun extractRustImports(maskedText: String): List<Pair<String, Int>> =
         RS_USE_RE.findAll(maskedText).map { match ->
             val sym = match.groupValues[1].substringAfterLast("::")
-            Pair(sym, maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
+            Pair(sym, PolyglotAstExtractor.lineNumberAtOffset(maskedText, match.range.first))
         }.toList()
 
     private fun resolveRustKind(kw: String): String = when (kw) {
@@ -371,7 +371,7 @@ internal object NativeSystemsAstExtractor {
     ): Boolean {
         val (indent, kw, name) = extractSwiftDeclHeader(match) ?: return false
         val kind = resolveRustKind(kw)
-        val startLine = ctx.maskedText.substring(0, match.range.first).count { it == '\n' } + 1
+        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, match.range.first)
         val endLine = PolyglotAstExtractor.findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
 
         PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
@@ -410,7 +410,7 @@ internal object NativeSystemsAstExtractor {
         val isSelfCall = targetSym == node.name || (callee == node.name && (receiver.isNullOrEmpty() || receiver == "self"))
         if (isSelfCall || targetSym in PolyglotAstExtractor.CALL_STOPWORDS || !seenCallees.add(targetSym)) return null
 
-        val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+        val callLine = node.startLine + PolyglotAstExtractor.countNewlinesBefore(body, callMatch.range.first)
         return GraphEdge(
             edgeId = "${node.nodeId}:call:$targetSym:$callLine",
             projectId = node.projectId,
@@ -484,7 +484,7 @@ internal object NativeSystemsAstExtractor {
 
     private fun extractCppImports(sourceText: String, maskedLines: List<String>): List<Pair<String, Int>> =
         CPP_INC_RE.findAll(sourceText).mapNotNull { match ->
-            val lineIdx = sourceText.substring(0, match.range.first).count { it == '\n' }
+            val lineIdx = PolyglotAstExtractor.countNewlinesBefore(sourceText, match.range.first)
             val maskedLine = if (lineIdx < maskedLines.size) maskedLines[lineIdx] else ""
             if (maskedLine.trim().isEmpty()) {
                 null
@@ -578,7 +578,7 @@ internal object NativeSystemsAstExtractor {
         val header = extractSwiftDeclHeader(declMatch) ?: return false
         val (indent, kw, name) = header
         val kind = resolveCppDeclKind(kw)
-        val startLine = ctx.maskedText.substring(0, declMatch.range.first).count { it == '\n' } + 1
+        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, declMatch.range.first)
         val endLine = PolyglotAstExtractor.findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
 
         PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
@@ -692,7 +692,7 @@ internal object NativeSystemsAstExtractor {
         edges: MutableList<GraphEdge>
     ): Boolean {
         val rawName = declMatch.groups["name"]?.value ?: return false
-        val startLine = ctx.maskedText.substring(0, declMatch.range.first).count { it == '\n' } + 1
+        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, declMatch.range.first)
         if (isSkippedCppFunction(rawName, nodes, startLine)) return false
 
         val shortName = rawName.substringAfterLast("::")
@@ -732,7 +732,7 @@ internal object NativeSystemsAstExtractor {
         val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
         if (isSelfCall || callee in PolyglotAstExtractor.CALL_STOPWORDS || !seenCallees.add(targetSym)) return null
 
-        val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+        val callLine = node.startLine + PolyglotAstExtractor.countNewlinesBefore(body, callMatch.range.first)
         return GraphEdge(
             edgeId = "${node.nodeId}:call:$targetSym:$callLine",
             projectId = node.projectId,

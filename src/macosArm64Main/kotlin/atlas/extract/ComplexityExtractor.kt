@@ -19,8 +19,9 @@ object ComplexityExtractor {
         "Spacer", "Item", "items", "ConstraintLayout", "FlowRow", "FlowColumn"
     )
 
-    private val CONTROL_KEYWORDS = setOf(
-        "if", "when", "switch", "for", "while", "do", "catch", "except", "match"
+    private val DECLARATION_PREFIX_KEYWORDS = setOf(
+        "fun", "fn", "func", "function", "val", "var", "let", "const",
+        "class", "interface", "object", "struct", "enum", "trait", "type", "typealias"
     )
 
     private val COMMON_LAMBDAS = setOf(
@@ -201,37 +202,60 @@ object ComplexityExtractor {
         }
     }
 
+    private fun isSwitchLikeKeyword(word: String, language: String): Boolean = when (word) {
+        "when" -> language == "kotlin" || language == "kt"
+        "match" -> language == "rust" || language == "rs"
+        "switch" -> language !in listOf("kotlin", "kt", "rust", "rs")
+        else -> false
+    }
+
+    private fun isCaseKeywordForLanguage(language: String): Boolean =
+        language !in listOf("kotlin", "kt", "rust", "rs")
+
+    private fun isNonControlIdentifierPosition(trimmed: String, startIndex: Int, prevWord: String): Boolean {
+        val prevChar = if (startIndex > 0) trimmed[startIndex - 1] else ' '
+        return prevChar == '.' || prevChar == ':' || prevWord in DECLARATION_PREFIX_KEYWORDS
+    }
+
+    private fun handleSwitchLikeKeyword(
+        word: String,
+        language: String,
+        nesting: Int,
+        state: BraceRunState
+    ) {
+        if (!isSwitchLikeKeyword(word, language)) return
+        state.cyclomatic++
+        state.cognitive += (1 + nesting)
+        state.pendingControl = true
+        state.pendingSwitchLike = true
+    }
+
     private fun handleKeywordToken(
         word: String,
         trimmed: String,
         wordEndIndex: Int,
+        language: String,
         state: BraceRunState
     ) {
         val nesting = state.currentNesting()
         when (word) {
             "if" -> handleIfKeyword(state, nesting)
             "else" -> handleElseKeyword(trimmed, wordEndIndex, state)
-            "when", "switch", "match" -> {
-                state.cyclomatic++
-                state.cognitive += (1 + nesting)
-                state.pendingControl = true
-                state.pendingSwitchLike = true
-            }
+            "when", "switch", "match" -> handleSwitchLikeKeyword(word, language, nesting, state)
             "for", "while", "do", "catch" -> {
                 state.cyclomatic++
                 state.cognitive += (1 + nesting)
                 state.pendingControl = true
             }
-            "case" -> state.cyclomatic++
+            "case" -> if (isCaseKeywordForLanguage(language)) state.cyclomatic++
             "break", "continue" -> handleBreakContinueKeyword(trimmed, wordEndIndex, state)
         }
-        state.prevWord = word
-        state.lastIdentifier = word
     }
 
     private fun scanWordToken(
         trimmed: String,
         startIndex: Int,
+        language: String,
         state: BraceRunState
     ): Int {
         var end = startIndex
@@ -239,7 +263,11 @@ object ComplexityExtractor {
             end++
         }
         val word = trimmed.substring(startIndex, end)
-        handleKeywordToken(word, trimmed, end, state)
+        if (!isNonControlIdentifierPosition(trimmed, startIndex, state.prevWord)) {
+            handleKeywordToken(word, trimmed, end, language, state)
+        }
+        state.prevWord = word
+        state.lastIdentifier = word
         return end
     }
 
@@ -301,7 +329,7 @@ object ComplexityExtractor {
                     i++
                 }
                 c.isLetter() || c == '_' -> {
-                    i = scanWordToken(trimmed, i, state)
+                    i = scanWordToken(trimmed, i, language, state)
                 }
                 checkKotlinArrow(trimmed, i, language, state) -> {
                     i += 2

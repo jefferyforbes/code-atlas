@@ -396,10 +396,11 @@ class PolyglotAstExtractor {
         }
 
         private fun dispatchJsInterpolatedToken(state: MaskState, ch: Char) {
+            if (maskComment(state)) return
             if (ch == '"' || ch == '\'') {
                 maskJsInterpolatedQuote(state, ch)
             } else if (ch == '`') {
-                maskJsNestedTemplate(state)
+                maskJsTemplateLiteral(state)
             } else {
                 state.out[state.i] = ch
                 state.i++
@@ -430,48 +431,11 @@ class PolyglotAstExtractor {
             }
         }
 
-        private fun maskJsNestedTemplate(state: MaskState) {
-            state.out[state.i] = '`'
-            state.i++
-            while (state.i < state.n) {
-                val ch = state.source[state.i]
-                if (ch == '\\' && state.i + 1 < state.n) {
-                    state.writeSpaceOrNewline(state.i)
-                    state.writeSpaceOrNewline(state.i + 1)
-                    state.i += 2
-                } else if (ch == '$' && state.i + 1 < state.n && state.source[state.i + 1] == '{') {
-                    state.out[state.i] = ' '
-                    state.out[state.i + 1] = ' '
-                    state.i += 2
-                    maskJsInterpolationBraces(state)
-                } else if (ch == '`') {
-                    state.out[state.i] = '`'
-                    state.i++
-                    return
-                } else {
-                    state.writeSpaceOrNewline(state.i)
-                    state.i++
-                }
-            }
-        }
-
-        private fun maskJsInterpolationBraces(state: MaskState) {
-            var innerDepth = 1
-            while (state.i < state.n && innerDepth > 0) {
-                val ch = state.source[state.i]
-                if (ch == '{') {
-                    innerDepth++
-                    state.out[state.i] = '{'
-                    state.i++
-                } else if (ch == '}') {
-                    innerDepth--
-                    state.out[state.i] = if (innerDepth == 0) ' ' else '}'
-                    state.i++
-                } else {
-                    state.out[state.i] = ch
-                    state.i++
-                }
-            }
+        private fun maskInterpolatedLiteralOrComment(state: MaskState): Boolean {
+            if (maskComment(state)) return true
+            if (maskTripleQuotedString(state)) return true
+            if (maskDoubleQuotedString(state)) return true
+            return maskSingleQuotedString(state)
         }
 
         private fun stepKotlinInterpolation(state: MaskState, ch: Char, depth: Int): Int {
@@ -486,8 +450,7 @@ class PolyglotAstExtractor {
                 state.i++
                 return nextDepth
             }
-            if (ch == '"') {
-                maskInterpolatedDoubleQuote(state)
+            if (maskInterpolatedLiteralOrComment(state)) {
                 return depth
             }
             state.out[state.i] = ch
@@ -517,8 +480,7 @@ class PolyglotAstExtractor {
                 state.i++
                 return nextDepth
             }
-            if (ch == '"') {
-                maskInterpolatedDoubleQuote(state)
+            if (maskInterpolatedLiteralOrComment(state)) {
                 return depth
             }
             state.out[state.i] = ch
@@ -536,46 +498,26 @@ class PolyglotAstExtractor {
             }
         }
 
-        private fun maskInterpolatedDoubleQuote(state: MaskState) {
-            state.out[state.i] = '"'
-            state.i++
-            while (state.i < state.n) {
-                val ch = state.source[state.i]
-                if (ch == '\\' && state.i + 1 < state.n) {
-                    state.writeSpaceOrNewline(state.i)
-                    state.writeSpaceOrNewline(state.i + 1)
-                    state.i += 2
-                } else if (ch == '"') {
-                    state.out[state.i] = '"'
-                    state.i++
-                    return
-                } else if (ch == '\n') {
-                    state.out[state.i] = '\n'
-                    state.i++
-                    return
-                } else {
-                    state.writeSpaceOrNewline(state.i)
-                    state.i++
-                }
-            }
-        }
+        private data class SourceDispatchContext(
+            val projectId: String,
+            val relPath: String,
+            val sourceText: String,
+            val moduleId: String,
+            val sourceSet: String,
+            val maskedText: String
+        )
 
         private fun dispatchLanguageExtraction(
             lang: String,
-            projectId: String,
-            relPath: String,
-            sourceText: String,
-            moduleId: String,
-            sourceSet: String,
-            maskedText: String
+            ctx: SourceDispatchContext
         ): Triple<List<GraphNode>, List<GraphEdge>, Int>? {
             return when (lang) {
-                "kotlin" -> KotlinAstExtractor.extractKotlin(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                "swift" -> NativeSystemsAstExtractor.extractSwift(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                "python" -> PythonAstExtractor.extractPython(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                "typescript", "javascript" -> TypeScriptAstExtractor.extractTypeScript(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                "rust" -> NativeSystemsAstExtractor.extractRust(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
-                "cpp" -> NativeSystemsAstExtractor.extractCpp(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+                "kotlin" -> KotlinAstExtractor.extractKotlin(ctx.projectId, ctx.relPath, ctx.sourceText, ctx.moduleId, ctx.sourceSet, ctx.maskedText)
+                "swift" -> NativeSystemsAstExtractor.extractSwift(ctx.projectId, ctx.relPath, ctx.sourceText, ctx.moduleId, ctx.sourceSet, ctx.maskedText)
+                "python" -> PythonAstExtractor.extractPython(ctx.projectId, ctx.relPath, ctx.sourceText, ctx.moduleId, ctx.sourceSet, ctx.maskedText)
+                "typescript", "javascript" -> TypeScriptAstExtractor.extractTypeScript(ctx.projectId, ctx.relPath, ctx.sourceText, ctx.moduleId, ctx.sourceSet, ctx.maskedText)
+                "rust" -> NativeSystemsAstExtractor.extractRust(ctx.projectId, ctx.relPath, ctx.sourceText, ctx.moduleId, ctx.sourceSet, ctx.maskedText)
+                "cpp" -> NativeSystemsAstExtractor.extractCpp(ctx.projectId, ctx.relPath, ctx.sourceText, ctx.moduleId, ctx.sourceSet, ctx.maskedText)
                 else -> null
             }
         }
@@ -627,16 +569,12 @@ class PolyglotAstExtractor {
         }
 
         private fun enrichNodesAndEdgesWithUrls(
-            projectId: String,
-            relPath: String,
-            moduleId: String,
-            sourceSet: String,
-            sourceText: String,
+            ctx: SourceDispatchContext,
             baseNodes: List<GraphNode>,
             baseEdges: List<GraphEdge>,
             extractedUrls: List<UrlTargetResolver.ExtractedEndpointOrUrl>
         ): Pair<List<GraphNode>, List<GraphEdge>> {
-            val fileId = "$projectId:$relPath"
+            val fileId = "${ctx.projectId}:${ctx.relPath}"
             val finalNodes = baseNodes.toMutableList()
             val finalEdges = baseEdges.toMutableList()
             var fileScopeNode: GraphNode? = finalNodes.firstOrNull { it.nodeId == "$fileId#file" }
@@ -645,7 +583,7 @@ class PolyglotAstExtractor {
                 var sourceNode = findUrlEnclosingNode(baseNodes, item.lineNumber)
                 if (sourceNode == null) {
                     if (fileScopeNode == null) {
-                        val created = createFileScopeNode(fileId, projectId, relPath, moduleId, sourceSet, sourceText)
+                        val created = createFileScopeNode(fileId, ctx.projectId, ctx.relPath, ctx.moduleId, ctx.sourceSet, ctx.sourceText)
                         fileScopeNode = created
                         finalNodes.add(created)
                     }
@@ -653,14 +591,14 @@ class PolyglotAstExtractor {
                 }
 
                 val targetId = if (item.isHttpEndpointRoute) {
-                    "$projectId:endpoint#${item.canonicalRouteOrUrl}"
+                    "${ctx.projectId}:endpoint#${item.canonicalRouteOrUrl}"
                 } else {
-                    "$projectId:url_ref#${item.canonicalRouteOrUrl}"
+                    "${ctx.projectId}:url_ref#${item.canonicalRouteOrUrl}"
                 }
                 finalEdges.add(
                     GraphEdge(
                         edgeId = "${sourceNode.nodeId}:url:${item.edgeType.lowercase()}:${item.canonicalRouteOrUrl}:${item.lineNumber}",
-                        projectId = projectId,
+                        projectId = ctx.projectId,
                         sourceNodeId = sourceNode.nodeId,
                         targetNodeId = targetId,
                         edgeType = item.edgeType,
@@ -685,7 +623,8 @@ class PolyglotAstExtractor {
             val sourceSet = SemioticLayerClassifier.detectSourceSet(relPath)
 
             val maskedText = maskCommentsAndStrings(sourceText, lang)
-            val extracted = dispatchLanguageExtraction(lang, projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+            val ctx = SourceDispatchContext(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
+            val extracted = dispatchLanguageExtraction(lang, ctx)
                 ?: return Triple(emptyList(), emptyList(), 0)
             val (baseNodes, baseEdges, topLevelCount) = extracted
 
@@ -695,11 +634,7 @@ class PolyglotAstExtractor {
             }
 
             val (finalNodes, finalEdges) = enrichNodesAndEdgesWithUrls(
-                projectId = projectId,
-                relPath = relPath,
-                moduleId = moduleId,
-                sourceSet = sourceSet,
-                sourceText = sourceText,
+                ctx = ctx,
                 baseNodes = baseNodes,
                 baseEdges = baseEdges,
                 extractedUrls = extractedUrls
@@ -823,10 +758,53 @@ class PolyglotAstExtractor {
             return isTripleQuoteTokenAt(line, pos)
         }
 
+        internal fun countNewlinesBefore(text: String, offset: Int): Int {
+            val limit = offset.coerceIn(0, text.length)
+            var count = 0
+            for (i in 0 until limit) {
+                if (text[i] == '\n') count++
+            }
+            return count
+        }
+
+        internal fun lineNumberAtOffset(text: String, offset: Int): Int =
+            countNewlinesBefore(text, offset) + 1
+
+        private fun skipQuotedInterpolation(line: String, startPos: Int): Int {
+            var pos = startPos + 2
+            var depth = 1
+            while (pos < line.length && depth > 0) {
+                val c = line[pos]
+                when {
+                    c == '"' || c == '\'' -> pos = skipQuotedString(line, pos, c)
+                    c == '{' -> {
+                        depth++
+                        pos++
+                    }
+                    c == '}' -> {
+                        depth--
+                        pos++
+                    }
+                    else -> pos++
+                }
+            }
+            return pos
+        }
+
+        private fun isInterpolationStartAt(line: String, pos: Int, delimiter: Char): Boolean {
+            return delimiter == '"' && line[pos] == '$' && pos + 1 < line.length && line[pos + 1] == '{'
+        }
+
         private fun skipQuotedString(line: String, startPos: Int, delimiter: Char): Int {
             var pos = startPos + 1
             while (pos < line.length && line[pos] != delimiter) {
-                if (line[pos] == '\\' && pos + 1 < line.length) pos += 2 else pos++
+                if (line[pos] == '\\' && pos + 1 < line.length) {
+                    pos += 2
+                } else if (isInterpolationStartAt(line, pos, delimiter)) {
+                    pos = skipQuotedInterpolation(line, pos)
+                } else {
+                    pos++
+                }
             }
             if (pos < line.length && line[pos] == delimiter) pos++
             return pos
@@ -1516,6 +1494,28 @@ class PolyglotAstExtractor {
             val fileImports: Set<String>
         )
 
+        private fun narrowCandidatePool(
+            initialPool: List<GraphNode>,
+            ctx: DisambiguationContext
+        ): List<GraphNode> {
+            var pool = initialPool
+            val srcDir = ctx.srcFileId.substringBeforeLast('/', "")
+            if (srcDir.isNotEmpty()) {
+                val sameDir = pool.filter { it.fileId.substringBeforeLast('/', "") == srcDir }
+                if (sameDir.isNotEmpty()) pool = sameDir
+            }
+            if (ctx.srcModId.isNotEmpty()) {
+                val sameModule = pool.filter { it.moduleId == ctx.srcModId }
+                if (sameModule.isNotEmpty()) pool = sameModule
+            }
+            val srcArch = ctx.srcNode?.archLayer.orEmpty()
+            if (srcArch.isNotEmpty()) {
+                val sameArchLayer = pool.filter { it.archLayer == srcArch }
+                if (sameArchLayer.isNotEmpty()) pool = sameArchLayer
+            }
+            return pool
+        }
+
         private fun selectCandidatePool(
             candidatePool: List<GraphNode>,
             receiverMatches: List<GraphNode>,
@@ -1528,24 +1528,19 @@ class PolyglotAstExtractor {
             val imported = candidatePool.filter { isSymbolImported(it.qualifiedName, ctx.fileImports) }
             if (imported.isNotEmpty()) return filterByLexicalScope(imported, ctx.srcNode)
 
-            if (receiverMatches.isNotEmpty()) return receiverMatches
-
-            if (ctx.srcModId.isNotEmpty()) {
-                val sameModule = candidatePool.filter { it.moduleId == ctx.srcModId }
-                if (sameModule.isNotEmpty()) return filterByLexicalScope(sameModule, ctx.srcNode)
+            if (receiverMatches.isNotEmpty()) {
+                return filterByLexicalScope(narrowCandidatePool(receiverMatches, ctx), ctx.srcNode)
             }
-            val srcArch = ctx.srcNode?.archLayer.orEmpty()
-            if (srcArch.isNotEmpty()) {
-                val sameArchLayer = candidatePool.filter { it.archLayer == srcArch }
-                if (sameArchLayer.isNotEmpty()) return filterByLexicalScope(sameArchLayer, ctx.srcNode)
+
+            val narrowed = narrowCandidatePool(candidatePool, ctx)
+            if (narrowed.size < candidatePool.size) {
+                return filterByLexicalScope(narrowed, ctx.srcNode)
             }
             return filterByLexicalScope(fallback, ctx.srcNode)
         }
 
         private fun pickBestCandidate(pool: List<GraphNode>): GraphNode =
-            pool.sortedWith(
-                compareByDescending<GraphNode> { it.inDegree }.thenBy { it.nodeId }
-            ).first()
+            pool.minBy { it.nodeId }
 
         private data class DisambiguatedTarget(
             val targetId: String,

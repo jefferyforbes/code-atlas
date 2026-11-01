@@ -247,4 +247,54 @@ class ComplexityExtractorTest {
         val vector = ComplexityExtractor.calculate(multilineCode, multilineCode, "kotlin")
         assertEquals(4, vector.paramCount, "extractParamCount must count all 4 multiline parameters")
     }
+
+    @Test
+    fun testNonControlIdentifiersAndMemberAccessDoNotInflateComplexity() {
+        val ktCode = listOf(
+            "fun match(match: MatchResult, switch: String, case: Int): String {",
+            "    val result = match.value",
+            "    return switch + result + case.toString()",
+            "}"
+        )
+        val ktVector = ComplexityExtractor.calculate(ktCode, ktCode, "kotlin")
+        assertEquals(1, ktVector.cyclomatic, "Kotlin identifiers named match/switch/case must not increment cyclomatic complexity")
+        assertEquals(0, ktVector.cognitive, "Kotlin identifiers named match/switch/case must not increment cognitive complexity")
+
+        val tsCode = listOf(
+            "function parseWhen(when: string, text: string): Promise<string> {",
+            "    const match = text.match(/foo/);",
+            "    return Promise.resolve(when).catch(err => when);",
+            "}"
+        )
+        val tsVector = ComplexityExtractor.calculate(tsCode, tsCode, "typescript")
+        assertEquals(1, tsVector.cyclomatic, "TS member calls .match()/.catch() and identifier 'when' must not increment cyclomatic complexity")
+        assertEquals(0, tsVector.cognitive, "TS member calls .match()/.catch() and identifier 'when' must not increment cognitive complexity")
+    }
+
+    @Test
+    fun testKotlinInterpolationWithCharBracesAndNestedQuotesPreservesBlockBoundaries() {
+        val source = listOf(
+            "package sample",
+            "",
+            "class LexerSample {",
+            "    fun formatBraces(ch: Char, map: Map<String, String>): String {",
+            "        val msg = \"\${if (ch == '{' || ch == '}') map[\"{\"] else \"ok\"}\"",
+            "        return msg",
+            "    }",
+            "",
+            "    fun secondFunction(): Int {",
+            "        return 42",
+            "    }",
+            "}"
+        ).joinToString("\n")
+
+        val (nodes, _, _) = KotlinAstExtractor.extractKotlin("proj", "src/LexerSample.kt", source, "root", "main")
+        val formatFn = nodes.first { it.name == "formatBraces" }
+        val secondFn = nodes.first { it.name == "secondFunction" }
+
+        assertEquals(4, formatFn.startLine)
+        assertEquals(7, formatFn.endLine, "formatBraces endLine must not be corrupted by '{' or nested quotes inside string interpolation")
+        assertEquals(9, secondFn.startLine)
+        assertEquals(11, secondFn.endLine)
+    }
 }

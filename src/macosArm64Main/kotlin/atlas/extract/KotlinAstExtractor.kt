@@ -168,7 +168,7 @@ internal object KotlinAstExtractor {
 
     private fun extractKotlinImports(maskedText: String): List<Pair<String, Int>> =
         KT_IMP_RE.findAll(maskedText).map { match ->
-            Pair(match.groupValues[1], maskedText.substring(0, match.range.first).count { it == '\n' } + 1)
+            Pair(match.groupValues[1], PolyglotAstExtractor.lineNumberAtOffset(maskedText, match.range.first))
         }.toList()
 
     private fun extractKotlinReceiverTypes(
@@ -222,14 +222,14 @@ internal object KotlinAstExtractor {
     }
 
     private fun lineNumberOfOffset(text: String, offset: Int): Int =
-        text.substring(0, offset).count { it == '\n' } + 1
+        PolyglotAstExtractor.lineNumberAtOffset(text, offset)
 
-    private fun resolveDeclStartOffset(match: MatchResult): Int {
-        val modGroup = match.groups["modifiers"]
+    private fun resolveDeclStartOffset(m: MatchResult): Int {
+        val modGroup = m.groups["modifiers"]
         if (modGroup != null && modGroup.value.isNotEmpty()) {
             return modGroup.range.first
         }
-        return match.groups["kw"]!!.range.first
+        return m.groups["kw"]?.range?.first ?: m.range.first
     }
 
     private fun resolveKotlinDeclLines(
@@ -326,7 +326,7 @@ internal object KotlinAstExtractor {
 
             val (targetSym, provenance) = resolveCallTargetAndProvenance(receiver, callee, localReceiverTypes)
             if (seenCallees.add(targetSym)) {
-                val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+                val callLine = node.startLine + PolyglotAstExtractor.countNewlinesBefore(body, callMatch.range.first)
                 edges.add(
                     GraphEdge(
                         edgeId = "${node.nodeId}:call:$targetSym:$callLine",
@@ -353,7 +353,7 @@ internal object KotlinAstExtractor {
             val callee = infixMatch.groups["callee"]?.value ?: continue
             val isIgnored = callee == node.name || callee in INFIX_STOPWORDS || callee in PolyglotAstExtractor.CALL_STOPWORDS
             if (!isIgnored && seenCallees.add(callee)) {
-                val callLine = node.startLine + body.substring(0, infixMatch.range.first).count { it == '\n' }
+                val callLine = node.startLine + PolyglotAstExtractor.countNewlinesBefore(body, infixMatch.range.first)
                 edges.add(
                     GraphEdge(
                         edgeId = "${node.nodeId}:infix:$callee:$callLine",

@@ -283,12 +283,12 @@ object UrlTargetResolver {
     }
 
     private fun addExtractedItem(
-        lineNo: Int, rawValue: String, canonicalValue: String, isEndpoint: Boolean,
-        edgeType: String, httpMethod: String?, seenPerLine: MutableSet<String>,
+        item: ExtractedEndpointOrUrl,
+        seenPerLine: MutableSet<String>,
         results: MutableList<ExtractedEndpointOrUrl>
     ) {
-        if (seenPerLine.add("$lineNo:$edgeType:$canonicalValue")) {
-            results.add(ExtractedEndpointOrUrl(rawValue, canonicalValue, isEndpoint, edgeType, httpMethod, lineNo))
+        if (seenPerLine.add("${item.lineNumber}:${item.edgeType}:${item.canonicalRouteOrUrl}")) {
+            results.add(item)
         }
     }
 
@@ -320,7 +320,7 @@ object UrlTargetResolver {
         val rawRoute = m.groupValues[2].trim()
         if (isHttpRouteCandidate(rawRoute, hasExplicitRouteCall = true)) {
             val method = if (verb in anyVerbs) "ANY" else verb
-            addExtractedItem(lineNo, rawRoute, normalizeRouteTemplate(rawRoute), true, "EXPOSES_ENDPOINT", method, seenPerLine, results)
+            addExtractedItem(ExtractedEndpointOrUrl(rawRoute, normalizeRouteTemplate(rawRoute), true, "EXPOSES_ENDPOINT", method, lineNo), seenPerLine, results)
         }
     }
 
@@ -342,14 +342,14 @@ object UrlTargetResolver {
         if (rawTarget.startsWith("http://", ignoreCase = true) || rawTarget.startsWith("https://", ignoreCase = true)) {
             val pathPart = extractPathFromHttpUrl(rawTarget)
             if (pathPart != null && isHttpRouteCandidate(pathPart, hasExplicitRouteCall = true)) {
-                addExtractedItem(lineNo, rawTarget, normalizeRouteTemplate(pathPart), true, "CALLS_ENDPOINT", verb, seenPerLine, results)
+                addExtractedItem(ExtractedEndpointOrUrl(rawTarget, normalizeRouteTemplate(pathPart), true, "CALLS_ENDPOINT", verb, lineNo), seenPerLine, results)
             }
-            addExtractedItem(lineNo, rawTarget, normalizeExternalUrl(rawTarget), false, "URL_REFS", verb, seenPerLine, results)
+            addExtractedItem(ExtractedEndpointOrUrl(rawTarget, normalizeExternalUrl(rawTarget), false, "URL_REFS", verb, lineNo), seenPerLine, results)
             return
         }
         val normalizedInput = if (rawTarget.startsWith("/")) rawTarget else "/$rawTarget"
         if (isHttpRouteCandidate(normalizedInput, hasExplicitRouteCall = true)) {
-            addExtractedItem(lineNo, rawTarget, normalizeRouteTemplate(normalizedInput), true, "CALLS_ENDPOINT", verb, seenPerLine, results)
+            addExtractedItem(ExtractedEndpointOrUrl(rawTarget, normalizeRouteTemplate(normalizedInput), true, "CALLS_ENDPOINT", verb, lineNo), seenPerLine, results)
         }
     }
 
@@ -368,7 +368,7 @@ object UrlTargetResolver {
         if (!isHttpRouteCandidate(rawRoute, hasExplicitRouteCall = true)) return
         val canon = normalizeRouteTemplate(rawRoute)
         if (!seenPerLine.contains("$lineNo:CALLS_ENDPOINT:$canon")) {
-            addExtractedItem(lineNo, rawRoute, canon, true, "EXPOSES_ENDPOINT", if (verb == "ROUTE") "ANY" else verb, seenPerLine, results)
+            addExtractedItem(ExtractedEndpointOrUrl(rawRoute, canon, true, "EXPOSES_ENDPOINT", if (verb == "ROUTE") "ANY" else verb, lineNo), seenPerLine, results)
         }
     }
 
@@ -389,7 +389,7 @@ object UrlTargetResolver {
             } else if (isHttpRouteCandidate(trimmedLit, hasExplicitRouteCall = false)) {
                 val canon = normalizeRouteTemplate(trimmedLit)
                 if ("$lineNo:EXPOSES_ENDPOINT:$canon" !in seenPerLine) {
-                    addExtractedItem(lineNo, trimmedLit, canon, true, "CALLS_ENDPOINT", null, seenPerLine, results)
+                    addExtractedItem(ExtractedEndpointOrUrl(trimmedLit, canon, true, "CALLS_ENDPOINT", null, lineNo), seenPerLine, results)
                 }
             }
         }
@@ -404,12 +404,12 @@ object UrlTargetResolver {
     private fun recordExternalLiteralUrl(
         trimmedLit: String, lineNo: Int, seenPerLine: MutableSet<String>, results: MutableList<ExtractedEndpointOrUrl>
     ) {
-        addExtractedItem(lineNo, trimmedLit, normalizeExternalUrl(trimmedLit), false, "URL_REFS", null, seenPerLine, results)
+        addExtractedItem(ExtractedEndpointOrUrl(trimmedLit, normalizeExternalUrl(trimmedLit), false, "URL_REFS", null, lineNo), seenPerLine, results)
         val pathPart = extractPathFromHttpUrl(trimmedLit) ?: return
         if (isHttpRouteCandidate(pathPart, hasExplicitRouteCall = false)) {
             val canonRoute = normalizeRouteTemplate(pathPart)
             if ("$lineNo:EXPOSES_ENDPOINT:$canonRoute" !in seenPerLine) {
-                addExtractedItem(lineNo, trimmedLit, canonRoute, true, "CALLS_ENDPOINT", null, seenPerLine, results)
+                addExtractedItem(ExtractedEndpointOrUrl(trimmedLit, canonRoute, true, "CALLS_ENDPOINT", null, lineNo), seenPerLine, results)
             }
         }
     }

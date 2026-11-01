@@ -63,7 +63,7 @@ internal object TypeScriptAstExtractor {
             val origMatch = sourceText.substring(m.range)
             val parsed = TS_IMP_RE.find(origMatch) ?: m
             val named = parsed.groupValues[1].ifEmpty { parsed.groupValues[2] }
-            val lineNo = maskedText.substring(0, m.range.first).count { it == '\n' } + 1
+            val lineNo = PolyglotAstExtractor.lineNumberAtOffset(maskedText, m.range.first)
             for (sym in named.split(",").filter { it.isNotBlank() }) {
                 val clean = sym.trim().substringBefore(" as ").trim()
                 if (clean.isNotEmpty()) imports.add(Pair(clean, lineNo))
@@ -226,7 +226,7 @@ internal object TypeScriptAstExtractor {
         nodes: MutableList<GraphNode>,
         edges: MutableList<GraphEdge>
     ): Boolean {
-        val startLine = ctx.maskedText.substring(0, candidate.rangeStart).count { it == '\n' } + 1
+        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, candidate.rangeStart)
         PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
 
         if (candidate.isMethod && scopeStack.isEmpty()) {
@@ -273,7 +273,7 @@ internal object TypeScriptAstExtractor {
         val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
         if (isSelfCall || callee in PolyglotAstExtractor.CALL_STOPWORDS || !seenCallees.add(targetSym)) return null
 
-        val callLine = node.startLine + body.substring(0, callMatch.range.first).count { it == '\n' }
+        val callLine = node.startLine + PolyglotAstExtractor.countNewlinesBefore(body, callMatch.range.first)
         return GraphEdge(
             edgeId = "${node.nodeId}:call:$targetSym:$callLine",
             projectId = node.projectId,

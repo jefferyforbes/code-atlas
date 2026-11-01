@@ -163,15 +163,14 @@ object VaultPlanBridge {
             edgeType: String,
             provenance: String,
             confidence: Double,
-            lineNumber: Int,
-            sourceId: String = docNodeId
+            lineNumber: Int
         ): Boolean {
             if (!seenEdges.add(edgeId)) return false
             edges.add(
                 GraphEdge(
                     edgeId = edgeId,
                     projectId = projectId,
-                    sourceNodeId = sourceId,
+                    sourceNodeId = docNodeId,
                     targetNodeId = targetId,
                     edgeType = edgeType,
                     provenance = provenance,
@@ -187,7 +186,7 @@ object VaultPlanBridge {
         }
 
         private fun lineNumberAt(charIndex: Int): Int {
-            return markdownText.take(charIndex).count { it == '\n' } + 1
+            return countNewlines(markdownText, 0, charIndex) + 1
         }
 
         private fun extractTags() {
@@ -264,15 +263,21 @@ object VaultPlanBridge {
                         archLayer = "infrastructure"
                     )
                 )
-                emitEdge(
-                    edgeId = "$cmdNodeId:triggers:$docNodeId",
-                    targetId = docNodeId,
-                    edgeType = "TRIGGERS_SKILL",
-                    provenance = "EXTRACTED_COMMAND",
-                    confidence = 1.0,
-                    lineNumber = 1,
-                    sourceId = cmdNodeId
-                )
+                val trigEdgeId = "$cmdNodeId:triggers:$docNodeId"
+                if (seenEdges.add(trigEdgeId)) {
+                    edges.add(
+                        GraphEdge(
+                            edgeId = trigEdgeId,
+                            projectId = projectId,
+                            sourceNodeId = cmdNodeId,
+                            targetNodeId = docNodeId,
+                            edgeType = "TRIGGERS_SKILL",
+                            provenance = "EXTRACTED_COMMAND",
+                            confidence = 1.0,
+                            lineNumber = 1
+                        )
+                    )
+                }
             }
         }
 
