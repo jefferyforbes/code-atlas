@@ -6,7 +6,7 @@ contract:
   task: pr-11-engine-and-db-remediation
   objective: Fix logarithmic architectural risk ranking in GraphTraversalDao, fix kind-filtered node search truncation in SqliteGraphStore, preserve full nodeId seed identity in ArchitectContextEngine, eliminate force-unwraps in AutonomousRemediationVerifier, and encapsulate 17 HIGH-parameter engine functions.
 
-status: approved
+status: merged
 
 size:
   complexity: medium

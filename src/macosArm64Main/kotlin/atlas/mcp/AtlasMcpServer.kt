@@ -1675,7 +1675,18 @@ class AtlasMcpServer(
         val symbolsOnly = args["symbolsOnly"]?.jsonPrimitive?.booleanOrNull ?: false
         val line = args["line"]?.jsonPrimitive?.intOrNull
         val project = resolveProjectFromArgs(args)
-        return codegraphEngine.node(project, symbol, file, includeCode, offset, limit, symbolsOnly, line)
+        return codegraphEngine.node(
+            CodegraphCompatibilityEngine.NodeQueryRequest(
+                projectId = project,
+                symbol = symbol,
+                file = file,
+                includeCode = includeCode,
+                offset = offset,
+                limit = limit,
+                symbolsOnly = symbolsOnly,
+                line = line
+            )
+        )
     }
 
     private fun handleCodegraphSearch(args: JsonObject): JsonObject {

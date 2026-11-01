@@ -521,6 +521,7 @@ class ComplexityRatchetTest {
                 qualifiedName = "heavy",
                 kind = "function",
                 startLine = 1,
+                signature = "fun heavy(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int)",
                 cognitiveComplexity = 25
             )
             store.upsertNodesAndEdges("cli-proj", listOf(highNode), emptyList())
@@ -542,6 +543,26 @@ class ComplexityRatchetTest {
             assertEquals(1, json["ratchet"]?.jsonPrimitive?.intOrNull)
             assertEquals(1, json["high_severity_count"]?.jsonPrimitive?.intOrNull)
             assertEquals(1, json["high_ratchet"]?.jsonPrimitive?.intOrNull)
+            assertEquals(1, json["param_high_ratchet"]?.jsonPrimitive?.intOrNull)
+
+            // Verify CLI --param-high-ratchet flag enforcement
+            val exitParamFail = AtlasCli.run(
+                arrayOf(
+                    "audit", "--complexity", "--project", "cli-proj",
+                    "--db", dbPath, "--workspace", tempDir,
+                    "--ratchet", "5", "--high-ratchet", "5", "--param-high-ratchet", "0"
+                )
+            )
+            assertEquals(1, exitParamFail)
+
+            val exitParamPass = AtlasCli.run(
+                arrayOf(
+                    "audit", "--complexity", "--project", "cli-proj",
+                    "--db", dbPath, "--workspace", tempDir,
+                    "--ratchet", "5", "--high-ratchet", "5", "--param-high-ratchet", "1"
+                )
+            )
+            assertEquals(0, exitParamPass)
         } finally {
             store.close()
             PlatformFiles.delete(dbPath)
