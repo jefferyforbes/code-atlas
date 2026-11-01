@@ -1484,19 +1484,21 @@ class SqliteGraphStore(val dbPath: String) {
     private fun scoreExactAndFuzzyNames(
         projectId: String,
         query: String,
-        limit: Int,
+        limitAndKind: Pair<Int, String?>,
         scores: MutableMap<String, Double>
     ) {
+        val (limit, kind) = limitAndKind
         val escapedQuery = query
             .replace("\\", "\\\\")
             .replace("%", "\\%")
             .replace("_", "\\_")
+        val kindClause = if (kind != null) " AND kind = ?" else ""
 
         val likeStmt = db.prepare(
             """
             SELECT node_id, name, in_degree FROM nodes
             WHERE project_id = ?
-              AND (name LIKE ? ESCAPE '\' OR qualified_name LIKE ? ESCAPE '\')
+              AND (name LIKE ? ESCAPE '\' OR qualified_name LIKE ? ESCAPE '\')$kindClause
             ORDER BY (LOWER(name) = LOWER(?)) DESC,
                      (LOWER(name) LIKE LOWER(?) ESCAPE '\') DESC,
                      in_degree DESC,
@@ -1505,12 +1507,14 @@ class SqliteGraphStore(val dbPath: String) {
             """.trimIndent()
         )
         try {
-            likeStmt.bindString(1, projectId)
-            likeStmt.bindString(2, "%$escapedQuery%")
-            likeStmt.bindString(3, "%$escapedQuery%")
-            likeStmt.bindString(4, query)
-            likeStmt.bindString(5, "$escapedQuery%")
-            likeStmt.bindInt(6, (limit * 5).coerceAtLeast(50))
+            var idx = 1
+            likeStmt.bindString(idx++, projectId)
+            likeStmt.bindString(idx++, "%$escapedQuery%")
+            likeStmt.bindString(idx++, "%$escapedQuery%")
+            if (kind != null) likeStmt.bindString(idx++, kind)
+            likeStmt.bindString(idx++, query)
+            likeStmt.bindString(idx++, "$escapedQuery%")
+            likeStmt.bindInt(idx, (limit * 5).coerceAtLeast(50))
             while (likeStmt.step()) {
                 val nid = likeStmt.columnString(0)
                 val name = likeStmt.columnString(1)
@@ -1585,7 +1589,7 @@ class SqliteGraphStore(val dbPath: String) {
             scoreVocabCoverage(projectId, segments, scores)
         }
 
-        scoreExactAndFuzzyNames(projectId, query, limit, scores)
+        scoreExactAndFuzzyNames(projectId, query, limit to kind, scores)
 
         if (scores.isEmpty()) return emptyList()
 
