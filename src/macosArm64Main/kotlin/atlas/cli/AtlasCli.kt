@@ -1,6 +1,7 @@
 package atlas.cli
 
 import atlas.engine.AutonomousRemediationVerifier
+import atlas.engine.CodegraphCompatibilityEngine
 import atlas.engine.FigmaDesignAuditor
 import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkspaceInitEngine
@@ -128,16 +129,7 @@ class AtlasCli {
 
         private fun dispatchComplexity(server: AtlasMcpServer, args: CliArgs): Int {
             if (isComplexityDoctor(args)) {
-                return runComplexityDoctorCommand(
-                    server = server,
-                    project = args.project,
-                    target = args.target,
-                    limit = args.limit,
-                    apply = args.applyRemediation,
-                    testCmd = args.testCmdArg,
-                    threshold = args.thresholdArg,
-                    isJson = args.isJson
-                )
+                return runComplexityDoctorCommand(server, args)
             }
             if (isComplexityAudit(args)) {
                 return runComplexityAuditCommand(server, args)
@@ -202,15 +194,7 @@ class AtlasCli {
         private fun dispatchLifecycleCommand(server: AtlasMcpServer, args: CliArgs): Int = when (args.command) {
             "migrate-tools" -> runMigrateToolsCommand(server, args.paths, args.target, args.applyRemediation, args.isJson)
             "serve-mcp" -> { server.serveStdio(); 0 }
-            "init" -> runInitCommand(
-                workspace = args.workspace,
-                project = args.project,
-                hookType = args.hookTypeArg,
-                force = args.forceFlag,
-                threshold = args.thresholdArg ?: 15,
-                dryRun = args.isDryRun,
-                isJson = args.isJson
-            )
+            "init" -> runInitCommand(args)
             "version" -> printVersion(if (args.isJson) arrayOf("--json") else emptyArray())
             else -> {
                 println("Unknown command: ${args.command}")
@@ -235,7 +219,14 @@ class AtlasCli {
             "status" -> effectiveServer.codegraphEngine.status(args.project)
             "files" -> effectiveServer.codegraphEngine.files(args.project, path = args.paths.firstOrNull(), pattern = args.target.ifEmpty { null })
             "search" -> effectiveServer.codegraphEngine.search(args.project, getQueryText(args), limit = args.limit)
-            "node" -> effectiveServer.codegraphEngine.node(args.project, symbol = args.target.ifEmpty { null }, file = args.fileKey, includeCode = args.includeSource)
+            "node" -> effectiveServer.codegraphEngine.node(
+                CodegraphCompatibilityEngine.NodeQueryRequest(
+                    projectId = args.project,
+                    symbol = args.target.ifEmpty { null },
+                    file = args.fileKey,
+                    includeCode = args.includeSource
+                )
+            )
             else -> JsonObject(emptyMap())
         }
 
@@ -315,7 +306,7 @@ class AtlasCli {
             if (args.ruleIdArg?.startsWith("SKILL") == true) {
                 return runAuditSkills(server, args.project, filterPaths, args.ruleIdArg, args.isJson)
             }
-            return runAuditArchitecture(server, args.project, filterPaths, args.descriptionMode, args.outcome, args.note, args.isJson)
+            return runAuditArchitecture(server, args, filterPaths)
         }
 
         private fun runAuditLegacyTools(server: AtlasMcpServer, filterPaths: List<String>, isJson: Boolean): Int {
@@ -421,24 +412,20 @@ class AtlasCli {
 
         private fun runAuditArchitecture(
             server: AtlasMcpServer,
-            project: String,
-            filterPaths: List<String>,
-            descriptionMode: String?,
-            outcome: String?,
-            note: String?,
-            isJson: Boolean
+            args: CliArgs,
+            filterPaths: List<String>
         ): Int {
             val toolArgs = buildJsonObject {
                 put("action", "verify_architecture")
-                put("project", project)
+                put("project", args.project)
                 if (filterPaths.isNotEmpty()) {
                     putJsonArray("targets") { filterPaths.forEach { add(it) } }
                 }
-                if (!descriptionMode.isNullOrBlank()) {
-                    put("description_mode", descriptionMode)
+                if (!args.descriptionMode.isNullOrBlank()) {
+                    put("description_mode", args.descriptionMode)
                 }
-                if (!outcome.isNullOrBlank()) put("outcome", outcome)
-                if (!note.isNullOrBlank()) put("note", note)
+                if (!args.outcome.isNullOrBlank()) put("outcome", args.outcome)
+                if (!args.note.isNullOrBlank()) put("note", args.note)
             }
             val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)
@@ -449,12 +436,12 @@ class AtlasCli {
             val cViolations = extractAuditArraySize(data, "complexity_violations", "complexityViolations")
             val sViolations = extractAuditArraySize(data, "skill_violations", "skillViolations")
             val passed = isArchitectureAuditPassed(data, bViolations, lInversions, pCollisions, cViolations, sViolations)
-            val text = if (isJson) {
+            val text = if (args.isJson) {
                 jsonPretty.encodeToString(data)
             } else {
-                "[Audit] project=$project passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions skill_violations=$sViolations complexity_violations=$cViolations description_suggestions=$dSuggestions"
+                "[Audit] project=${args.project} passed=$passed boost003_violations=$bViolations layer_inversions=$lInversions plan_3d_collisions=$pCollisions skill_violations=$sViolations complexity_violations=$cViolations description_suggestions=$dSuggestions"
             }
-            println(truncateSummary(text, isJson))
+            println(truncateSummary(text, args.isJson))
             return if (passed) 0 else 1
         }
 
@@ -773,14 +760,11 @@ class AtlasCli {
 
         private fun runFigmaIndexSubcommand(
             server: AtlasMcpServer,
-            project: String,
-            fileKey: String,
-            snapshotPath: String?,
-            tokensPath: String?,
-            isStdin: Boolean,
-            isJson: Boolean
+            args: CliArgs,
+            fileKey: String
         ): Int {
-            val astJson = readFigmaAstJson(isStdin, snapshotPath) ?: return 1
+            val astJson = readFigmaAstJson(args.isStdin, args.snapshotPath) ?: return 1
+            val tokensPath = args.tokensPath
             val tokensJson = if (tokensPath != null && PlatformFiles.exists(tokensPath)) {
                 PlatformFiles.readText(tokensPath)
             } else null
@@ -788,7 +772,7 @@ class AtlasCli {
             val extractor = FigmaSnapshotExtractor()
             val snapshot = extractor.ingest(server.store, fileKey, astJson, tokensJson)
 
-            if (isJson) {
+            if (args.isJson) {
                 val resObj = buildJsonObject {
                     put("file_key", fileKey)
                     put("nodes_indexed", snapshot.nodes.size)
@@ -798,7 +782,7 @@ class AtlasCli {
                 }
                 println(jsonPretty.encodeToString(resObj))
             } else {
-                val text = "[Atlas Figma] Indexed project=$project fileKey=$fileKey nodes=${snapshot.nodes.size} variables=${snapshot.variables.size} edges=${snapshot.edges.size}"
+                val text = "[Atlas Figma] Indexed project=${args.project} fileKey=$fileKey nodes=${snapshot.nodes.size} variables=${snapshot.variables.size} edges=${snapshot.edges.size}"
                 println(truncateSummary(text, false))
             }
             return 0
@@ -927,21 +911,19 @@ class AtlasCli {
 
         private fun runFigmaQuerySubcommand(
             server: AtlasMcpServer,
+            args: CliArgs,
             fileKey: String,
             figmaAction: String,
             normTarget: String,
-            normSecondaryTarget: String,
-            depth: Int,
-            boundsArg: String?,
-            isJson: Boolean
+            normSecondaryTarget: String
         ): Int {
             return when (figmaAction) {
-                "symbol" -> queryFigmaSymbol(server, fileKey, normTarget, isJson)
-                "callers" -> queryFigmaCallers(server, fileKey, normTarget, depth, isJson)
-                "impact" -> queryFigmaImpact(server, fileKey, normTarget, depth, isJson)
-                "spatial" -> queryFigmaSpatial(server, fileKey, normTarget, boundsArg, isJson)
-                "god_nodes" -> queryFigmaGodNodes(server, fileKey, isJson)
-                "shortest_path" -> queryFigmaShortestPath(server, fileKey, normTarget, normSecondaryTarget, depth, isJson)
+                "symbol" -> queryFigmaSymbol(server, fileKey, normTarget, args.isJson)
+                "callers" -> queryFigmaCallers(server, fileKey, normTarget, args.depth, args.isJson)
+                "impact" -> queryFigmaImpact(server, fileKey, normTarget, args.depth, args.isJson)
+                "spatial" -> queryFigmaSpatial(server, fileKey, normTarget, args.boundsArg, args.isJson)
+                "god_nodes" -> queryFigmaGodNodes(server, fileKey, args.isJson)
+                "shortest_path" -> queryFigmaShortestPath(server, fileKey, normTarget, normSecondaryTarget, args.depth, args.isJson)
                 else -> {
                     println("Unknown figma query action: $figmaAction. Valid: symbol, callers, impact, spatial, god_nodes, shortest_path")
                     1
@@ -1022,8 +1004,8 @@ class AtlasCli {
             val figmaAction = if (args.action == "search") "symbol" else args.action
 
             when (args.command) {
-                "index" -> return runFigmaIndexSubcommand(server, args.project, fileKey, args.snapshotPath, args.tokensPath, args.isStdin, args.isJson)
-                "query" -> return runFigmaQuerySubcommand(server, fileKey, figmaAction, normTarget, normSecondaryTarget, args.depth, args.boundsArg, args.isJson)
+                "index" -> return runFigmaIndexSubcommand(server, args, fileKey)
+                "query" -> return runFigmaQuerySubcommand(server, args, fileKey, figmaAction, normTarget, normSecondaryTarget)
                 "audit" -> return runFigmaAuditSubcommand(server, args.project, fileKey, args.isJson)
                 "synthesize-scope" -> return runFigmaScopeSubcommand(server, args.project, fileKey, normSeeds, args.isJson)
                 "version" -> {
@@ -1053,21 +1035,16 @@ class AtlasCli {
 
         private fun runComposeIndexSubcommand(
             server: AtlasMcpServer,
-            project: String,
-            paths: List<String>,
-            stabilityConfigPath: String?,
-            compilerReportsDir: String?,
-            traceLogPath: String?,
-            isJson: Boolean
+            args: CliArgs
         ): Int {
             val res = server.indexComposeArtifacts(
-                projectId = project,
-                subpaths = if (paths.isNotEmpty()) paths else null,
-                stabilityConfigPath = stabilityConfigPath,
-                compilerReportsDir = compilerReportsDir,
-                traceLogPath = traceLogPath
+                projectId = args.project,
+                subpaths = if (args.paths.isNotEmpty()) args.paths else null,
+                stabilityConfigPath = args.stabilityConfigPath,
+                compilerReportsDir = args.compilerReportsDir,
+                traceLogPath = args.traceLogPath
             )
-            renderComposeIndexOutput(res, project, isJson)
+            renderComposeIndexOutput(res, args.project, args.isJson)
             return 0
         }
 
@@ -1109,22 +1086,18 @@ class AtlasCli {
 
         private fun runComposeQuerySubcommand(
             server: AtlasMcpServer,
-            project: String,
-            action: String,
-            target: String,
-            depth: Int,
-            strongSkipping: Boolean,
-            isJson: Boolean
+            args: CliArgs,
+            action: String
         ): Int {
             val mappedAction = when (action.lowercase()) {
                 "cascade", "compose_cascade" -> "compose_cascade"
                 "blame", "compose_blame" -> "compose_blame"
                 else -> "compose_summary"
             }
-            val toolArgs = buildComposeQueryArgs(mappedAction, project, target, depth, strongSkipping)
+            val toolArgs = buildComposeQueryArgs(mappedAction, args.project, args.target, args.depth, args.strongSkipping)
             val res = server.callTool("atlas_query", toolArgs)
             val data = loadSpilledData(res)
-            renderComposeQueryOutput(data, mappedAction, project, isJson)
+            renderComposeQueryOutput(data, mappedAction, args.project, args.isJson)
             return 0
         }
 
@@ -1167,18 +1140,14 @@ class AtlasCli {
 
         private fun runComposeAuditSubcommand(
             server: AtlasMcpServer,
-            project: String,
-            paths: List<String>,
-            stabilityConfigPath: String?,
-            compilerReportsDir: String?,
-            traceLogPath: String?,
-            strongSkipping: Boolean,
-            isJson: Boolean
+            args: CliArgs
         ): Int {
-            val toolArgs = buildComposeAuditArgs(project, paths, stabilityConfigPath, compilerReportsDir, traceLogPath, strongSkipping)
+            val toolArgs = buildComposeAuditArgs(
+                args.project, args.paths, args.stabilityConfigPath, args.compilerReportsDir, args.traceLogPath, args.strongSkipping
+            )
             val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)
-            val passed = renderComposeAuditOutput(data, project, strongSkipping, isJson)
+            val passed = renderComposeAuditOutput(data, args.project, args.strongSkipping, args.isJson)
             return if (passed) 0 else 1
         }
 
@@ -1279,34 +1248,28 @@ class AtlasCli {
 
         private fun runComposeDoctorSubcommand(
             server: AtlasMcpServer,
-            project: String,
-            target: String,
-            limit: Int,
-            applyRemediation: Boolean,
-            ruleIdArg: String?,
-            testCmdArg: String?,
-            isJson: Boolean
+            args: CliArgs
         ): Int {
             val toolArgs = buildJsonObject {
                 put("action", "compose_doctor")
-                put("project", project)
-                put("limit", limit)
-                if (target.isNotEmpty()) putJsonArray("targets") { add(target) }
+                put("project", args.project)
+                put("limit", args.limit)
+                if (args.target.isNotEmpty()) putJsonArray("targets") { add(args.target) }
             }
             val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)
 
-            if (applyRemediation) {
-                return applyComposeDoctorRemediations(server, project, data, ruleIdArg, testCmdArg, isJson)
+            if (args.applyRemediation) {
+                return applyComposeDoctorRemediations(server, args.project, data, args.ruleIdArg, args.testCmdArg, args.isJson)
             }
 
-            if (isJson) {
+            if (args.isJson) {
                 println(jsonPretty.encodeToString(data))
             } else {
                 val mode = data["scoring_mode"]?.jsonPrimitive?.content ?: "ESTIMATED"
                 val pCount = data["total_prescriptions"]?.jsonPrimitive?.intOrNull ?: 0
                 val topRule = data["prescriptions"]?.jsonArray?.firstOrNull()?.jsonObject?.get("rule_id")?.jsonPrimitive?.content ?: "NONE"
-                val text = "[Compose Doctor] project=$project mode=$mode prescriptions=$pCount top_rule=$topRule"
+                val text = "[Compose Doctor] project=${args.project} mode=$mode prescriptions=$pCount top_rule=$topRule"
                 println(truncateSummary(text, false))
             }
             return 0
@@ -1353,18 +1316,10 @@ class AtlasCli {
             val command = if (args.command == "audit" && args.isComposeAuditFlag) "audit" else args.command
             val action = if (args.action == "search") "summary" else args.action
             when (command) {
-                "index" -> return runComposeIndexSubcommand(
-                    server, args.project, args.paths, args.stabilityConfigPath, args.compilerReportsDir, args.traceLogPath, args.isJson
-                )
-                "query" -> return runComposeQuerySubcommand(
-                    server, args.project, action, args.target, args.depth, args.strongSkipping, args.isJson
-                )
-                "audit" -> return runComposeAuditSubcommand(
-                    server, args.project, args.paths, args.stabilityConfigPath, args.compilerReportsDir, args.traceLogPath, args.strongSkipping, args.isJson
-                )
-                "doctor" -> return runComposeDoctorSubcommand(
-                    server, args.project, args.target, args.limit, args.applyRemediation, args.ruleIdArg, args.testCmdArg, args.isJson
-                )
+                "index" -> return runComposeIndexSubcommand(server, args)
+                "query" -> return runComposeQuerySubcommand(server, args, action)
+                "audit" -> return runComposeAuditSubcommand(server, args)
+                "doctor" -> return runComposeDoctorSubcommand(server, args)
                 "synthesize-scope" -> return runComposeScopeSubcommand(
                     server, args.project, args.seeds, args.paths, args.target, args.isJson
                 )
@@ -1417,48 +1372,38 @@ class AtlasCli {
 
         private fun runArchTriage(
             server: AtlasMcpServer,
-            project: String,
-            targets: List<String>,
-            limit: Int,
-            apply: Boolean,
-            split: Boolean,
-            makePrivate: Boolean,
-            testCmd: String?
+            args: CliArgs,
+            targets: List<String>
         ): JsonObject {
-            val args = buildJsonObject {
-                put("action", if (apply) "remedy_architecture" else "verify_architecture")
-                put("project", project)
+            val toolArgs = buildJsonObject {
+                put("action", if (args.applyRemediation) "remedy_architecture" else "verify_architecture")
+                put("project", args.project)
                 if (targets.isNotEmpty()) putJsonArray("targets") { targets.forEach { add(it) } }
-                if (apply) {
+                if (args.applyRemediation) {
                     put("dry_run", false)
-                    put("split", split)
-                    put("make_private", makePrivate)
-                    if (!testCmd.isNullOrBlank()) put("test_command", testCmd)
-                    put("limit", limit)
+                    put("split", args.splitBoost003)
+                    put("make_private", args.makePrivateBoost003)
+                    if (!args.testCmdArg.isNullOrBlank()) put("test_command", args.testCmdArg)
+                    put("limit", args.limit)
                 }
             }
-            return loadSpilledData(server.callTool("atlas_audit", args))
+            return loadSpilledData(server.callTool("atlas_audit", toolArgs))
         }
 
         private fun runCompTriage(
             server: AtlasMcpServer,
-            project: String,
-            target: String,
-            limit: Int,
-            apply: Boolean,
-            threshold: Int?,
-            testCmd: String?
+            args: CliArgs
         ): JsonObject {
-            val args = buildJsonObject {
+            val toolArgs = buildJsonObject {
                 put("action", "complexity_doctor")
-                put("project", project)
-                if (target.isNotEmpty()) put("target", target)
-                put("limit", limit)
-                put("apply", apply)
-                if (threshold != null) put("threshold", threshold)
-                if (!testCmd.isNullOrBlank()) put("test_command", testCmd)
+                put("project", args.project)
+                if (args.target.isNotEmpty()) put("target", args.target)
+                put("limit", args.limit)
+                put("apply", args.applyRemediation)
+                if (args.thresholdArg != null) put("threshold", args.thresholdArg)
+                if (!args.testCmdArg.isNullOrBlank()) put("test_command", args.testCmdArg)
             }
-            return loadSpilledData(server.callTool("atlas_audit", args))
+            return loadSpilledData(server.callTool("atlas_audit", toolArgs))
         }
 
         private fun runComposeTriage(
@@ -1484,10 +1429,10 @@ class AtlasCli {
 
         private fun extractArchViolationCount(data: JsonObject, apply: Boolean): Int {
             if (apply) return data["total_violations"]?.jsonPrimitive?.intOrNull ?: 0
-            val b = (data["single_declaration_violations"] ?: data["singleDeclarationViolations"])?.jsonArray?.size ?: 0
-            val l = (data["layer_inversions"] ?: data["layerInversions"])?.jsonArray?.size ?: 0
-            val p = (data["plan_3d_collisions"] ?: data["plan3dCollisions"])?.jsonArray?.size ?: 0
-            val c = (data["complexity_violations"] ?: data["complexityViolations"])?.jsonArray?.size ?: 0
+            val b = extractAuditArraySize(data, "single_declaration_violations", "singleDeclarationViolations")
+            val l = extractAuditArraySize(data, "layer_inversions", "layerInversions")
+            val p = extractAuditArraySize(data, "plan_3d_collisions", "plan3dCollisions")
+            val c = extractAuditArraySize(data, "complexity_violations", "complexityViolations")
             return b + l + p + c
         }
 
@@ -1542,8 +1487,8 @@ class AtlasCli {
             args: CliArgs
         ): Int {
             val filterPaths = resolveFilterPaths(args.paths, args.target)
-            val archData = runArchTriage(server, args.project, filterPaths, args.limit, args.applyRemediation, args.splitBoost003, args.makePrivateBoost003, args.testCmdArg)
-            val compData = runCompTriage(server, args.project, args.target, args.limit, args.applyRemediation, args.thresholdArg, args.testCmdArg)
+            val archData = runArchTriage(server, args, filterPaths)
+            val compData = runCompTriage(server, args)
             val composeData = runComposeTriage(server, args.project, args.target, args.limit)
 
             if (args.isJson) {
@@ -1605,22 +1550,18 @@ class AtlasCli {
 
         private fun runComplexityDoctorCommand(
             server: AtlasMcpServer,
-            project: String,
-            target: String,
-            limit: Int,
-            apply: Boolean,
-            testCmd: String?,
-            threshold: Int?,
-            isJson: Boolean
+            args: CliArgs
         ): Int {
-            val toolArgs = buildComplexityDoctorToolArgs(project, target, limit, apply, testCmd, threshold)
+            val toolArgs = buildComplexityDoctorToolArgs(
+                args.project, args.target, args.limit, args.applyRemediation, args.testCmdArg, args.thresholdArg
+            )
             val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)
 
-            if (isJson) {
+            if (args.isJson) {
                 println(jsonPretty.encodeToString(data))
             } else {
-                printComplexityDoctorOutput(project, data, limit)
+                printComplexityDoctorOutput(args.project, data, args.limit)
             }
             return 0
         }
@@ -1653,23 +1594,26 @@ class AtlasCli {
             if (!args.checkParams) put("check_params", false)
             putIfNotNull(this, "ratchet", effectiveRatchet)
             putIfNotNull(this, "high_ratchet", args.highRatchetArg)
+            putIfNotNull(this, "param_high_ratchet", args.paramHighRatchetArg)
             putIfNotNull(this, "baseline", effectiveBaselineFile)
         }
 
         private fun saveComplexityBaselineFile(
             args: CliArgs,
             data: JsonObject,
-            total: Int,
-            high: Int,
-            thresh: Int,
-            warn: Int
+            thresh: Int
         ) {
+            val total = extractIntField(data, "total_violations")
+            val high = extractIntField(data, "high_severity_count")
+            val warn = extractIntField(data, "warning_count")
+            val paramHigh = extractIntField(data, "param_high_count")
             val maxCyc = data["max_cyclomatic"]?.jsonPrimitive?.intOrNull ?: (args.maxCyclomaticArg ?: 15)
             val targetPath = args.saveBaselinePath ?: if (args.workspace == ".") "complexity-baseline.json" else "${args.workspace}/complexity-baseline.json"
             val baselineObj = buildJsonObject {
                 put("project", args.project)
                 put("ratchet", total)
                 put("high_ratchet", high)
+                put("param_high_ratchet", paramHigh)
                 put("threshold", thresh)
                 put("max_cyclomatic", maxCyc)
                 put("total_violations", total)
@@ -1696,20 +1640,23 @@ class AtlasCli {
             data: JsonObject,
             project: String,
             passed: Boolean,
-            thresh: Int,
-            total: Int,
-            high: Int,
-            warn: Int
+            thresh: Int
         ): String {
+            val total = extractIntField(data, "total_violations")
+            val high = extractIntField(data, "high_severity_count")
+            val warn = extractIntField(data, "warning_count")
             val resolvedRatchet = data["ratchet"]?.jsonPrimitive?.intOrNull
             val baselineDelta = data["baseline_delta"]?.jsonPrimitive?.intOrNull
             val resolvedHighRatchet = data["high_ratchet"]?.jsonPrimitive?.intOrNull
             val highDelta = data["high_delta"]?.jsonPrimitive?.intOrNull
+            val resolvedParamHighRatchet = data["param_high_ratchet"]?.jsonPrimitive?.intOrNull
+            val paramHighDelta = data["param_high_delta"]?.jsonPrimitive?.intOrNull
             val advisory = data["advisory_count"]?.jsonPrimitive?.intOrNull ?: 0
             val ratchetStr = formatRatchetSegment("ratchet", resolvedRatchet, baselineDelta)
             val highRatchetStr = formatRatchetSegment("high_ratchet", resolvedHighRatchet, highDelta)
+            val paramHighRatchetStr = formatRatchetSegment("param_high_ratchet", resolvedParamHighRatchet, paramHighDelta)
             val advStr = if (advisory > 0) ", ADVISORY=$advisory" else ""
-            return "[Complexity Audit] project=$project passed=$passed threshold=$thresh violations=$total$ratchetStr$highRatchetStr (HIGH=$high, WARNING=$warn$advStr)"
+            return "[Complexity Audit] project=$project passed=$passed threshold=$thresh violations=$total$ratchetStr$highRatchetStr$paramHighRatchetStr (HIGH=$high, WARNING=$warn$advStr)"
         }
 
         private fun resolveAuditFilterPaths(paths: List<String>, target: String): List<String> =
@@ -1720,13 +1667,10 @@ class AtlasCli {
             project: String,
             passed: Boolean,
             thresh: Int,
-            total: Int,
-            high: Int,
-            warn: Int,
             isJson: Boolean
         ): String {
             if (isJson) return jsonPretty.encodeToString(data)
-            return formatComplexityAuditSummary(data, project, passed, thresh, total, high, warn)
+            return formatComplexityAuditSummary(data, project, passed, thresh)
         }
 
         private fun resolveEffectiveAuditRatchet(args: CliArgs): Pair<Int?, String?> {
@@ -1749,16 +1693,13 @@ class AtlasCli {
             val res = server.callTool("atlas_audit", toolArgs)
             val data = loadSpilledData(res)
             val passed = data["passed"]?.jsonPrimitive?.booleanOrNull ?: true
-            val total = extractIntField(data, "total_violations")
-            val high = extractIntField(data, "high_severity_count")
-            val warn = extractIntField(data, "warning_count")
             val thresh = data["threshold"]?.jsonPrimitive?.intOrNull ?: (args.thresholdArg ?: 10)
 
             if (args.saveBaseline) {
-                saveComplexityBaselineFile(args, data, total, high, thresh, warn)
+                saveComplexityBaselineFile(args, data, thresh)
             }
 
-            val text = renderComplexityAuditOutput(data, args.project, passed, thresh, total, high, warn, args.isJson)
+            val text = renderComplexityAuditOutput(data, args.project, passed, thresh, args.isJson)
             println(truncateSummary(text, args.isJson))
             return if (args.saveBaseline || passed) 0 else 1
         }
@@ -1865,25 +1806,17 @@ class AtlasCli {
             }
         }
 
-        private fun runInitCommand(
-            workspace: String,
-            project: String,
-            hookType: String,
-            force: Boolean,
-            threshold: Int,
-            dryRun: Boolean,
-            isJson: Boolean
-        ): Int {
-            val engine = WorkspaceInitEngine(workspace)
-            val effectiveProject = engine.resolveProjectSlug(project)
+        private fun runInitCommand(args: CliArgs): Int {
+            val engine = WorkspaceInitEngine(args.workspace)
+            val effectiveProject = engine.resolveProjectSlug(args.project)
             val result = engine.initHook(
                 project = effectiveProject,
-                hookType = hookType,
-                force = force,
-                threshold = threshold,
-                dryRun = dryRun
+                hookType = args.hookTypeArg,
+                force = args.forceFlag,
+                threshold = args.thresholdArg ?: 15,
+                dryRun = args.isDryRun
             )
-            renderInitOutput(effectiveProject, result, isJson)
+            renderInitOutput(effectiveProject, result, args.isJson)
             return if (result.success) 0 else 1
         }
 
@@ -1984,6 +1917,7 @@ class AtlasCli {
                   --threshold <int>        Cognitive complexity threshold for audit or query (default: 10)
                   --ratchet <int>          Maximum allowed violations for complexity audit ratchet
                   --high-ratchet <int>     Maximum allowed high severity violations for complexity audit ratchet
+                  --param-high-ratchet <n> Maximum allowed high parameter count violations for complexity audit ratchet
                   --baseline <int|file>    Explicit baseline violation count or path to baseline JSON file
                   --save-baseline [path]   Save current complexity violations as baseline JSON file
                   --description-mode <m>   Filter mode for description suggestions (domain-only, all, off; default: domain-only)

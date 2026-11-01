@@ -221,28 +221,30 @@ class CodegraphCompatibilityEngine(
         }
     }
 
-    fun node(
-        projectId: String,
-        symbol: String?,
-        file: String?,
-        includeCode: Boolean = false,
-        offset: Int? = null,
-        limit: Int? = null,
-        symbolsOnly: Boolean = false,
-        line: Int? = null
-    ): JsonObject {
-        if (symbol.isNullOrBlank() && !file.isNullOrBlank()) {
-            return readNodeFile(projectId, file, symbolsOnly, offset, limit)
+    data class NodeQueryRequest(
+        val projectId: String,
+        val symbol: String? = null,
+        val file: String? = null,
+        val includeCode: Boolean = false,
+        val offset: Int? = null,
+        val limit: Int? = null,
+        val symbolsOnly: Boolean = false,
+        val line: Int? = null
+    )
+
+    fun node(req: NodeQueryRequest): JsonObject {
+        if (req.symbol.isNullOrBlank() && !req.file.isNullOrBlank()) {
+            return readNodeFile(req.projectId, req.file, req.symbolsOnly, req.offset, req.limit)
         }
 
-        val targetSymbol = symbol?.trim().orEmpty()
+        val targetSymbol = req.symbol?.trim().orEmpty()
         if (targetSymbol.isEmpty()) {
             return buildJsonObject {
                 put("text", "Either 'symbol' or 'file' must be specified.")
             }
         }
 
-        return inspectNodeSymbol(projectId, targetSymbol, file, line, includeCode)
+        return inspectNodeSymbol(req.projectId, targetSymbol, req.file, req.line, req.includeCode)
     }
 
     private fun readNodeFile(

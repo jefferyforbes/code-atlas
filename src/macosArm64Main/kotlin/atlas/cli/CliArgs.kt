@@ -39,6 +39,7 @@ data class CliArgs(
     var checkParams: Boolean = true,
     var ratchetArg: Int? = null,
     var highRatchetArg: Int? = null,
+    var paramHighRatchetArg: Int? = null,
     var baselineArg: String? = null,
     var saveBaseline: Boolean = false,
     var saveBaselinePath: String? = null,
@@ -335,6 +336,10 @@ data class CliArgs(
             }
             extractOption(argv, idx, "--max-high-violations")?.let { (v, next) ->
                 args.highRatchetArg = v.toIntOrNull()
+                return next
+            }
+            extractOption(argv, idx, "--param-high-ratchet")?.let { (v, next) ->
+                args.paramHighRatchetArg = v.toIntOrNull()
                 return next
             }
             return idx
