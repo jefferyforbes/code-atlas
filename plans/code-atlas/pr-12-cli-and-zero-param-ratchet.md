@@ -6,7 +6,7 @@ contract:
   task: pr-12-cli-and-zero-param-ratchet
   objective: Encapsulate remaining 14 HIGH COMPLEXITY-002-PARAMS functions in AtlasCli and CodegraphCompatibilityEngine, add --param-high-ratchet CLI flag and baseline persistence, and ratchet param_high_ratchet to 0 in complexity-baseline.json.
 
-status: approved
+status: merged
 
 size:
   complexity: medium
