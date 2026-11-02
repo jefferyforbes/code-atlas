@@ -37,12 +37,18 @@ class ArchitectureAuditor(
         descriptionMode: String = "domain-only"
     ): AuditReport {
         val normalizedPrefixes = normalizePathPrefixes(pathPrefixes)
+        val allNodes = store.listNodes(projectId)
         val singleDeclViolations = checkSingleDeclarationPrinciple(projectId, normalizedPrefixes)
-        val layerInversions = checkLayerInversions(projectId, normalizedPrefixes)
-        val planCollisions = checkPlan3dCollisions(projectId, normalizedPrefixes)
-        val descriptionSuggestions = checkTopLevelDescriptions(projectId, normalizedPrefixes, descriptionMode)
-        val complexityViolations = checkComplexityViolations(projectId, pathPrefixes = normalizedPrefixes)
-        val skillViolations = checkSkillViolations(projectId, normalizedPrefixes)
+        val layerInversions = checkLayerInversions(projectId, normalizedPrefixes, allNodes)
+        val planCollisions = checkPlan3dCollisions(projectId, normalizedPrefixes, allNodes)
+        val descriptionSuggestions = checkTopLevelDescriptions(projectId, normalizedPrefixes, descriptionMode, allNodes)
+        val complexityViolations = checkComplexityViolations(
+            projectId,
+            normalizedPrefixes,
+            ComplexityThresholds(),
+            allNodes
+        )
+        val skillViolations = checkSkillViolations(projectId, normalizedPrefixes, allNodes)
 
         val passed = singleDeclViolations.isEmpty() &&
             layerInversions.isEmpty() &&
@@ -125,13 +131,14 @@ class ArchitectureAuditor(
     fun checkComplexityViolations(
         projectId: String,
         pathPrefixes: List<String>?,
-        thresholds: ComplexityThresholds
+        thresholds: ComplexityThresholds,
+        allNodes: List<GraphNode>? = null
     ): List<ComplexityViolation> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
         val violations = mutableListOf<ComplexityViolation>()
         val fileLinesCache = mutableMapOf<String, List<String>?>()
 
-        for (node in store.listNodes(projectId)) {
+        for (node in (allNodes ?: store.listNodes(projectId))) {
             if (!isComplexityCandidate(node, prefixes)) continue
             checkCognitiveViolation(node, thresholds.maxCognitive, thresholds.maxCyclomatic)?.let {
                 violations.add(it)
@@ -367,7 +374,8 @@ class ArchitectureAuditor(
     fun checkTopLevelDescriptions(
         projectId: String,
         pathPrefixes: List<String> = emptyList(),
-        mode: String = "domain-only"
+        mode: String = "domain-only",
+        allNodes: List<GraphNode>? = null
     ): List<DescriptionSuggestion> {
         val normalizedMode = mode.trim().lowercase()
         if (normalizedMode in DISABLED_DESCRIPTION_MODES) {
@@ -377,7 +385,7 @@ class ArchitectureAuditor(
         val prefixes = normalizePathPrefixes(pathPrefixes)
         val suggestions = mutableListOf<DescriptionSuggestion>()
 
-        for (node in store.listNodes(projectId)) {
+        for (node in (allNodes ?: store.listNodes(projectId))) {
             val relPath = node.fileId.substringAfter(':')
             if (!isDescriptionCandidate(node, relPath, prefixes, normalizedMode)) continue
             if (node.description.isNullOrBlank()) {
@@ -474,10 +482,11 @@ class ArchitectureAuditor(
 
     fun checkLayerInversions(
         projectId: String,
-        pathPrefixes: List<String> = emptyList()
+        pathPrefixes: List<String> = emptyList(),
+        allNodes: List<GraphNode>? = null
     ): List<LayerInversionViolation> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
-        val nodesById = store.listNodes(projectId).associateBy { it.nodeId }
+        val nodesById = (allNodes ?: store.listNodes(projectId)).associateBy { it.nodeId }
         val inversions = mutableListOf<LayerInversionViolation>()
         val edges = store.listEdges(
             projectId,
@@ -530,11 +539,12 @@ class ArchitectureAuditor(
 
     fun checkPlan3dCollisions(
         projectId: String,
-        pathPrefixes: List<String> = emptyList()
+        pathPrefixes: List<String> = emptyList(),
+        allNodes: List<GraphNode>? = null
     ): List<PlanCollision> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
         val planEdges = store.listEdges(projectId, edgeTypes = listOf("PLAN_SCOPES_FILE"))
-        val nodesById = store.listNodes(projectId).associateBy { it.nodeId }
+        val nodesById = (allNodes ?: store.listNodes(projectId)).associateBy { it.nodeId }
 
         val planToFiles = mutableMapOf<String, MutableSet<String>>()
         val planToModules = mutableMapOf<String, MutableSet<String>>()
@@ -672,12 +682,14 @@ class ArchitectureAuditor(
      */
     fun checkSkillViolations(
         projectId: String,
-        pathPrefixes: List<String>? = null
+        pathPrefixes: List<String>? = null,
+        allNodes: List<GraphNode>? = null
     ): List<SkillAuditViolation> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
-        val broken = checkBrokenSkillReferences(projectId, prefixes)
-        val schema = checkSkillSchemaFrontmatter(projectId, prefixes)
-        val cycles = checkSkillDependencyCycles(projectId, prefixes)
+        val nodes = allNodes ?: store.listNodes(projectId)
+        val broken = checkBrokenSkillReferences(projectId, prefixes, nodes)
+        val schema = checkSkillSchemaFrontmatter(projectId, prefixes, nodes)
+        val cycles = checkSkillDependencyCycles(projectId, prefixes, nodes)
         return (broken + schema + cycles).sortedWith(compareBy({ it.rule }, { it.skillName }, { it.relPath }))
     }
 
@@ -686,14 +698,15 @@ class ArchitectureAuditor(
      */
     fun checkBrokenSkillReferences(
         projectId: String,
-        pathPrefixes: List<String> = emptyList()
+        pathPrefixes: List<String> = emptyList(),
+        allNodes: List<GraphNode>? = null
     ): List<SkillAuditViolation> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
-        val allNodes = store.listNodes(projectId)
-        val skillNodes = allNodes.filter { it.kind == "skill" }.associateBy { it.nodeId }
+        val nodes = allNodes ?: store.listNodes(projectId)
+        val skillNodes = nodes.filter { it.kind == "skill" }.associateBy { it.nodeId }
         if (skillNodes.isEmpty()) return emptyList()
 
-        val nodesById = allNodes.associateBy { it.nodeId }
+        val nodesById = nodes.associateBy { it.nodeId }
         val violations = mutableListOf<SkillAuditViolation>()
         val edges = store.listEdges(
             projectId,
@@ -760,12 +773,13 @@ class ArchitectureAuditor(
      */
     fun checkSkillSchemaFrontmatter(
         projectId: String,
-        pathPrefixes: List<String> = emptyList()
+        pathPrefixes: List<String> = emptyList(),
+        allNodes: List<GraphNode>? = null
     ): List<SkillAuditViolation> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
         val violations = mutableListOf<SkillAuditViolation>()
 
-        for (node in store.listNodes(projectId)) {
+        for (node in (allNodes ?: store.listNodes(projectId))) {
             if (node.kind != "skill") continue
             val relPath = node.fileId.substringAfter(':')
             if (!matchesAnyPrefix(relPath, prefixes)) continue
@@ -824,11 +838,12 @@ class ArchitectureAuditor(
      */
     fun checkSkillDependencyCycles(
         projectId: String,
-        pathPrefixes: List<String> = emptyList()
+        pathPrefixes: List<String> = emptyList(),
+        allNodes: List<GraphNode>? = null
     ): List<SkillAuditViolation> {
         val prefixes = normalizePathPrefixes(pathPrefixes)
-        val allNodes = store.listNodes(projectId)
-        val skillNodes = allNodes.filter { it.kind == "skill" }
+        val nodes = allNodes ?: store.listNodes(projectId)
+        val skillNodes = nodes.filter { it.kind == "skill" }
         if (skillNodes.isEmpty()) return emptyList()
 
         val skillNodeById = skillNodes.associateBy { it.nodeId }

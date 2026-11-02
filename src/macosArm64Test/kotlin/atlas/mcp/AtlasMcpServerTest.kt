@@ -359,4 +359,25 @@ class AtlasMcpServerTest {
             server.close()
         }
     }
+
+    @Test
+    fun `partial ratchet arguments still populate remaining ratchets from complexity baseline`() {
+        val server = AtlasMcpServer(workspaceRoot = ".")
+        try {
+            val resp = server.processJsonRpcMessage(
+                """{"jsonrpc": "2.0", "id": 60, "method": "tools/call", "params": {"name": "atlas_audit", "arguments": {"project": "code-atlas", "action": "audit_complexity", "ratchet": 5}}}"""
+            )
+            assertNotNull(resp)
+            val parsed = json.parseToJsonElement(resp).jsonObject
+            val text = parsed["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()
+                ?.jsonObject?.get("text")?.jsonPrimitive?.content
+            assertNotNull(text)
+            val payload = json.parseToJsonElement(text).jsonObject
+            assertEquals(5, payload["ratchet"]?.jsonPrimitive?.int)
+            assertEquals(0, payload["high_ratchet"]?.jsonPrimitive?.int)
+            assertEquals(0, payload["param_high_ratchet"]?.jsonPrimitive?.int)
+        } finally {
+            server.close()
+        }
+    }
 }

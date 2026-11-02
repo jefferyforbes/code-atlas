@@ -753,53 +753,57 @@ class SqliteGraphStore(val dbPath: String) {
         val topLevelDeclCount: Int
     )
 
+    private fun purgeExistingFileNodesAndEdges(
+        scope: StatementScope,
+        projectId: String,
+        fileId: String
+    ): List<String> {
+        val oldNodes = mutableListOf<String>()
+        val selectOld = scope.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
+        selectOld.bindString(1, fileId)
+        while (selectOld.step()) {
+            oldNodes.add(selectOld.columnString(0))
+        }
+
+        if (oldNodes.isNotEmpty()) {
+            val delFtsByFile = scope.prepare("DELETE FROM nodes_fts WHERE file_id = ?;")
+            delFtsByFile.bindString(1, fileId)
+            delFtsByFile.step()
+
+            val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
+            val delEdges = scope.prepare("DELETE FROM edges WHERE project_id = ? AND (source_node_id = ? OR target_node_id = ?);")
+            val delNodes = scope.prepare("DELETE FROM nodes WHERE file_id = ?;")
+
+            for (nodeId in oldNodes) {
+                delVocab.reset()
+                delVocab.clearBindings()
+                delVocab.bindString(1, nodeId)
+                delVocab.step()
+
+                delEdges.reset()
+                delEdges.clearBindings()
+                delEdges.bindString(1, projectId)
+                delEdges.bindString(2, nodeId)
+                delEdges.bindString(3, nodeId)
+                delEdges.step()
+            }
+            delNodes.bindString(1, fileId)
+            delNodes.step()
+        }
+
+        val delRawEdges = scope.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
+        delRawEdges.bindString(1, projectId)
+        delRawEdges.bindString(2, fileId)
+        delRawEdges.step()
+        return oldNodes
+    }
+
     fun upsertFileRecord(record: FileRecordUpsert): String {
         val fileId = "${record.projectId}:${record.relPath}"
         withSavepoint("sp_index_file") {
             val scope = StatementScope(db)
             try {
-                // Find old nodes to purge associated indexes
-                val oldNodes = mutableListOf<String>()
-                val selectOld = scope.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
-                selectOld.bindString(1, fileId)
-                while (selectOld.step()) {
-                    oldNodes.add(selectOld.columnString(0))
-                }
-
-                if (oldNodes.isNotEmpty()) {
-                    val delFts = scope.prepare("DELETE FROM nodes_fts WHERE rowid IN (SELECT rowid FROM nodes WHERE file_id = ?);")
-                    delFts.bindString(1, fileId)
-                    delFts.step()
-
-                    val delFtsByFile = scope.prepare("DELETE FROM nodes_fts WHERE file_id = ?;")
-                    delFtsByFile.bindString(1, fileId)
-                    delFtsByFile.step()
-
-                    val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-                    val delEdges = scope.prepare("DELETE FROM edges WHERE project_id = ? AND (source_node_id = ? OR target_node_id = ?);")
-                    val delNodes = scope.prepare("DELETE FROM nodes WHERE file_id = ?;")
-
-                    for (nodeId in oldNodes) {
-                        delVocab.reset()
-                        delVocab.clearBindings()
-                        delVocab.bindString(1, nodeId)
-                        delVocab.step()
-
-                        delEdges.reset()
-                        delEdges.clearBindings()
-                        delEdges.bindString(1, record.projectId)
-                        delEdges.bindString(2, nodeId)
-                        delEdges.bindString(3, nodeId)
-                        delEdges.step()
-                    }
-                    delNodes.bindString(1, fileId)
-                    delNodes.step()
-                }
-
-                val delRawEdges = scope.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
-                delRawEdges.bindString(1, record.projectId)
-                delRawEdges.bindString(2, fileId)
-                delRawEdges.step()
+                purgeExistingFileNodesAndEdges(scope, record.projectId, fileId)
 
                 val upsertStmt = scope.prepare(
                     """
@@ -876,48 +880,9 @@ class SqliteGraphStore(val dbPath: String) {
         val fileId = "$projectId:$relPath"
         withSavepoint("sp_delete_file") {
             val scope = StatementScope(db)
-            val oldNodes = mutableListOf<String>()
+            val oldNodes: List<String>
             try {
-                val selectOld = scope.prepare("SELECT node_id FROM nodes WHERE file_id = ?;")
-                selectOld.bindString(1, fileId)
-                while (selectOld.step()) {
-                    oldNodes.add(selectOld.columnString(0))
-                }
-
-                if (oldNodes.isNotEmpty()) {
-                    val delFts = scope.prepare("DELETE FROM nodes_fts WHERE rowid IN (SELECT rowid FROM nodes WHERE file_id = ?);")
-                    delFts.bindString(1, fileId)
-                    delFts.step()
-
-                    val delFtsByFile = scope.prepare("DELETE FROM nodes_fts WHERE file_id = ?;")
-                    delFtsByFile.bindString(1, fileId)
-                    delFtsByFile.step()
-
-                    val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-                    val delEdges = scope.prepare("DELETE FROM edges WHERE project_id = ? AND (source_node_id = ? OR target_node_id = ?);")
-                    val delNodes = scope.prepare("DELETE FROM nodes WHERE file_id = ?;")
-
-                    for (nodeId in oldNodes) {
-                        delVocab.reset()
-                        delVocab.clearBindings()
-                        delVocab.bindString(1, nodeId)
-                        delVocab.step()
-
-                        delEdges.reset()
-                        delEdges.clearBindings()
-                        delEdges.bindString(1, projectId)
-                        delEdges.bindString(2, nodeId)
-                        delEdges.bindString(3, nodeId)
-                        delEdges.step()
-                    }
-                    delNodes.bindString(1, fileId)
-                    delNodes.step()
-                }
-
-                val delRawEdges = scope.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
-                delRawEdges.bindString(1, projectId)
-                delRawEdges.bindString(2, fileId)
-                delRawEdges.step()
+                oldNodes = purgeExistingFileNodesAndEdges(scope, projectId, fileId)
 
                 val delFile = scope.prepare("DELETE FROM files WHERE file_id = ?;")
                 delFile.bindString(1, fileId)
@@ -969,14 +934,12 @@ class SqliteGraphStore(val dbPath: String) {
     private fun upsertNodeSearchIndexes(
         delVocab: NativeSqliteStatement,
         delFtsByNodeId: NativeSqliteStatement,
-        delFts: NativeSqliteStatement,
         insFts: NativeSqliteStatement,
         insVocab: NativeSqliteStatement,
         node: GraphNode
     ) {
         delVocab.reset(); delVocab.clearBindings(); delVocab.bindString(1, node.nodeId); delVocab.step()
         delFtsByNodeId.reset(); delFtsByNodeId.clearBindings(); delFtsByNodeId.bindString(1, node.nodeId); delFtsByNodeId.step()
-        delFts.reset(); delFts.clearBindings(); delFts.bindString(1, node.nodeId); delFts.step()
 
         insFts.reset()
         insFts.clearBindings()
@@ -1017,7 +980,6 @@ class SqliteGraphStore(val dbPath: String) {
         scope: StatementScope,
         projectId: String,
         delFtsByNodeId: NativeSqliteStatement,
-        delFts: NativeSqliteStatement,
         delVocab: NativeSqliteStatement
     ) {
         val selectOrphanEndpoints = scope.prepare(
@@ -1042,7 +1004,6 @@ class SqliteGraphStore(val dbPath: String) {
             val delEpNode = scope.prepare("DELETE FROM nodes WHERE node_id = ?;")
             for (epId in orphanEpIds) {
                 delFtsByNodeId.reset(); delFtsByNodeId.clearBindings(); delFtsByNodeId.bindString(1, epId); delFtsByNodeId.step()
-                delFts.reset(); delFts.clearBindings(); delFts.bindString(1, epId); delFts.step()
                 delVocab.reset(); delVocab.clearBindings(); delVocab.bindString(1, epId); delVocab.step()
                 delEpNode.reset(); delEpNode.clearBindings(); delEpNode.bindString(1, epId); delEpNode.step()
             }
@@ -1058,7 +1019,6 @@ class SqliteGraphStore(val dbPath: String) {
         withSavepoint("sp_upsert_nodes_edges") {
             val scope = StatementScope(db)
             try {
-                val delFts = scope.prepare("DELETE FROM nodes_fts WHERE rowid = (SELECT rowid FROM nodes WHERE node_id = ?);")
                 val delFtsByNodeId = scope.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
                 val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
                 val insNode = scope.prepare(
@@ -1137,7 +1097,7 @@ class SqliteGraphStore(val dbPath: String) {
 
                 for (node in nodes) {
                     bindUpsertNode(insNode, node)
-                    upsertNodeSearchIndexes(delVocab, delFtsByNodeId, delFts, insFts, insVocab, node)
+                    upsertNodeSearchIndexes(delVocab, delFtsByNodeId, insFts, insVocab, node)
                 }
 
                 for (edge in edges) {
@@ -1149,7 +1109,7 @@ class SqliteGraphStore(val dbPath: String) {
                 sweepOrphanEdges.bindString(3, projectId)
                 sweepOrphanEdges.step()
 
-                sweepOrphanEndpoints(scope, projectId, delFtsByNodeId, delFts, delVocab)
+                sweepOrphanEndpoints(scope, projectId, delFtsByNodeId, delVocab)
 
                 recomputeDegrees(projectId)
             } finally {
