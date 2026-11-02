@@ -16,6 +16,7 @@ class ModuleBoundaryDetector {
             """(?:implementation|api|compileOnly|debugImplementation|releaseImplementation|testImplementation|androidTestImplementation)\s*\(\s*projects\.([a-zA-Z0-9_.]+)\s*\)"""
         )
         private val GRADLE_INCLUDE_REGEX = Regex("""include\s*\(([^)]+)\)|include\s+([^\n]+)""")
+        private val QUOTED_TOKEN_RE = Regex("""["']([^"']+)["']""")
 
         fun resolveModuleId(relPath: String, knownModules: List<String> = emptyList()): String {
             val norm = relPath.replace('\\', '/').trim('/')
@@ -202,7 +203,7 @@ class ModuleBoundaryDetector {
         }
 
         private fun extractIncludeTokens(raw: String, list: MutableList<String>) {
-            for (match in Regex("""["']([^"']+)["']""").findAll(raw)) {
+            for (match in QUOTED_TOKEN_RE.findAll(raw)) {
                 val t = match.groupValues[1]
                 val mod = if (t.startsWith(":")) t else ":$t"
                 if (mod !in list) list.add(mod)

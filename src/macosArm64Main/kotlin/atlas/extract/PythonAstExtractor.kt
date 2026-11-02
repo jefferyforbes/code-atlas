@@ -20,6 +20,7 @@ internal object PythonAstExtractor {
 
     private val PY_IMP_RE = Regex("""^\s*(?:from\s+([a-zA-Z0-9_.]+)\s+import|import\s+([a-zA-Z0-9_.]+))""", RegexOption.MULTILINE)
     private val PY_DECL_RE = Regex("""^(?<indent>[ \t]*)(?<kw>class|def|async\s+def)\s+(?<name>[A-Za-z0-9_]+)""", RegexOption.MULTILINE)
+    private val WHITESPACE_RE = Regex("""\s+""")
 
     private val TRIPLE_QUOTE_TOKENS = setOf("\"\"\"", "'''")
 
@@ -232,7 +233,7 @@ internal object PythonAstExtractor {
             if (raw.isNotEmpty()) parts.add(raw)
             if (scanMaskedHeader(state, masked)) break
         }
-        return parts.joinToString(" ").replace(Regex("""\s+"""), " ")
+        return parts.joinToString(" ").replace(WHITESPACE_RE, " ")
     }
 
     private fun detectPythonTripleQuote(text: String): String? {

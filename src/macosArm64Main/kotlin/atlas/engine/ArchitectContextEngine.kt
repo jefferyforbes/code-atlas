@@ -29,6 +29,9 @@ class ArchitectContextEngine(
     )
 
     companion object {
+        private val PROMPT_TOKEN_SPLIT_RE = Regex("[^a-zA-Z0-9_]+")
+        private val SLUG_SANITIZE_RE = Regex("[^a-z0-9_-]+")
+
         internal val STOP_WORDS = setOf(
             "how", "does", "the", "work", "what", "is", "where", "to", "in", "for", "a",
             "an", "and", "or", "of", "from", "with", "by", "on", "at", "it", "this", "that",
@@ -294,7 +297,7 @@ class ArchitectContextEngine(
     }
 
     private fun tokenizePrompt(prompt: String): List<String> {
-        return prompt.split(Regex("[^a-zA-Z0-9_]+"))
+        return prompt.split(PROMPT_TOKEN_SPLIT_RE)
             .map { it.trim() }
             .filter { it.length >= 3 && !STOP_WORDS.contains(it.lowercase()) }
             .distinct()
@@ -302,7 +305,7 @@ class ArchitectContextEngine(
 
     private fun sanitizeSlug(target: String): String {
         return target.lowercase()
-            .replace(Regex("[^a-z0-9_-]+"), "-")
+            .replace(SLUG_SANITIZE_RE, "-")
             .trim('-')
             .take(32)
             .ifEmpty { "architect" }
