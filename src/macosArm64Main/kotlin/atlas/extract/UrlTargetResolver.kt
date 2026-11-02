@@ -82,6 +82,7 @@ object UrlTargetResolver {
     private val INTERP_VAR_PARAM_RE = Regex("""\$[A-Za-z_][A-Za-z0-9_]*""")
     private val ANGLE_PARAM_RE = Regex("""<[^<>/]+>""")
     private val COLON_PARAM_RE = Regex("""^:[A-Za-z_][A-Za-z0-9_]*$""")
+    private val FIGMA_HYPHEN_NODE_ID_RE = Regex("""^I?\d+-\d+$""")
     private val ROUTE_PREFIXES = listOf(
         "/api/", "/v1/", "/v2/", "/v3/", "/graphql", "/rest/", "/webhook", "/auth/", "/oauth/", "/health", "/metrics", "/ws/"
     )
@@ -122,7 +123,7 @@ object UrlTargetResolver {
             .replace("%2D", "-").replace("%2d", "-")
         return decoded.split(';').filter { it.isNotBlank() }.joinToString(";") { segment ->
             val seg = segment.trim()
-            if (Regex("""^I?\d+-\d+$""").matches(seg)) seg.replace('-', ':') else seg
+            if (FIGMA_HYPHEN_NODE_ID_RE.matches(seg)) seg.replace('-', ':') else seg
         }
     }
 

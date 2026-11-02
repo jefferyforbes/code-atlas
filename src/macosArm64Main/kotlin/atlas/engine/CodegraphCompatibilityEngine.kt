@@ -1,5 +1,6 @@
 package atlas.engine
 
+import atlas.bridge.VaultPlanBridge
 import atlas.db.SqliteGraphStore
 import atlas.model.GraphNode
 import atlas.model.LiveSourceSlice
@@ -575,32 +576,5 @@ class CodegraphCompatibilityEngine(
         return EXTENSION_LANG_MAP[ext] ?: ""
     }
 
-    private fun globToRegex(glob: String): Regex {
-        val pattern = buildString {
-            append("^")
-            var i = 0
-            while (i < glob.length) {
-                val c = glob[i]
-                when (c) {
-                    '*' -> {
-                        if (i + 1 < glob.length && glob[i + 1] == '*') {
-                            append(".*")
-                            i++
-                        } else {
-                            append("[^/]*")
-                        }
-                    }
-                    '?' -> append(".")
-                    '.', '(', ')', '[', ']', '{', '}', '+', '^', '$', '|', '\\' -> {
-                        append("\\")
-                        append(c)
-                    }
-                    else -> append(c)
-                }
-                i++
-            }
-            append("$")
-        }
-        return Regex(pattern)
-    }
+    private fun globToRegex(glob: String): Regex = VaultPlanBridge.globToRegex(glob)
 }

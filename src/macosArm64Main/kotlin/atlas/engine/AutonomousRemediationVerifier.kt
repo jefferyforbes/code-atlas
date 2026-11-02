@@ -104,9 +104,9 @@ class AutonomousRemediationVerifier(
         details: MutableList<String>
     ): RemediationVerificationResult? {
         if (store == null) return null
-        val varPropMatch = Regex("""\bvar\s+([A-Za-z0-9_]+)\s*:""").find(req.beforeSnippet) ?: return null
+        val varPropMatch = VAR_PROP_SNIPPET_RE.find(req.beforeSnippet) ?: return null
         val propName = varPropMatch.groupValues[1]
-        val className = Regex("""\b(?:data\s+)?class\s+([A-Za-z0-9_]+)""").find(req.beforeSnippet)?.groupValues?.get(1)
+        val className = CLASS_NAME_SNIPPET_RE.find(req.beforeSnippet)?.groupValues?.get(1)
         val mutations = store.countPropertyMutations(req.projectSlug, propName, className)
         if (mutations > 0) {
             val msg = "Pre-flight failed: Write-site mutations exist in call graph ($mutations active mutation(s) for '$propName')."
@@ -557,6 +557,9 @@ class AutonomousRemediationVerifier(
             val rawStatus = system(cmd)
             return if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
         }
+
+        private val VAR_PROP_SNIPPET_RE = Regex("""\bvar\s+([A-Za-z0-9_]+)\s*:""")
+        private val CLASS_NAME_SNIPPET_RE = Regex("""\b(?:data\s+)?class\s+([A-Za-z0-9_]+)""")
     }
 
     private fun ruleBitForId(ruleId: String): Int {

@@ -1120,8 +1120,8 @@ class AtlasCli {
             val b = extractAuditArraySize(data, "single_declaration_violations", "singleDeclarationViolations")
             val l = extractAuditArraySize(data, "layer_inversions", "layerInversions")
             val p = extractAuditArraySize(data, "plan_3d_collisions", "plan3dCollisions")
-            val c = extractAuditArraySize(data, "complexity_violations", "complexityViolations")
-            return b + l + p + c
+            val s = extractAuditArraySize(data, "skill_violations", "skillViolations")
+            return b + l + p + s
         }
 
         private fun printDoctorTriageOutput(

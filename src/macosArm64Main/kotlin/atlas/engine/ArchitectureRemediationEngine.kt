@@ -25,6 +25,11 @@ class ArchitectureRemediationEngine(
 ) {
     private val auditor = ArchitectureAuditor(store)
 
+    companion object {
+        private val TRIPLE_NEWLINE_RE = Regex("""\n{3,}""")
+        private val LEADING_ANNOTATIONS_RE = Regex("""^((?:@[A-Za-z0-9_]+(?:\([^)]*\))?\s*)+)(.*)""")
+    }
+
     private fun isRuleIncluded(ruleFilter: String?, targetRule: String): Boolean {
         if (ruleFilter == null) return true
         return ruleFilter.equals(targetRule, ignoreCase = true) || ruleFilter.equals("all", ignoreCase = true)
@@ -487,7 +492,7 @@ class ArchitectureRemediationEngine(
         val spawnedFiles = extractSpawnedFiles(workingLines, req.secondaryNodes, dir, req.ext, headerLines, importLines)
 
         val rawModified = workingLines.joinToString("\n")
-        val cleanModified = Regex("""\n{3,}""").replace(rawModified, "\n\n").trimEnd() + "\n"
+        val cleanModified = TRIPLE_NEWLINE_RE.replace(rawModified, "\n\n").trimEnd() + "\n"
         val effectiveRelPath = req.targetRenameRelPath ?: req.relPath
 
         val astValid = verifyAstSplits(req.projectId, effectiveRelPath, cleanModified, spawnedFiles, req.lang, details)
@@ -576,7 +581,7 @@ class ArchitectureRemediationEngine(
             trimmed.startsWith("internal ") -> "private " + trimmed.removePrefix("internal ")
             trimmed.startsWith("open ") -> "private " + trimmed.removePrefix("open ")
             trimmed.startsWith("@") -> {
-                val annMatch = Regex("""^((?:@[A-Za-z0-9_]+(?:\([^)]*\))?\s*)+)(.*)""").find(trimmed)
+                val annMatch = LEADING_ANNOTATIONS_RE.find(trimmed)
                 if (annMatch != null) {
                     annMatch.groupValues[1] + privatizeKotlinSubTrimmed(annMatch.groupValues[2])
                 } else {
