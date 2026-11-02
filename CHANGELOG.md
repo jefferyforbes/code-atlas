@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] - 2026-11-02
+
+### Added
+- **Skill Graph Audit Invariants (`SKILL-001`, `SKILL-002`, `SKILL-003`)**: Architectural audit rules in `ArchitectureAuditor` detecting broken skill file/script references, invalid `SKILL.md` frontmatter schemas, and circular skill dependency cycles (#147).
+- **High-Parameter Ratchet (`--param-high-ratchet`) & Bounded MCP Audit Payloads**: Enforced `param_high_ratchet = 0` in `complexity-baseline.json`, added `--param-high-ratchet` CLI/MCP support, and bounded MCP `atlas_audit` complexity payloads below the 32 KB ceiling (#162, #165).
+- **Orion Native Shared Libraries & Binary Codesigning**: Integrated `com.orion:orion-native-io`, `orion-mcp-cli-core`, and `orion-markdown-vault` (#151), and added automatic ad-hoc `codesign` execution to `installToDist` and `installToLocalBin` Gradle tasks (#161).
+
+### Changed
+- **Modular Subsystem Decomposition (BOOST-003 & Zero-Complexity Ratchet)**: Decomposed `SqliteGraphStore` into domain DAOs (`FigmaGraphStoreDao`, `FigmaAuditRuleDao`, `ComposeGraphStoreDao`, `GraphTraversalDao`, `GraphSchemaMigrator`), `PolyglotAstExtractor` into language-specific extractors and `SourceLexerMasker` / `CrossFileEdgeResolver` / `FigmaTokenExtractor`, `ComposeStabilityExtractor` into `ComposeTelemetryParser` and `ComposeTypeStabilityAnalyzer`, `AtlasMcpServer` into `McpJsonRpcTransport` and `McpToolSchemas`, and `AtlasCli` into `FigmaCliCommands` and `ComposeCliCommands` (#157–#185).
+- **Zero-State Complexity & Parameter Encapsulation**: Drove cognitive/cyclomatic complexity warnings and high-parameter (`COMPLEXITY-002-PARAMS`) violations to zero across all production modules by replacing untyped `Pair`/`Triple` and multi-parameter signatures with typed context data classes (#155, #157, #161, #164, #165, #174).
+
+### Fixed
+- **Lexical Scope & Cross-File Call Disambiguation**: Disambiguated unqualified call edges using caller lexical scope (#149) and made cross-file symbol resolution deterministic (#163).
+- **Polyglot Lexer, FTS & Query Performance**: Hardened string interpolation lexing and language-scoped complexity keywords (#163), fixed logarithmic risk index ranking and kind-filtered search truncation (#164), resolved complexity baseline path resolution and redundant DB/FTS scans (#166), precompiled hot-path regexes, escaped FTS5 quotes, and batched SQLite queries (#175, #179).
+
 ## [0.7.0] - 2026-10-20
 
 ### Added

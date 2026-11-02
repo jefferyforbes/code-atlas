@@ -57,7 +57,7 @@ class AtlasMcpServer(
     val enableCodegraphTools: Boolean = (PlatformFiles.getenv("ATLAS_CODEGRAPH_COMPAT") == "1")
 ) {
     companion object {
-        const val VERSION = "0.7.0"
+        const val VERSION = "0.8.0"
         const val SPILLOVER_THRESHOLD_BYTES = 32768
         private val COMPOSE_QUERY_ACTIONS = setOf("summary", "compose_summary", "cascade", "compose_cascade", "blame", "compose_blame")
     }
