@@ -530,7 +530,7 @@ internal class ComposeGraphStoreDao(private val db: NativeSqliteDatabase) {
         ownerClassName: String? = null
     ): Int {
         val cleanSym = targetSymbolOrNodeId.removePrefix("sym:")
-        val escSym = cleanSym.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val escSym = NativeSqliteStatement.escapeSqlLike(cleanSym)
         if (!ownerClassName.isNullOrEmpty()) {
             return countOwnerPropertyMutations(projectSlug, targetSymbolOrNodeId, cleanSym, escSym, ownerClassName)
         }
@@ -559,7 +559,7 @@ internal class ComposeGraphStoreDao(private val db: NativeSqliteDatabase) {
             """.trimIndent()
         )
         val cleanClass = ownerClassName.substringAfterLast('.').removePrefix("sym:")
-        val escClass = cleanClass.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val escClass = NativeSqliteStatement.escapeSqlLike(cleanClass)
         return try {
             stmt.bindString(1, projectSlug)
             stmt.bindString(2, "sym:$cleanClass.$cleanSym")

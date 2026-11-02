@@ -353,10 +353,7 @@ class AutonomousRemediationVerifier(
 
         var passed = false
         try {
-            val escapedRoot = "'" + workspaceRoot.replace("'", "'\\''") + "'"
-            val cmd = "cd $escapedRoot && $testCommand"
-            val rawStatus = system(cmd)
-            val exitCode = if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
+            val exitCode = executeShellInWorkspace(workspaceRoot, testCommand)
             if (exitCode != 0) {
                 details.add("Test command '$testCommand' failed (exit code $exitCode).")
             } else {
@@ -534,19 +531,32 @@ class AutonomousRemediationVerifier(
             }
             return stack.isEmpty()
         }
-    }
 
-    private fun countOccurrences(source: String, target: String): Int {
-        if (target.isEmpty()) return 0
-        var count = 0
-        var idx = 0
-        while (true) {
-            val found = source.indexOf(target, idx)
-            if (found < 0) break
-            count++
-            idx = found + target.length
+        internal fun countOccurrences(source: String, target: String): Int {
+            if (target.isEmpty()) return 0
+            var count = 0
+            var idx = 0
+            while (true) {
+                val found = source.indexOf(target, idx)
+                if (found < 0) break
+                count++
+                idx = found + target.length
+            }
+            return count
         }
-        return count
+
+        internal fun hasSingleOccurrence(source: String, target: String): Boolean {
+            if (target.isEmpty()) return false
+            val first = source.indexOf(target)
+            return first >= 0 && source.indexOf(target, first + target.length) < 0
+        }
+
+        internal fun executeShellInWorkspace(workspaceRoot: String, cmdStr: String): Int {
+            val escapedRoot = "'" + workspaceRoot.replace("'", "'\\''") + "'"
+            val cmd = "cd $escapedRoot && $cmdStr"
+            val rawStatus = system(cmd)
+            return if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
+        }
     }
 
     private fun ruleBitForId(ruleId: String): Int {

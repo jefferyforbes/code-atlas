@@ -133,4 +133,9 @@ class NativeSqliteStatement(
             close()
         }
     }
+
+    companion object {
+        internal fun escapeSqlLike(raw: String): String =
+            raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    }
 }

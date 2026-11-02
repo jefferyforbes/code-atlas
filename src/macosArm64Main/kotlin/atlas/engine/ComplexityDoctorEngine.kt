@@ -1,12 +1,12 @@
 package atlas.engine
 
 import atlas.db.SqliteGraphStore
+import atlas.extract.ComplexityExtractor
 import atlas.extract.PolyglotAstExtractor
 import atlas.model.ComplexityDoctorReport
 import atlas.model.ComplexityScoreRecord
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
-import kotlin.math.ln
 import kotlin.math.roundToInt
 
 /**
@@ -385,7 +385,7 @@ class ComplexityDoctorEngine(
         afterLines.addAll(unindentedInner)
         val afterSnippet = afterLines.joinToString("\n")
 
-        if (countOccurrences(sourceText, beforeSnippet) != 1) return null
+        if (!AutonomousRemediationVerifier.hasSingleOccurrence(sourceText, beforeSnippet)) return null
         return Pair(beforeSnippet, afterSnippet)
     }
 
@@ -406,7 +406,7 @@ class ComplexityDoctorEngine(
     ): ComplexityDoctorReport.Prescription? {
         val (beforeSnippet, afterSnippet) = snippets
         val maskedCandidate = PolyglotAstExtractor.maskCommentsAndStrings(candidateText, ctx.lang)
-        if (!hasBalancedDelimiters(maskedCandidate)) return null
+        if (!AutonomousRemediationVerifier.hasBalancedDelimiters(maskedCandidate)) return null
 
         val modExtracted = try {
             PolyglotAstExtractor.extractFile(ctx.projectId, ctx.filePath, candidateText)
@@ -427,8 +427,8 @@ class ComplexityDoctorEngine(
         val reductionPct = if (cogBefore > 0) (diff.toDouble() / cogBefore.toDouble()) * 100.0 else 0.0
         val roundedPct = (reductionPct * 10.0).roundToInt() / 10.0
 
-        val inDeg = ctx.inDegree.coerceAtLeast(ctx.node.inDegree).toDouble()
-        val riskIndex = cogBefore.toDouble() * (1.0 + ln(1.0 + inDeg))
+        val inDeg = ctx.inDegree.coerceAtLeast(ctx.node.inDegree)
+        val riskIndex = ComplexityExtractor.computeRiskIndex(cogBefore, inDeg)
         val priorityScore = (riskIndex * (roundedPct / 100.0) * 10.0).roundToInt() / 10.0
 
         return ComplexityDoctorReport.Prescription(
@@ -522,11 +522,11 @@ class ComplexityDoctorEngine(
         snippets: Pair<String, String>
     ): ComplexityDoctorReport.Prescription? {
         val (beforeSnippet, afterSnippet) = snippets
-        if (countOccurrences(ctx.sourceText, beforeSnippet) != 1) return null
+        if (!AutonomousRemediationVerifier.hasSingleOccurrence(ctx.sourceText, beforeSnippet)) return null
 
         val candidateText = ctx.sourceText.replace(beforeSnippet, afterSnippet)
         val maskedCandidate = PolyglotAstExtractor.maskCommentsAndStrings(candidateText, ctx.lang)
-        if (!hasBalancedDelimiters(maskedCandidate)) return null
+        if (!AutonomousRemediationVerifier.hasBalancedDelimiters(maskedCandidate)) return null
 
         val modExtracted = try {
             PolyglotAstExtractor.extractFile(ctx.projectId, ctx.filePath, candidateText)
@@ -546,8 +546,8 @@ class ComplexityDoctorEngine(
 
         if (diff < 1) return null
 
-        val inDeg = ctx.inDegree.coerceAtLeast(ctx.node.inDegree).toDouble()
-        val riskIndex = cogBefore.toDouble() * (1.0 + ln(1.0 + inDeg))
+        val inDeg = ctx.inDegree.coerceAtLeast(ctx.node.inDegree)
+        val riskIndex = ComplexityExtractor.computeRiskIndex(cogBefore, inDeg)
         val priorityScore = (riskIndex * (roundedPct / 100.0) * 10.0).roundToInt() / 10.0
 
         return ComplexityDoctorReport.Prescription(
@@ -749,37 +749,5 @@ class ComplexityDoctorEngine(
         }
         parts.add(text.substring(last).trim())
         return parts
-    }
-
-    private val closingToOpeningDelimiter = mapOf('}' to '{', ')' to '(', ']' to '[')
-
-    private fun updateDelimiterStack(stack: MutableList<Char>, ch: Char): Boolean {
-        if (ch == '{' || ch == '(' || ch == '[') {
-            stack.add(ch)
-            return true
-        }
-        val expectedOpen = closingToOpeningDelimiter[ch] ?: return true
-        return stack.isNotEmpty() && stack.removeAt(stack.size - 1) == expectedOpen
-    }
-
-    private fun hasBalancedDelimiters(maskedText: String): Boolean {
-        val stack = mutableListOf<Char>()
-        for (c in maskedText) {
-            if (!updateDelimiterStack(stack, c)) return false
-        }
-        return stack.isEmpty()
-    }
-
-    private fun countOccurrences(source: String, target: String): Int {
-        if (target.isEmpty()) return 0
-        var count = 0
-        var idx = 0
-        while (true) {
-            val found = source.indexOf(target, idx)
-            if (found < 0) break
-            count++
-            idx = found + target.length
-        }
-        return count
     }
 }
