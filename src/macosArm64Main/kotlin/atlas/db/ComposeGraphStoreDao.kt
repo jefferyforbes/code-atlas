@@ -10,6 +10,15 @@ import atlas.model.ComposeQueryResult
  */
 internal class ComposeGraphStoreDao(private val db: NativeSqliteDatabase) {
 
+    private companion object {
+        private const val COMPOSE_NODES_SELECT_COLUMNS =
+            "node_id, project_slug, fqname, file_path, start_line, end_line, " +
+                "source_set, is_restartable, is_skippable, is_readonly, is_inline, " +
+                "returns_unit, has_modifier_param, modifier_is_first_optional, " +
+                "modifier_has_default, unstable_param_count, runtime_param_count, " +
+                "receiver_stability, provenance, violation_mask"
+    }
+
     fun provenanceRank(provenance: String): Int = when (provenance.uppercase()) {
         "RUNTIME_TRACED" -> 4
         "COMPILER_VERIFIED" -> 3
@@ -258,29 +267,9 @@ internal class ComposeGraphStoreDao(private val db: NativeSqliteDatabase) {
     }
 
     fun listComposeNodes(projectSlug: String, onlyViolating: Boolean = false): List<ComposeNodeRecord> {
-        val sql = if (onlyViolating) {
-            """
-            SELECT node_id, project_slug, fqname, file_path, start_line, end_line,
-                   source_set, is_restartable, is_skippable, is_readonly, is_inline,
-                   returns_unit, has_modifier_param, modifier_is_first_optional,
-                   modifier_has_default, unstable_param_count, runtime_param_count,
-                   receiver_stability, provenance, violation_mask
-            FROM compose_nodes
-            WHERE project_slug = ? AND violation_mask != 0
-            ORDER BY file_path ASC, start_line ASC;
-            """.trimIndent()
-        } else {
-            """
-            SELECT node_id, project_slug, fqname, file_path, start_line, end_line,
-                   source_set, is_restartable, is_skippable, is_readonly, is_inline,
-                   returns_unit, has_modifier_param, modifier_is_first_optional,
-                   modifier_has_default, unstable_param_count, runtime_param_count,
-                   receiver_stability, provenance, violation_mask
-            FROM compose_nodes
-            WHERE project_slug = ?
-            ORDER BY file_path ASC, start_line ASC;
-            """.trimIndent()
-        }
+        val whereClause = if (onlyViolating) "project_slug = ? AND violation_mask != 0" else "project_slug = ?"
+        val sql = "SELECT $COMPOSE_NODES_SELECT_COLUMNS FROM compose_nodes " +
+            "WHERE $whereClause ORDER BY file_path ASC, start_line ASC;"
         val stmt = db.prepare(sql)
         val out = mutableListOf<ComposeNodeRecord>()
         try {
@@ -297,11 +286,7 @@ internal class ComposeGraphStoreDao(private val db: NativeSqliteDatabase) {
     fun getComposeNode(projectSlug: String, target: String): ComposeNodeRecord? {
         val stmt = db.prepare(
             """
-            SELECT node_id, project_slug, fqname, file_path, start_line, end_line,
-                   source_set, is_restartable, is_skippable, is_readonly, is_inline,
-                   returns_unit, has_modifier_param, modifier_is_first_optional,
-                   modifier_has_default, unstable_param_count, runtime_param_count,
-                   receiver_stability, provenance, violation_mask
+            SELECT $COMPOSE_NODES_SELECT_COLUMNS
             FROM compose_nodes
             WHERE project_slug = ?
               AND (node_id = ? OR fqname = ? OR fqname LIKE ?)
