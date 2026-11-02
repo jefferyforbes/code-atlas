@@ -245,7 +245,7 @@ internal class GraphTraversalDao(
     ) {
         val epNodeId = "$projectId:endpoint#$canonRoute"
         nodeLookup(projectId, epNodeId)?.let { outMatched[it.nodeId] = it }
-        val escRoute = canonRoute.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val escRoute = NativeSqliteStatement.escapeSqlLike(canonRoute)
         val epStmt = db.prepare(
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
@@ -282,7 +282,7 @@ internal class GraphTraversalDao(
         outMatched: MutableMap<String, GraphNode>
     ) {
         val (canonRoute, canonUrl) = canonRouteAndUrl
-        val escUrl = canonUrl.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val escUrl = NativeSqliteStatement.escapeSqlLike(canonUrl)
         val edgeStmt = db.prepare(
             """
             SELECT DISTINCT n.node_id, n.project_id, n.file_id, n.name, n.qualified_name, n.kind, n.signature,
@@ -346,7 +346,7 @@ internal class GraphTraversalDao(
         } else {
             figmaDao.queryFigmaNodesForFile(figmaLink.fileKey, limit)
         }
-        val escFileKey = figmaLink.fileKey.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val escFileKey = NativeSqliteStatement.escapeSqlLike(figmaLink.fileKey)
         val refEdges = queryUrlEdgeRecords(projectId, "%$escFileKey%", limit)
         return buildJsonObject {
             put("project", projectId)
@@ -405,7 +405,7 @@ internal class GraphTraversalDao(
 
     private fun queryEndpointNodes(projectId: String, canonRoute: String, limit: Int): List<GraphNode> {
         val exactId = "$projectId:endpoint#$canonRoute"
-        val escRoute = canonRoute.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val escRoute = NativeSqliteStatement.escapeSqlLike(canonRoute)
         val epStmt = db.prepare(
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
@@ -451,7 +451,7 @@ internal class GraphTraversalDao(
         targetIds.add("url_ref#$canonUrl")
 
         val likeSource = canonRoute ?: canonUrl
-        val likePattern = "%" + likeSource.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        val likePattern = "%" + NativeSqliteStatement.escapeSqlLike(likeSource) + "%"
         val edgeMatches = queryUrlEdgeRecords(projectId, likePattern, limit * 3, targetIds)
         val producers = edgeMatches.filter { it.second.edgeType == "EXPOSES_ENDPOINT" }
         val consumers = edgeMatches.filter { it.second.edgeType == "CALLS_ENDPOINT" }

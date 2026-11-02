@@ -14,7 +14,6 @@ import atlas.model.PlanCollision
 import atlas.model.SingleDeclarationViolation
 import atlas.model.SkillAuditViolation
 import atlas.util.PlatformFiles
-import kotlin.math.ln
 import kotlin.math.roundToInt
 
 /**
@@ -75,7 +74,7 @@ class ArchitectureAuditor(
         )
         private val LOWER_TIER_LAYERS = setOf("presentation", "data", "infrastructure")
         private val NON_PRESENTATION_LAYERS = setOf("application", "data", "infrastructure")
-        private val TERMINAL_PLAN_STATUSES = setOf(
+        internal val TERMINAL_PLAN_STATUSES = setOf(
             "(merged)", "(completed)", "(done)", "(landed)", "(closed)",
             "(planned)", "(draft)", "(blocked)", "(cancelled)"
         )
@@ -308,8 +307,7 @@ class ArchitectureAuditor(
         } else {
             "L${node.startLine}"
         }
-        val inDeg = node.inDegree.toDouble()
-        val riskIndex = paramCount.toDouble() * (1.0 + ln(1.0 + inDeg))
+        val riskIndex = ComplexityExtractor.computeRiskIndex(paramCount, node.inDegree)
         val roundedRisk = (riskIndex * 10.0).roundToInt() / 10.0
         val kindLabel = if (isComp) "Composable" else "Function"
         val thresholdVal = if (severity == "HIGH") errorThreshold else warnThreshold
@@ -348,8 +346,7 @@ class ArchitectureAuditor(
         } else {
             "L${node.startLine}"
         }
-        val inDeg = node.inDegree.toDouble()
-        val riskIndex = node.cognitiveComplexity.toDouble() * (1.0 + ln(1.0 + inDeg))
+        val riskIndex = ComplexityExtractor.computeRiskIndex(node.cognitiveComplexity, node.inDegree)
         val roundedRisk = (riskIndex * 10.0).roundToInt() / 10.0
         val message = "Function '${node.name}' exceeds complexity thresholds (Cognitive: ${node.cognitiveComplexity}/$maxCognitive, Cyclomatic: ${node.cyclomaticComplexity}/$maxCyclomatic, Risk: $roundedRisk)."
         return ComplexityViolation(

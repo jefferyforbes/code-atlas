@@ -10,7 +10,6 @@ import atlas.model.LayerInversionViolation
 import atlas.model.SingleDeclarationViolation
 import atlas.model.SpawnedFileRecord
 import atlas.util.PlatformFiles
-import platform.posix.system
 import kotlin.math.max
 import kotlin.math.min
 
@@ -336,13 +335,8 @@ class ArchitectureRemediationEngine(
         PlatformFiles.writeText(fullPath, originalContent)
     }
 
-    private fun escapeShellSingleQuotes(value: String): String =
-        "'" + value.replace("'", "'\\''") + "'"
-
     private fun executeTestCommand(cmdStr: String, details: MutableList<String>): Boolean {
-        val cmd = "cd ${escapeShellSingleQuotes(workspaceRoot)} && $cmdStr"
-        val rawStatus = system(cmd)
-        val exitCode = if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
+        val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(workspaceRoot, cmdStr)
         if (exitCode != 0) {
             details.add("Test command '$cmdStr' failed (exit code $exitCode). Automatic rollback performed.")
             return false

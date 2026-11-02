@@ -1146,8 +1146,7 @@ class SqliteGraphStore(val dbPath: String) {
     }
 
     private fun getNodeByCodeLocation(projectId: String, codeLink: UrlTargetResolver.CodeLocationLink): GraphNode? {
-        val escapedSuffix = codeLink.filePathSuffix
-            .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val escapedSuffix = NativeSqliteStatement.escapeSqlLike(codeLink.filePathSuffix)
         if (codeLink.startLine != null) {
             val targetLine = codeLink.startLine
             val spanStmt = db.prepare(
@@ -1194,8 +1193,7 @@ class SqliteGraphStore(val dbPath: String) {
                 """.trimIndent()
             )
             try {
-                val escFrag = codeLink.symbolFragment
-                    .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                val escFrag = NativeSqliteStatement.escapeSqlLike(codeLink.symbolFragment)
                 symStmt.bindString(1, projectId)
                 symStmt.bindString(2, codeLink.symbolFragment)
                 symStmt.bindString(3, "%$escFrag%")
@@ -1241,10 +1239,7 @@ class SqliteGraphStore(val dbPath: String) {
     }
 
     private fun getNodeByNameOrId(projectId: String, target: String): GraphNode? {
-        val escapedTarget = target
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
+        val escapedTarget = NativeSqliteStatement.escapeSqlLike(target)
         val cleanHashTarget = target.removePrefix("#")
         val tagTarget = "tag#$cleanHashTarget"
         val projTarget = "$projectId:$target"
@@ -1314,7 +1309,7 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun getNodesForFile(projectId: String, relPath: String): List<GraphNode> {
         val norm = relPath.trim().trim('\'', '"').removePrefix("./").replace('\\', '/')
-        val escaped = norm.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val escaped = NativeSqliteStatement.escapeSqlLike(norm)
         val stmt = db.prepare(
             """
             SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
@@ -1448,10 +1443,7 @@ class SqliteGraphStore(val dbPath: String) {
         scores: MutableMap<String, Double>
     ) {
         val (limit, kind) = limitAndKind
-        val escapedQuery = query
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
+        val escapedQuery = NativeSqliteStatement.escapeSqlLike(query)
         val kindClause = if (kind != null) " AND kind = ?" else ""
 
         val likeStmt = db.prepare(

@@ -14,13 +14,13 @@ import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkMemoryStore
 import atlas.engine.WorkspaceIndexer
 import atlas.engine.ArchitectContextEngine
+import atlas.extract.ComplexityExtractor
 import atlas.extract.UrlTargetResolver
 import atlas.model.ArchitectContextResult
 import atlas.model.ComplexityScoreRecord
 import atlas.model.ComplexityViolation
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
-import kotlin.math.ln
 import kotlin.math.roundToInt
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.encodeToString
@@ -922,14 +922,8 @@ class AtlasMcpServer(
             return emptyList()
         }
         val score = directNode.complexityScore
-        val grade = when {
-            score >= 90.0 -> "A"
-            score >= 80.0 -> "B"
-            score >= 70.0 -> "C"
-            score >= 60.0 -> "D"
-            else -> "F"
-        }
-        val risk = directNode.cognitiveComplexity.toDouble() * (1.0 + ln(1.0 + directNode.inDegree.toDouble()))
+        val grade = ComplexityExtractor.computeGrade(score)
+        val risk = ComplexityExtractor.computeRiskIndex(directNode.cognitiveComplexity, directNode.inDegree)
         val roundedRisk = (risk * 10.0).roundToInt() / 10.0
         val filePath = if (directNode.fileId.contains(':')) directNode.fileId.substringAfter(':') else directNode.fileId
         return listOf(

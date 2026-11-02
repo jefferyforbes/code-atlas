@@ -702,12 +702,6 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         return -1
     }
 
-    private fun hasSingleSubstringOccurrence(content: String, target: String): Boolean {
-        if (target.isEmpty()) return false
-        val first = content.indexOf(target)
-        return first >= 0 && content.indexOf(target, first + target.length) < 0
-    }
-
     private fun buildSliceReplacement(
         lines: List<String>,
         matchedIdx: Int,
@@ -715,7 +709,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         replacement: String,
         content: String
     ): Pair<String, String> {
-        if (hasSingleSubstringOccurrence(content, lineText)) {
+        if (AutonomousRemediationVerifier.hasSingleOccurrence(content, lineText)) {
             return Pair(lineText, replacement)
         }
         val startSlice = (matchedIdx - 2).coerceAtLeast(0)
@@ -723,7 +717,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         val sliceLines = lines.subList(startSlice, matchedIdx).toMutableList()
         sliceLines.add(replacement)
         val sliceAfter = sliceLines.joinToString("\n")
-        return if (hasSingleSubstringOccurrence(content, sliceBefore)) {
+        return if (AutonomousRemediationVerifier.hasSingleOccurrence(content, sliceBefore)) {
             Pair(sliceBefore, sliceAfter)
         } else {
             Pair(lineText, replacement)
@@ -851,7 +845,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
     }
 
     private fun resolveDeclSnippets(content: String, lineText: String, typeName: String): Pair<String, String> {
-        if (hasSingleSubstringOccurrence(content, lineText)) {
+        if (AutonomousRemediationVerifier.hasSingleOccurrence(content, lineText)) {
             return Pair(lineText, "@Immutable\n$lineText")
         }
         return Pair("interface $typeName", "@Stable\ninterface $typeName")

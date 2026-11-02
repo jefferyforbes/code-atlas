@@ -19,12 +19,62 @@ class ArchitectContextEngine(
     val inlineCeilingBytes: Int = 3500
 ) {
 
+    internal data class ClassSkeletonSpec(
+        val store: SqliteGraphStore,
+        val projectId: String,
+        val node: GraphNode,
+        val relPath: String,
+        val maxMembers: Int = 8,
+        val trailingNewline: Boolean = true
+    )
+
     companion object {
-        private val STOP_WORDS = setOf(
+        internal val STOP_WORDS = setOf(
             "how", "does", "the", "work", "what", "is", "where", "to", "in", "for", "a",
             "an", "and", "or", "of", "from", "with", "by", "on", "at", "it", "this", "that",
             "we", "can", "could", "should", "add", "build", "create", "implement"
         )
+
+        internal fun formatClassSkeleton(
+            spec: ClassSkeletonSpec,
+            sb: StringBuilder
+        ) {
+            val node = spec.node
+            val header = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}"
+            sb.append(header)
+            if (!header.endsWith("{") && !header.endsWith(":")) {
+                sb.append(" {")
+            }
+            sb.append("\n")
+
+            appendMemberSignatures(spec, sb)
+
+            if (header.endsWith("{") || !header.endsWith(":")) {
+                sb.append("}")
+                if (spec.trailingNewline) sb.append("\n")
+            }
+        }
+
+        private fun appendMemberSignatures(
+            spec: ClassSkeletonSpec,
+            sb: StringBuilder
+        ) {
+            val node = spec.node
+            val fileNodes = spec.store.getNodesForFile(spec.projectId, spec.relPath)
+            val members = fileNodes.filter { m ->
+                m.startLine > node.startLine && m.endLine <= node.endLine &&
+                    m.nodeId != node.nodeId &&
+                    (m.kind == "method" || m.kind == "function" || m.kind == "property" || m.kind == "field")
+            }
+
+            for (m in members.take(spec.maxMembers)) {
+                val sig = if (m.signature.isNotEmpty()) m.signature else "${m.kind} ${m.name}"
+                sb.append("  ").append(sig).append("\n")
+            }
+            if (members.size > spec.maxMembers) {
+                sb.append("  // ... and ").append(members.size - spec.maxMembers).append(" more members\n")
+            }
+        }
     }
 
     fun synthesizeContext(
@@ -134,44 +184,12 @@ class ArchitectContextEngine(
         sb.append(" [").append(node.archLayer).append(":").append(node.semioticLayer).append("]\n")
 
         if (node.kind == "class" || node.kind == "interface" || node.kind == "object" || node.kind == "struct") {
-            formatClassSkeleton(projectId, node, relPath, sb)
+            formatClassSkeleton(ClassSkeletonSpec(store, projectId, node, relPath, maxMembers = 8, trailingNewline = true), sb)
         } else {
             val sig = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}"
             sb.append(sig).append("\n")
         }
         return sb.toString().trimEnd()
-    }
-
-    private fun formatClassSkeleton(projectId: String, node: GraphNode, relPath: String, sb: StringBuilder) {
-        val header = if (node.signature.isNotEmpty()) node.signature else "${node.kind} ${node.name}"
-        sb.append(header)
-        if (!header.endsWith("{") && !header.endsWith(":")) {
-            sb.append(" {")
-        }
-        sb.append("\n")
-
-        appendMemberSignatures(projectId, node, relPath, sb)
-
-        if (header.endsWith("{") || !header.endsWith(":")) {
-            sb.append("}\n")
-        }
-    }
-
-    private fun appendMemberSignatures(projectId: String, node: GraphNode, relPath: String, sb: StringBuilder) {
-        val fileNodes = store.getNodesForFile(projectId, relPath)
-        val members = fileNodes.filter { m ->
-            m.startLine > node.startLine && m.endLine <= node.endLine &&
-                m.nodeId != node.nodeId &&
-                (m.kind == "method" || m.kind == "function" || m.kind == "property" || m.kind == "field")
-        }
-
-        for (m in members.take(8)) {
-            val sig = if (m.signature.isNotEmpty()) m.signature else "${m.kind} ${m.name}"
-            sb.append("  ").append(sig).append("\n")
-        }
-        if (members.size > 8) {
-            sb.append("  // ... and ").append(members.size - 8).append(" more members\n")
-        }
     }
 
     private fun resolveSeedNodes(projectId: String, seedTargets: List<String>): List<GraphNode> {

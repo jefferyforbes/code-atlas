@@ -1000,10 +1000,7 @@ internal class FigmaGraphStoreDao(private val db: NativeSqliteDatabase) {
     }
 
     fun queryFigmaNodesByNameLike(fileKey: String, substring: String): List<FigmaNode> {
-        val escaped = substring
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
+        val escaped = NativeSqliteStatement.escapeSqlLike(substring)
         val stmt = db.prepare(
             """
             SELECT rowid_pk, node_id, file_key, page_name, section_id, parent_id,
