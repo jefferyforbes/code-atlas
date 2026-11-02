@@ -35,6 +35,8 @@ class PolyglotAstExtractor {
         )
 
         internal val CALL_RE = Regex("""\b(?:(?<receiver>[A-Za-z_][A-Za-z0-9_]*)(?:::|\.))?(?<callee>[A-Za-z_][A-Za-z0-9_]{2,})\s*\(""")
+        private val INLINE_ANNOTATION_RE = Regex("""^@[A-Za-z0-9_]+(?:\((?:[^()]|\([^()]*\))*\))?\s*""")
+        private val CPP_MACRO_ATTRIBUTE_RE = Regex("""^[A-Z][A-Z0-9_]+(?:\(.*\))?$""")
         internal val CALL_STOPWORDS = setOf(
             "if", "for", "while", "switch", "when", "return", "catch", "super", "this", "self",
             "print", "println", "len", "str", "int", "float", "bool", "listOf", "mapOf", "setOf",
@@ -679,9 +681,8 @@ class PolyglotAstExtractor {
 
         internal fun stripLeadingInlineAnnotations(line: String): String {
             var rest = line.trim()
-            val inlineAnnRe = Regex("""^@[A-Za-z0-9_]+(?:\((?:[^()]|\([^()]*\))*\))?\s*""")
             while (true) {
-                val m = inlineAnnRe.find(rest) ?: break
+                val m = INLINE_ANNOTATION_RE.find(rest) ?: break
                 rest = rest.substring(m.range.last + 1).trimStart()
             }
             return rest
@@ -836,7 +837,7 @@ class PolyglotAstExtractor {
                 "rust" -> trimmed.startsWith("#[") || trimmed.startsWith("#![")
                 "cpp" -> trimmed.startsWith("[[") || trimmed.startsWith("template") ||
                          trimmed.startsWith("__attribute__") ||
-                         trimmed.matches(Regex("""^[A-Z][A-Z0-9_]+(?:\(.*\))?$"""))
+                         trimmed.matches(CPP_MACRO_ATTRIBUTE_RE)
                 else -> trimmed.startsWith("@")
             }
         }

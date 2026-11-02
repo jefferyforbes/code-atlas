@@ -85,10 +85,7 @@ class ComposeStabilityExtractor {
         private val PACKAGE_RE = Regex("""(?m)^\s*package\s+([A-Za-z0-9_.]+)""")
         private val SIDE_EFFECT_CALLBACK_RE = Regex("""^on[A-Z]\w*(And|Then|Navigate|Route|Pop|Dismiss|Fetch|Load)[A-Z]\w*$""")
         private val UI_EMITTING_CALL_RE = Regex("""\b(Column|Row|Box|Scaffold|Surface|Card|Text|Button|Icon|IconButton|LazyColumn|LazyRow|LazyVerticalGrid|LazyHorizontalGrid|OutlinedTextField|TextField|TopAppBar|ModalBottomSheet|AlertDialog|Image|Spacer)\s*\(""")
-        private val CONDITIONAL_EFFECT_RE = Regex("""\b(if|when|for|while)\s*\([^)]*\)\s*\{[^}]*\b(remember|rememberSaveable|LaunchedEffect|DisposableEffect)\b|\?\.\s*let\s*\{[^}]*\b(remember|rememberSaveable|LaunchedEffect|DisposableEffect)\b""")
         private val COLLECT_AS_STATE_RAW_RE = Regex("""\.collectAsState\s*\(""")
-        private val UNREMEMBERED_STATE_RE = Regex("""(?<!remember\s*\{\s*)(?<!rememberSaveable\s*\{\s*)(?<!by\s+remember\s*\{\s*)\b(mutableStateOf|mutableIntStateOf|mutableLongStateOf|mutableFloatStateOf|derivedStateOf|MutableInteractionSource)\s*\(""")
-        private val LAZY_ITEMS_NO_KEY_RE = Regex("""\b(items|itemsIndexed)\s*\((?![^)]*\bkey\s*=)[^)]*\)""")
         private val SCROLL_READ_RE = Regex("""\b\w*(scrollState|ScrollState|lazyListState|LazyListState|pagerState|PagerState)\.(value|firstVisibleItemIndex|firstVisibleItemScrollOffset)\b""")
         private val HARDCODED_TEXT_RE = Regex("""\bText\s*\(\s*(?:text\s*=\s*)?"([^"$\\]{2,})"|\bcontentDescription\s*=\s*"([^"$\\]{2,})"""")
         private val VM_CONTEXT_INJECTION_RE = Regex("""\b\w*ViewModel\s*\([^)]*\b(context|LocalContext\.current|application)\b""")
@@ -97,6 +94,40 @@ class ComposeStabilityExtractor {
         private val CONSUMES_LOCAL_RE = Regex("""\b(Local[A-Za-z0-9_]+)\.current\b""")
         private val OBSERVES_STATE_RE = Regex("""\b([a-zA-Z_][A-Za-z0-9_]*)\.(collectAsStateWithLifecycle|collectAsState)\s*\(""")
         private val MUTATES_PROP_RE = Regex("""\b([a-zA-Z_][A-Za-z0-9_]*)\.([a-zA-Z_][A-Za-z0-9_]*)\s*=(?!=)""")
+        private val INLINE_MOD_RE = Regex("""\binline\b""")
+        private val PRIVATE_MOD_RE = Regex("""\bprivate\b""")
+        private val EXPECT_MOD_RE = Regex("""\bexpect\b""")
+        private val ACTUAL_MOD_RE = Regex("""\bactual\b""")
+        private val FUN_KEYWORD_RE = Regex("""\bfun\b""")
+        private val PREVIEW_ANNOTATION_RE = Regex("""@Preview[A-Za-z0-9_]*""")
+        private val COMPOSABLE_FUN_RE = Regex("""@Composable\b[\s\S]*?\bfun\s+(?:<[^>]+>\s*)?(?:([A-Za-z0-9_.<>?]+)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(""")
+        private val BODY_VAR_RE = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""")
+        private val CTOR_VAR_RE = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)\s*:""")
+        private val RAW_COLLECTION_PROP_RE = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map|MutableList|MutableSet|MutableMap)<""")
+        private val WORKSPACE_COLLECTION_PROP_RE = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map)<""")
+        private val CLASS_DECL_RE = Regex("""((?:@(?:Immutable|Stable)\b[\s\S]*?)?)\b(data\s+class|value\s+class|enum\s+class|sealed\s+interface|sealed\s+class|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*(\([^)]*\))?""")
+        private val WHITESPACE_RE = Regex("""\s+""")
+        private val EFFECT_CALL_RE = Regex("""\b(remember|rememberSaveable|LaunchedEffect|DisposableEffect)\b""")
+        private val CONDITIONAL_PAREN_RE = Regex("""\b(if|when|for|while)\s*\(""")
+        private val WHEN_BRACE_RE = Regex("""\bwhen\s*\{""")
+        private val SAFE_LET_BRACE_RE = Regex("""\?\.\s*let\s*\{""")
+        private val REMEMBER_BLOCK_RE = Regex("""\b(remember|rememberSaveable)\b[^{]*\{""")
+        private val STATE_ALLOC_CALL_RE = Regex("""\b(mutableStateOf|mutableIntStateOf|mutableLongStateOf|mutableFloatStateOf|derivedStateOf|MutableInteractionSource)\s*\(""")
+        private val LAZY_ITEMS_CALL_RE = Regex("""\b(items|itemsIndexed)\s*\(""")
+        private val KEY_NAMED_ARG_RE = Regex("""\bkey\s*=""")
+
+        private fun containsIdentifier(text: String, identifier: String): Boolean {
+            if (identifier.isEmpty()) return false
+            var idx = text.indexOf(identifier)
+            while (idx >= 0) {
+                val beforeOk = idx == 0 || (!text[idx - 1].isLetterOrDigit() && text[idx - 1] != '_')
+                val afterIdx = idx + identifier.length
+                val afterOk = afterIdx >= text.length || (!text[afterIdx].isLetterOrDigit() && text[afterIdx] != '_')
+                if (beforeOk && afterOk) return true
+                idx = text.indexOf(identifier, idx + 1)
+            }
+            return false
+        }
 
         fun buildLineOffsets(text: String): IntArray {
             val offsets = mutableListOf(0)
@@ -304,10 +335,10 @@ class ComposeStabilityExtractor {
             isPreview = declHeaderPrefix.contains("@Preview") || funName.endsWith("Preview"),
             isReadonly = declHeaderPrefix.contains("@ReadOnlyComposable"),
             isNonRestartable = declHeaderPrefix.contains("@NonRestartableComposable"),
-            isInline = Regex("""\binline\b""").containsMatchIn(declHeaderPrefix),
-            isPrivate = Regex("""\bprivate\b""").containsMatchIn(declHeaderPrefix),
-            isExpect = Regex("""\bexpect\b""").containsMatchIn(declHeaderPrefix),
-            isActual = Regex("""\bactual\b""").containsMatchIn(declHeaderPrefix)
+            isInline = INLINE_MOD_RE.containsMatchIn(declHeaderPrefix),
+            isPrivate = PRIVATE_MOD_RE.containsMatchIn(declHeaderPrefix),
+            isExpect = EXPECT_MOD_RE.containsMatchIn(declHeaderPrefix),
+            isActual = ACTUAL_MOD_RE.containsMatchIn(declHeaderPrefix)
         )
     }
 
@@ -530,7 +561,7 @@ class ComposeStabilityExtractor {
         val callClose = findBalancedCloseParen(maskedBodySlice, callMatch.range.last)
         if (callClose <= callMatch.range.last) return false
         val argSlice = maskedBodySlice.substring(callMatch.range.last + 1, callClose)
-        return unstableParamNames.any { pName -> Regex("""\b${Regex.escape(pName)}\b""").containsMatchIn(argSlice) }
+        return unstableParamNames.any { pName -> containsIdentifier(argSlice, pName) }
     }
 
     private fun extractComposableSemanticEdges(
@@ -631,7 +662,7 @@ class ComposeStabilityExtractor {
         composeEdges: MutableList<GraphEdge>
     ): ComposeNodeRecord? {
         val prefixWindow = fileCtx.masked.substring(composableMatch.range.first, composableMatch.range.last)
-        if (Regex("""\bfun\b""").findAll(prefixWindow).count() != 1) return null
+        if (FUN_KEYWORD_RE.findAll(prefixWindow).count() != 1) return null
 
         val receiverType = composableMatch.groupValues[1].trim()
         val funName = composableMatch.groupValues[2].trim()
@@ -695,7 +726,7 @@ class ComposeStabilityExtractor {
         val localClassStability = analyzeLocalClasses(
             sourceText, masked, stabilityPatterns, workspaceNodes, precomputedClassStability
         )
-        val hasPreviewInFile = Regex("""@Preview[A-Za-z0-9_]*""").containsMatchIn(masked)
+        val hasPreviewInFile = PREVIEW_ANNOTATION_RE.containsMatchIn(masked)
         val fileCtx = ComposeFileContext(
             sourceText = sourceText,
             masked = masked,
@@ -715,8 +746,7 @@ class ComposeStabilityExtractor {
         val composeParams = mutableListOf<ComposeParamRecord>()
         val composeEdges = mutableListOf<GraphEdge>()
 
-        val composableFunRe = Regex("""@Composable\b[\s\S]*?\bfun\s+(?:<[^>]+>\s*)?(?:([A-Za-z0-9_.<>?]+)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(""")
-        for (declMatch in composableFunRe.findAll(masked)) {
+        for (declMatch in COMPOSABLE_FUN_RE.findAll(masked)) {
             val record = parseSingleComposableDecl(declMatch, fileCtx, composeParams, composeEdges) ?: continue
             composeNodes.add(record)
         }
@@ -795,7 +825,7 @@ class ComposeStabilityExtractor {
     private fun findDepthOneBodyVar(maskedText: String, fromOffset: Int): String? {
         val openBrace = findClassBodyOpenBrace(maskedText, fromOffset) ?: return null
         val bodyText = extractDepthOneBodyText(maskedText, openBrace) ?: return null
-        val bodyVarMatch = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""").find(bodyText)
+        val bodyVarMatch = BODY_VAR_RE.find(bodyText)
         return bodyVarMatch?.groupValues?.get(1)
     }
 
@@ -833,8 +863,8 @@ class ComposeStabilityExtractor {
         val special = evaluateSpecialClassKind(kindKw, hasStableAnnotation)
         if (special != null) return special
 
-        val ctorVarMatch = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)\s*:""").find(ctorSlice)
-        val rawCollectionMatch = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map|MutableList|MutableSet|MutableMap)<""").find(ctorSlice)
+        val ctorVarMatch = CTOR_VAR_RE.find(ctorSlice)
+        val rawCollectionMatch = RAW_COLLECTION_PROP_RE.find(ctorSlice)
         val varPropName = ctorVarMatch?.groupValues?.get(1) ?: bodyVarName
 
         if (hasStableAnnotation && (varPropName != null || rawCollectionMatch != null)) {
@@ -864,11 +894,10 @@ class ComposeStabilityExtractor {
         stabilityPatterns: List<Regex> = emptyList()
     ): Map<String, Pair<String, String>> {
         val result = mutableMapOf<String, Pair<String, String>>()
-        val classRe = Regex("""((?:@(?:Immutable|Stable)\b[\s\S]*?)?)\b(data\s+class|value\s+class|enum\s+class|sealed\s+interface|sealed\s+class|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*(\([^)]*\))?""")
 
-        for (declMatch in classRe.findAll(maskedText)) {
+        for (declMatch in CLASS_DECL_RE.findAll(maskedText)) {
             val annotations = declMatch.groupValues[1]
-            val kindKw = declMatch.groupValues[2].replace(Regex("""\s+"""), " ")
+            val kindKw = declMatch.groupValues[2].replace(WHITESPACE_RE, " ")
             val className = declMatch.groupValues[3]
             val ctorSlice = declMatch.groupValues[4]
             val hasStableAnnotation = annotations.contains("@Immutable") || annotations.contains("@Stable")
@@ -886,7 +915,7 @@ class ComposeStabilityExtractor {
         sig: String,
         hasStable: Boolean
     ): Pair<String, String> {
-        val prop = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""").find(sig)?.groupValues?.get(1) ?: "prop"
+        val prop = BODY_VAR_RE.find(sig)?.groupValues?.get(1) ?: "prop"
         if (hasStable) {
             return "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:${wn.name}.$prop"
         }
@@ -921,7 +950,7 @@ class ComposeStabilityExtractor {
         if (sig.contains("var ")) {
             return evaluateWorkspaceVarProperty(wn, sig, hasStable)
         }
-        val rawColMatch = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map)<""").find(sig)
+        val rawColMatch = WORKSPACE_COLLECTION_PROP_RE.find(sig)
         if (rawColMatch != null) {
             return evaluateWorkspaceCollectionProperty(wn, rawColMatch, hasStable, stabilityPatterns)
         }
@@ -958,7 +987,7 @@ class ComposeStabilityExtractor {
 
     private fun extractParamName(declPart: String, colonIdx: Int): String? {
         val rawPrefix = declPart.substring(0, colonIdx).trim()
-        val tokens = rawPrefix.split(Regex("""\s+""")).filter { it.isNotBlank() }
+        val tokens = rawPrefix.split(WHITESPACE_RE).filter { it.isNotBlank() }
         val candidate = tokens.lastOrNull()?.removePrefix("vararg")?.trim()
         if (candidate.isNullOrEmpty()) return null
         return candidate
@@ -966,7 +995,7 @@ class ComposeStabilityExtractor {
 
     private fun isParamUsedInBody(paramName: String, maskedBodySlice: String): Boolean {
         if (maskedBodySlice.isBlank()) return true
-        return Regex("""\b${Regex.escape(paramName)}\b""").containsMatchIn(maskedBodySlice)
+        return containsIdentifier(maskedBodySlice, paramName)
     }
 
     private fun parseSingleParameter(
@@ -986,7 +1015,7 @@ class ComposeStabilityExtractor {
         if (colonIdx < 0) return null
 
         val paramName = extractParamName(declPart, colonIdx) ?: return null
-        val typeSig = rawDeclPart.substring(colonIdx + 1).trim().replace(Regex("""\s+"""), " ")
+        val typeSig = rawDeclPart.substring(colonIdx + 1).trim().replace(WHITESPACE_RE, " ")
         val isUsed = isParamUsedInBody(paramName, maskedBodySlice)
 
         val (stability, reason) = inferTypeStability(
@@ -1381,8 +1410,7 @@ class ComposeStabilityExtractor {
     }
 
     private fun hasConditionalParenEffect(maskedBody: String, effectRe: Regex): Boolean {
-        val condRe = Regex("""\b(if|when|for|while)\s*\(""")
-        for (m in condRe.findAll(maskedBody)) {
+        for (m in CONDITIONAL_PAREN_RE.findAll(maskedBody)) {
             val openBrace = findConditionalBlockOpenBrace(maskedBody, m.range.last)
             if (openBrace != null && containsEffectInBlock(maskedBody, openBrace, effectRe)) {
                 return true
@@ -1392,24 +1420,21 @@ class ComposeStabilityExtractor {
     }
 
     private fun hasConditionalEffectOrRemember(maskedBody: String): Boolean {
-        val effectRe = Regex("""\b(remember|rememberSaveable|LaunchedEffect|DisposableEffect)\b""")
-        if (hasConditionalParenEffect(maskedBody, effectRe)) return true
-        if (hasEffectInDirectBraceBlocks(maskedBody, Regex("""\bwhen\s*\{"""), effectRe)) return true
-        return hasEffectInDirectBraceBlocks(maskedBody, Regex("""\?\.\s*let\s*\{"""), effectRe)
+        if (hasConditionalParenEffect(maskedBody, EFFECT_CALL_RE)) return true
+        if (hasEffectInDirectBraceBlocks(maskedBody, WHEN_BRACE_RE, EFFECT_CALL_RE)) return true
+        return hasEffectInDirectBraceBlocks(maskedBody, SAFE_LET_BRACE_RE, EFFECT_CALL_RE)
     }
 
     private fun hasUnrememberedStateCall(maskedBody: String): Boolean {
         val rememberRanges = mutableListOf<IntRange>()
-        val remRe = Regex("""\b(remember|rememberSaveable)\b[^{]*\{""")
-        for (rm in remRe.findAll(maskedBody)) {
+        for (rm in REMEMBER_BLOCK_RE.findAll(maskedBody)) {
             val openBrace = rm.range.last
             val closeBrace = findBalancedCloseBrace(maskedBody, openBrace)
             if (closeBrace > openBrace) {
                 rememberRanges.add(openBrace..closeBrace)
             }
         }
-        val stateCallRe = Regex("""\b(mutableStateOf|mutableIntStateOf|mutableLongStateOf|mutableFloatStateOf|derivedStateOf|MutableInteractionSource)\s*\(""")
-        for (m in stateCallRe.findAll(maskedBody)) {
+        for (m in STATE_ALLOC_CALL_RE.findAll(maskedBody)) {
             val pos = m.range.first
             if (rememberRanges.none { pos in it }) {
                 return true
@@ -1419,13 +1444,12 @@ class ComposeStabilityExtractor {
     }
 
     private fun hasLazyItemsWithoutKey(maskedBody: String): Boolean {
-        val itemsRe = Regex("""\b(items|itemsIndexed)\s*\(""")
-        for (m in itemsRe.findAll(maskedBody)) {
+        for (m in LAZY_ITEMS_CALL_RE.findAll(maskedBody)) {
             val openParen = m.range.last
             val closeParen = findBalancedCloseParen(maskedBody, openParen)
             if (closeParen > openParen) {
                 val argsSlice = maskedBody.substring(openParen + 1, closeParen)
-                if (!Regex("""\bkey\s*=""").containsMatchIn(argsSlice)) {
+                if (!KEY_NAMED_ARG_RE.containsMatchIn(argsSlice)) {
                     return true
                 }
             }

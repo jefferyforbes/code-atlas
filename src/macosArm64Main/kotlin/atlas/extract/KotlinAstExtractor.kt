@@ -43,6 +43,8 @@ internal object KotlinAstExtractor {
 
     private val LOCAL_VAL_COLON_RE = Regex("""(?:val|var)\s+([A-Za-z0-9_$]+)\s*:\s*([A-Z][A-Za-z0-9_$.]*)""")
     private val LOCAL_VAL_ASSIGN_RE = Regex("""(?:val|var)\s+([A-Za-z0-9_$]+)\s*=\s*([A-Z][A-Za-z0-9_$.]*)\s*(?:<[^>]+>)?\s*\(""")
+    private val WHITESPACE_RE = Regex("""\s+""")
+    private val ANNOTATION_NAME_RE = Regex("""@([A-Za-z0-9_]+)""")
     private val KOTLIN_PRIMITIVE_TYPES = setOf(
         "String", "Int", "Long", "Double", "Float", "Boolean", "Byte", "Short", "Char", "Any", "Unit", "Nothing"
     )
@@ -205,7 +207,7 @@ internal object KotlinAstExtractor {
 
     private fun parseModifierTokens(modifiers: String?): Set<String> {
         if (modifiers.isNullOrBlank()) return emptySet()
-        return modifiers.split(Regex("""\s+""")).filter { it.isNotEmpty() }.toSet()
+        return modifiers.split(WHITESPACE_RE).filter { it.isNotEmpty() }.toSet()
     }
 
     private fun resolveKotlinDeclName(rawName: String?, kw: String, modTokens: Set<String>): String? {
@@ -395,7 +397,7 @@ internal object KotlinAstExtractor {
             Pair("${ctx.fileId}#${decl.name}", "$pkgName.${decl.name}")
         }
 
-        val annTokens = Regex("""@([A-Za-z0-9_]+)""").findAll(decl.annotations).map { it.groupValues[1] }.toList()
+        val annTokens = ANNOTATION_NAME_RE.findAll(decl.annotations).map { it.groupValues[1] }.toList()
         val sigLine = if (decl.startLine <= ctx.lines.size) {
             PolyglotAstExtractor.stripLeadingInlineAnnotations(ctx.lines[decl.startLine - 1])
         } else {
