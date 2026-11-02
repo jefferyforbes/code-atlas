@@ -230,13 +230,12 @@ class ComplexityDoctorEngine(
     }
 
     private fun findOuterIfLine(lines: List<String>, bodyStart: Int, endIdx: Int): OuterIfInfo? {
-        val ifRegex = Regex("""^(\s*)if\s*\((.+)\)\s*\{(?:\s*//.*)?$""")
         for (i in (bodyStart + 1)..endIdx) {
             val trimmed = lines[i].trim()
             if (trimmed.isEmpty() || trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) {
                 continue
             }
-            val m = ifRegex.find(lines[i])
+            val m = OUTER_IF_RE.find(lines[i])
             if (m != null) {
                 return OuterIfInfo(i, m.groupValues[1], m.groupValues[2].trim())
             }
@@ -290,17 +289,13 @@ class ComplexityDoctorEngine(
         endIdx: Int,
         lang: String
     ): ElseResolution? {
-        val elseRegex = Regex("""^\s*\}\s*else\s*\{(?:\s*return(?:\s+([^;}\n]+))?;?\s*\})?\s*$""")
-        val elseStartRegex = Regex("""^\s*\}\s*else\s*\{""")
-        val retRegex = Regex("""^\s*return(?:\s+([^;}\n]+))?;?\s*$""")
-
         val closeIfLine = lines[closeIfIdx]
-        val elseMatch = elseRegex.find(closeIfLine)
+        val elseMatch = SINGLE_LINE_ELSE_RE.find(closeIfLine)
         if (elseMatch != null) {
             return ElseResolution(closeIfIdx, extractReturnExpr(elseMatch))
         }
-        if (elseStartRegex.find(closeIfLine) != null) {
-            return findMultiLineElseEnd(lines, closeIfIdx, endIdx, lang, retRegex)
+        if (ELSE_START_RE.find(closeIfLine) != null) {
+            return findMultiLineElseEnd(lines, closeIfIdx, endIdx, lang, RETURN_LINE_RE)
         }
         return null
     }
@@ -310,13 +305,12 @@ class ComplexityDoctorEngine(
         closeIfIdx: Int,
         endIdx: Int
     ): ElseResolution? {
-        val retRegex = Regex("""^\s*return(?:\s+([^;}\n]+))?;?\s*$""")
         var candidateRetIdx = -1
         var defaultReturn = "return"
         for (i in (closeIfIdx + 1)..endIdx) {
             val trimmed = lines[i].trim()
             if (trimmed.isEmpty() || trimmed.startsWith("//")) continue
-            val rMatch = retRegex.find(lines[i])
+            val rMatch = RETURN_LINE_RE.find(lines[i])
             if (rMatch != null) {
                 candidateRetIdx = i
                 defaultReturn = extractReturnExpr(rMatch)
@@ -595,10 +589,8 @@ class ComplexityDoctorEngine(
         val endIdx = (ctx.node.endLine - 1).coerceAtMost(lines.size - 1)
         if (startIdx >= endIdx || startIdx >= lines.size) return null
 
-        val declRegex = Regex("""^(\s*)(?:val|var)\s+([A-Za-z0-9_]+)\s*=\s*(.+)$""")
-
         for (i in startIdx until endIdx) {
-            val prescription = trySynthesizeElvisGuardAtLine(lines, i..endIdx, declRegex, ctx)
+            val prescription = trySynthesizeElvisGuardAtLine(lines, i..endIdx, VAL_VAR_DECL_RE, ctx)
             if (prescription != null) return prescription
         }
 
@@ -695,6 +687,11 @@ class ComplexityDoctorEngine(
     }
 
     companion object {
+        private val OUTER_IF_RE = Regex("""^(\s*)if\s*\((.+)\)\s*\{(?:\s*//.*)?$""")
+        private val SINGLE_LINE_ELSE_RE = Regex("""^\s*\}\s*else\s*\{(?:\s*return(?:\s+([^;}\n]+))?;?\s*\})?\s*$""")
+        private val ELSE_START_RE = Regex("""^\s*\}\s*else\s*\{""")
+        private val RETURN_LINE_RE = Regex("""^\s*return(?:\s+([^;}\n]+))?;?\s*$""")
+        private val VAL_VAR_DECL_RE = Regex("""^(\s*)(?:val|var)\s+([A-Za-z0-9_]+)\s*=\s*(.+)$""")
         private val COMPARISON_INVERSIONS = listOf(
             Pair(" === ", " !== "),
             Pair(" !== ", " === "),

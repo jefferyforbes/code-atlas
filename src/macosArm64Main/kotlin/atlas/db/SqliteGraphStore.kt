@@ -2,18 +2,29 @@ package atlas.db
 
 import atlas.extract.NameSegmentTokenizer
 import atlas.extract.UrlTargetResolver
-import atlas.model.*
+import atlas.model.ComplexityScoreRecord
+import atlas.model.ComposeNodeRecord
+import atlas.model.ComposeParamRecord
+import atlas.model.ComposeQueryResult
+import atlas.model.FigmaDocument
+import atlas.model.FigmaEdge
+import atlas.model.FigmaNode
+import atlas.model.FigmaSpatialBounds
+import atlas.model.FigmaVariable
+import atlas.model.FigmaVariableImpact
+import atlas.model.FigmaViolation
+import atlas.model.FileRecord
+import atlas.model.GraphEdge
+import atlas.model.GraphHop
+import atlas.model.GraphNode
+import atlas.model.GraphStats
+import atlas.model.ImpactRadiusResult
+import atlas.model.LiveSourceSlice
+import atlas.model.NodeAnnotation
 import atlas.util.PlatformFiles
 import atlas.util.Sha256
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.addJsonObject
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.encodeToJsonElement
-import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
 import kotlin.math.abs
-import kotlin.math.ln
 
 /**
  * Persistent SQLite WAL knowledge graph store with FTS5, segment vocabulary, and freshness slicing.
@@ -73,7 +84,7 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun <T> withSavepoint(name: String, block: () -> T): T = db.withSavepoint(name, block)
 
-    internal class StatementScope(private val db: NativeSqliteDatabase) {
+    internal class StatementScope(private val db: NativeSqliteDatabase) : AutoCloseable {
         private val statements = mutableListOf<NativeSqliteStatement>()
 
         fun prepare(sql: String): NativeSqliteStatement {
@@ -85,6 +96,10 @@ class SqliteGraphStore(val dbPath: String) {
                 throw t
             }
             return stmt
+        }
+
+        override fun close() {
+            closeAll()
         }
 
         fun closeAll() {
@@ -462,23 +477,27 @@ class SqliteGraphStore(val dbPath: String) {
             delFtsByFile.bindString(1, fileId)
             delFtsByFile.step()
 
-            val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
-            val delEdges = scope.prepare("DELETE FROM edges WHERE project_id = ? AND (source_node_id = ? OR target_node_id = ?);")
+            val delVocabByFile = scope.prepare(
+                "DELETE FROM name_segment_vocab WHERE node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);"
+            )
+            delVocabByFile.bindString(1, fileId)
+            delVocabByFile.step()
+
+            val delSourceEdges = scope.prepare(
+                "DELETE FROM edges WHERE project_id = ? AND source_node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);"
+            )
+            delSourceEdges.bindString(1, projectId)
+            delSourceEdges.bindString(2, fileId)
+            delSourceEdges.step()
+
+            val delTargetEdges = scope.prepare(
+                "DELETE FROM edges WHERE project_id = ? AND target_node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);"
+            )
+            delTargetEdges.bindString(1, projectId)
+            delTargetEdges.bindString(2, fileId)
+            delTargetEdges.step()
+
             val delNodes = scope.prepare("DELETE FROM nodes WHERE file_id = ?;")
-
-            for (nodeId in oldNodes) {
-                delVocab.reset()
-                delVocab.clearBindings()
-                delVocab.bindString(1, nodeId)
-                delVocab.step()
-
-                delEdges.reset()
-                delEdges.clearBindings()
-                delEdges.bindString(1, projectId)
-                delEdges.bindString(2, nodeId)
-                delEdges.bindString(3, nodeId)
-                delEdges.step()
-            }
             delNodes.bindString(1, fileId)
             delNodes.step()
         }
@@ -1079,9 +1098,9 @@ class SqliteGraphStore(val dbPath: String) {
         limit: Int,
         scores: MutableMap<String, Double>
     ) {
-        val ftsExpr = segments.joinToString(" OR ") { "\"$it\"*" }
+        val ftsExpr = segments.joinToString(" OR ") { "\"${it.replace("\"", "\"\"")}\"*" }
         try {
-            val ftsStmt = db.prepare(
+            db.prepare(
                 """
                 SELECT node_id, bm25(nodes_fts) AS rank
                 FROM nodes_fts
@@ -1089,8 +1108,7 @@ class SqliteGraphStore(val dbPath: String) {
                 ORDER BY rank
                 LIMIT ?;
                 """.trimIndent()
-            )
-            try {
+            ).use { ftsStmt ->
                 ftsStmt.bindString(1, projectId)
                 ftsStmt.bindString(2, ftsExpr)
                 ftsStmt.bindInt(3, (limit * 10).coerceAtLeast(100))
@@ -1100,8 +1118,6 @@ class SqliteGraphStore(val dbPath: String) {
                     val current = scores.getOrElse(nid) { 0.0 }
                     scores[nid] = current + (10.0 / (1.0 + abs(rank)))
                 }
-            } finally {
-                ftsStmt.close()
             }
         } catch (e: Exception) {
             PlatformFiles.logWarning("SqliteGraphStore", "FTS segment ranking failed: ${e.message}")

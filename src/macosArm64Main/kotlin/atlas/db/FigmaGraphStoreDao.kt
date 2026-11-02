@@ -664,6 +664,63 @@ internal class FigmaGraphStoreDao(private val db: NativeSqliteDatabase) {
         return results
     }
 
+    private fun queryNodesBoundToVariableChunk(
+        fileKey: String,
+        chunk: List<String>,
+        seenNodeIds: MutableSet<String>,
+        results: MutableList<FigmaNode>
+    ) {
+        val placeholders = chunk.joinToString(",") { "?" }
+        val stmt = db.prepare(
+            """
+            SELECT n.rowid_pk, n.node_id, n.file_key, n.page_name, n.section_id, n.parent_id,
+                   n.name, n.node_type, n.layout_mode, n.sizing_horizontal, n.sizing_vertical,
+                   n.text_auto_resize, n.padding_left, n.padding_right, n.padding_top, n.padding_bottom,
+                   n.item_spacing, n.local_x, n.local_y, n.canvas_x, n.canvas_y, n.width, n.height,
+                   n.is_interactive, n.has_emoji, n.unbound_fill, n.unbound_stroke, n.wcag_contrast,
+                   n.semiotic_layer
+            FROM figma_nodes n
+            JOIN figma_edges e ON n.node_id = e.source_node_id AND n.file_key = e.file_key
+            WHERE e.file_key = ?
+              AND (e.target_node_id IN ($placeholders) OR e.target_node_id IN (
+                  SELECT name FROM figma_variables WHERE file_key = ? AND variable_id IN ($placeholders)
+              ) OR e.target_node_id IN (
+                  SELECT variable_id FROM figma_variables WHERE file_key = ? AND name IN ($placeholders)
+              ))
+              AND e.edge_type = 'BINDS_VARIABLE'
+            GROUP BY n.rowid_pk
+            ORDER BY n.name;
+            """.trimIndent()
+        )
+        stmt.use { s ->
+            bindVariableChunkParams(s, fileKey, chunk)
+            while (s.step()) {
+                val node = rowToFigmaNode(s)
+                if (seenNodeIds.add(node.nodeId)) {
+                    results.add(node)
+                }
+            }
+        }
+    }
+
+    private fun bindVariableChunkParams(stmt: NativeSqliteStatement, fileKey: String, chunk: List<String>) {
+        var bindIdx = 1
+        repeat(3) {
+            stmt.bindString(bindIdx++, fileKey)
+            for (id in chunk) stmt.bindString(bindIdx++, id)
+        }
+    }
+
+    fun queryNodesBoundToVariables(fileKey: String, variableIds: Collection<String>): List<FigmaNode> {
+        if (variableIds.isEmpty()) return emptyList()
+        val results = mutableListOf<FigmaNode>()
+        val seenNodeIds = mutableSetOf<String>()
+        for (chunk in variableIds.chunked(200)) {
+            queryNodesBoundToVariableChunk(fileKey, chunk, seenNodeIds, results)
+        }
+        return results
+    }
+
     fun resolveVariableBlastRadius(
         fileKey: String,
         variableIdOrName: String,
@@ -671,17 +728,7 @@ internal class FigmaGraphStoreDao(private val db: NativeSqliteDatabase) {
     ): FigmaVariableImpact {
         val impactedVars = resolveVariableAliasImpact(fileKey, variableIdOrName, depth)
         val impactedVarIds = impactedVars.map { it.variableId }.toSet()
-        val boundNodes = mutableListOf<FigmaNode>()
-        val seenNodeIds = mutableSetOf<String>()
-
-        for (varId in impactedVarIds) {
-            val nodes = queryNodesBoundToVariable(fileKey, varId)
-            for (node in nodes) {
-                if (seenNodeIds.add(node.nodeId)) {
-                    boundNodes.add(node)
-                }
-            }
-        }
+        val boundNodes = queryNodesBoundToVariables(fileKey, impactedVarIds)
 
         return FigmaVariableImpact(
             seedVariableIdOrName = variableIdOrName,

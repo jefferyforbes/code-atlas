@@ -28,6 +28,11 @@ object ComplexityExtractor {
         "let", "apply", "run", "also", "with", "filter", "map", "forEach", "flatMap", "use"
     )
 
+    private val LOGICAL_OP_RE = Regex("""&&|\|\|""")
+    private val ELVIS_OP_RE = Regex("""\?:""")
+    private val TERNARY_OP_RE = Regex("""(?<=\S)\s+\?\s+[^:?]+\s+:""")
+    private val FN_KEYWORD_RE = Regex("""\b(?:fun|def|func|fn|constructor|function)\b""")
+
     fun calculate(
         maskedLines: List<String>,
         rawLines: List<String> = emptyList(),
@@ -143,15 +148,15 @@ object ComplexityExtractor {
             if (w == "return") state.returnCount++
         }
 
-        state.cyclomatic += countRegexMatches(trimmed, Regex("""&&|\|\|"""))
+        state.cyclomatic += countRegexMatches(trimmed, LOGICAL_OP_RE)
         state.cognitive += countLogicalOperatorSequences(trimmed)
 
         if (language in listOf("kotlin", "swift")) {
-            val elvisCount = countRegexMatches(trimmed, Regex("""\?:"""))
+            val elvisCount = countRegexMatches(trimmed, ELVIS_OP_RE)
             state.cyclomatic += elvisCount
             state.cognitive += elvisCount
         } else if (language in listOf("typescript", "javascript", "ts", "js", "cpp", "c")) {
-            val ternaryCount = countRegexMatches(trimmed, Regex("""(?<=\S)\s+\?\s+[^:?]+\s+:"""))
+            val ternaryCount = countRegexMatches(trimmed, TERNARY_OP_RE)
             state.cyclomatic += ternaryCount
             state.cognitive += ternaryCount
         }
@@ -750,16 +755,6 @@ object ComplexityExtractor {
         return -1
     }
 
-    private fun resolveFunctionKeyword(language: String): String {
-        val lang = language.lowercase()
-        return when {
-            lang == "python" || lang == "py" -> "def"
-            lang == "swift" -> "func"
-            lang == "rust" || lang == "rs" -> "fn"
-            else -> "fun"
-        }
-    }
-
     private fun checkReceiverParen(header: String, openParen: Int): Int {
         val closeParen = findMatchingClosingParen(header, openParen)
         if (closeParen <= openParen) return -1
@@ -799,9 +794,7 @@ object ComplexityExtractor {
             if (namedParen >= 0) return namedParen
         }
 
-        val kw = resolveFunctionKeyword(language)
-        val kwRegex = Regex("""\b(?:$kw|constructor|function)\b""")
-        val kwMatch = kwRegex.find(header)
+        val kwMatch = FN_KEYWORD_RE.find(header)
         val searchStart = if (kwMatch != null) kwMatch.range.last + 1 else 0
 
         val scannedParen = scanHeaderForOpenParen(header, searchStart)
