@@ -8,32 +8,40 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
 /**
- * JSON Schema definitions for Atlas MCP tools.
+ * JSON Schema definitions for Atlas and Codegraph MCP tools.
  */
 internal object McpToolSchemas {
 
-    fun baseToolDefinitions(): List<JsonObject> = listOf(
-        buildJsonObject {
-            put("name", "atlas_query")
-            put("description", "Query indexed polyglot AST symbols, structural skeletons, explore semantics, callers, callees, blast radius, or Compose stability.")
-            put("inputSchema", querySchema())
-        },
-        buildJsonObject {
-            put("name", "atlas_audit")
-            put("description", "Audit architecture layers, Compose stability, complexity doctor, synthesize 3D scopes, or assemble architect context.")
-            put("inputSchema", auditSchema())
-        },
-        buildJsonObject {
-            put("name", "figma_audit")
-            put("description", "Run 12 deterministic design invariant audits and evaluate Gate 1 maturity compliance.")
-            put("inputSchema", figmaAuditSchema())
-        },
-        buildJsonObject {
-            put("name", "figma_scope")
-            put("description", "Synthesize Figma 3D Concurrency Scope (spatial canvas bounds, shared components, token layers).")
-            put("inputSchema", figmaScopeSchema())
+    fun toolDefinitions(enableCodegraphTools: Boolean): List<JsonObject> {
+        val baseTools = listOf(
+            buildJsonObject {
+                put("name", "atlas_query")
+                put("description", "Query indexed polyglot AST symbols, structural skeletons, explore semantics, callers, callees, blast radius, or Compose stability.")
+                put("inputSchema", querySchema())
+            },
+            buildJsonObject {
+                put("name", "atlas_audit")
+                put("description", "Audit architecture layers, Compose stability, complexity doctor, synthesize 3D scopes, or assemble architect context.")
+                put("inputSchema", auditSchema())
+            },
+            buildJsonObject {
+                put("name", "figma_audit")
+                put("description", "Run 12 deterministic design invariant audits and evaluate Gate 1 maturity compliance.")
+                put("inputSchema", figmaAuditSchema())
+            },
+            buildJsonObject {
+                put("name", "figma_scope")
+                put("description", "Synthesize Figma 3D Concurrency Scope (spatial canvas bounds, shared components, token layers).")
+                put("inputSchema", figmaScopeSchema())
+            }
+        )
+
+        if (!enableCodegraphTools) {
+            return baseTools
         }
-    )
+
+        return baseTools + codegraphToolDefinitions()
+    }
 
     private fun querySchema(): JsonObject = buildJsonObject {
         put("type", "object")
@@ -340,4 +348,284 @@ internal object McpToolSchemas {
             add("file_key")
         }
     }
+
+    private fun codegraphExploreSchema(): JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("query") {
+                put("type", "string")
+                put("description", "Symbol names, file names, or short code terms to explore.")
+            }
+            putJsonObject("maxFiles") {
+                put("type", "integer")
+                put("description", "Maximum number of files to include source code from (default: 12).")
+            }
+            putJsonObject("projectPath") {
+                put("type", "string")
+                put("description", "Optional project path or root directory to query.")
+            }
+            putJsonObject("project") {
+                put("type", "string")
+                put("description", "Optional project slug.")
+            }
+        }
+        putJsonArray("required") {
+            add("query")
+        }
+    }
+
+    private fun codegraphNodeSchema(): JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("symbol") {
+                put("type", "string")
+                put("description", "Name of the symbol to inspect or read.")
+            }
+            putJsonObject("file") {
+                put("type", "string")
+                put("description", "A file path or basename to read or disambiguate symbol.")
+            }
+            putJsonObject("includeCode") {
+                put("type", "boolean")
+                put("description", "Include the symbol's full body (default: false).")
+            }
+            putJsonObject("offset") {
+                put("type", "integer")
+                put("description", "1-based line to start reading from in file mode.")
+            }
+            putJsonObject("limit") {
+                put("type", "integer")
+                put("description", "Maximum number of lines to return in file mode (default: 2000).")
+            }
+            putJsonObject("symbolsOnly") {
+                put("type", "boolean")
+                put("description", "Return symbol map instead of source (default: false).")
+            }
+            putJsonObject("line") {
+                put("type", "integer")
+                put("description", "Disambiguate symbol around this line.")
+            }
+            putJsonObject("projectPath") {
+                put("type", "string")
+                put("description", "Optional project path or root directory.")
+            }
+            putJsonObject("project") {
+                put("type", "string")
+                put("description", "Optional project slug.")
+            }
+        }
+    }
+
+    private fun codegraphSearchSchema(): JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("query") {
+                put("type", "string")
+                put("description", "Symbol name or partial name to search.")
+            }
+            putJsonObject("kind") {
+                put("type", "string")
+                putJsonArray("enum") {
+                    add("function")
+                    add("method")
+                    add("class")
+                    add("interface")
+                    add("type")
+                    add("variable")
+                    add("route")
+                    add("component")
+                }
+                put("description", "Filter by node kind.")
+            }
+            putJsonObject("limit") {
+                put("type", "integer")
+                put("description", "Maximum results (default: 10).")
+            }
+            putJsonObject("projectPath") {
+                put("type", "string")
+                put("description", "Optional project path or root directory.")
+            }
+            putJsonObject("project") {
+                put("type", "string")
+                put("description", "Optional project slug.")
+            }
+        }
+        putJsonArray("required") {
+            add("query")
+        }
+    }
+
+    private fun codegraphCallersSchema(): JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("symbol") {
+                put("type", "string")
+                put("description", "Name of the function, method, or class to find callers for.")
+            }
+            putJsonObject("file") {
+                put("type", "string")
+                put("description", "Narrow to definition in this file.")
+            }
+            putJsonObject("limit") {
+                put("type", "integer")
+                put("description", "Maximum number of callers to return (default: 20).")
+            }
+            putJsonObject("projectPath") {
+                put("type", "string")
+                put("description", "Optional project path or root directory.")
+            }
+            putJsonObject("project") {
+                put("type", "string")
+                put("description", "Optional project slug.")
+            }
+        }
+        putJsonArray("required") {
+            add("symbol")
+        }
+    }
+
+    private fun codegraphCalleesSchema(): JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("symbol") {
+                put("type", "string")
+                put("description", "Name of the function, method, or class to find callees for.")
+            }
+            putJsonObject("file") {
+                put("type", "string")
+                put("description", "Narrow to definition in this file.")
+            }
+            putJsonObject("limit") {
+                put("type", "integer")
+                put("description", "Maximum number of callees to return (default: 20).")
+            }
+            putJsonObject("projectPath") {
+                put("type", "string")
+                put("description", "Optional project path or root directory.")
+            }
+            putJsonObject("project") {
+                put("type", "string")
+                put("description", "Optional project slug.")
+            }
+        }
+        putJsonArray("required") {
+            add("symbol")
+        }
+    }
+
+    private fun codegraphImpactSchema(): JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("symbol") {
+                put("type", "string")
+                put("description", "Name of the symbol to analyze impact for.")
+            }
+            putJsonObject("file") {
+                put("type", "string")
+                put("description", "Narrow to definition in this file.")
+            }
+            putJsonObject("depth") {
+                put("type", "integer")
+                put("description", "Levels of dependencies to traverse (default: 2).")
+            }
+            putJsonObject("projectPath") {
+                put("type", "string")
+                put("description", "Optional project path or root directory.")
+            }
+            putJsonObject("project") {
+                put("type", "string")
+                put("description", "Optional project slug.")
+            }
+        }
+        putJsonArray("required") {
+            add("symbol")
+        }
+    }
+
+    private fun codegraphStatusSchema(): JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("projectPath") {
+                put("type", "string")
+                put("description", "Optional project path or root directory.")
+            }
+            putJsonObject("project") {
+                put("type", "string")
+                put("description", "Optional project slug.")
+            }
+        }
+    }
+
+    private fun codegraphFilesSchema(): JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("path") {
+                put("type", "string")
+                put("description", "Filter files under this directory path.")
+            }
+            putJsonObject("pattern") {
+                put("type", "string")
+                put("description", "Filter files matching this glob pattern.")
+            }
+            putJsonObject("format") {
+                put("type", "string")
+                putJsonArray("enum") {
+                    add("tree")
+                    add("flat")
+                }
+                put("description", "Output format: tree (default) or flat.")
+            }
+            putJsonObject("projectPath") {
+                put("type", "string")
+                put("description", "Optional project path or root directory.")
+            }
+            putJsonObject("project") {
+                put("type", "string")
+                put("description", "Optional project slug.")
+            }
+        }
+    }
+
+    private fun codegraphToolDefinitions(): List<JsonObject> = listOf(
+        buildJsonObject {
+            put("name", "codegraph_explore")
+            put("description", "Explore relevant code symbols, live line-numbered source, and caller relationships in one round-trip.")
+            put("inputSchema", codegraphExploreSchema())
+        },
+        buildJsonObject {
+            put("name", "codegraph_node")
+            put("description", "Read whole file with line numbers or inspect symbol details, body, callers, and callees.")
+            put("inputSchema", codegraphNodeSchema())
+        },
+        buildJsonObject {
+            put("name", "codegraph_search")
+            put("description", "Quick symbol search by name and kind. Returns locations and signatures.")
+            put("inputSchema", codegraphSearchSchema())
+        },
+        buildJsonObject {
+            put("name", "codegraph_callers")
+            put("description", "List functions and methods that call a symbol.")
+            put("inputSchema", codegraphCallersSchema())
+        },
+        buildJsonObject {
+            put("name", "codegraph_callees")
+            put("description", "List functions and methods that a symbol calls.")
+            put("inputSchema", codegraphCalleesSchema())
+        },
+        buildJsonObject {
+            put("name", "codegraph_impact")
+            put("description", "List symbols affected by changing a symbol before refactoring.")
+            put("inputSchema", codegraphImpactSchema())
+        },
+        buildJsonObject {
+            put("name", "codegraph_status")
+            put("description", "Index health check reporting indexed files, nodes, edges, and database location.")
+            put("inputSchema", codegraphStatusSchema())
+        },
+        buildJsonObject {
+            put("name", "codegraph_files")
+            put("description", "Indexed file tree with pattern and directory filtering.")
+            put("inputSchema", codegraphFilesSchema())
+        }
+    )
 }
