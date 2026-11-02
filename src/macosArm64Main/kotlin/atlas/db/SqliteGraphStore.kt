@@ -31,6 +31,14 @@ import kotlin.math.abs
  */
 class SqliteGraphStore(val dbPath: String) {
 
+    internal companion object {
+        internal const val NODES_SELECT_COLUMNS =
+            "node_id, project_id, file_id, name, qualified_name, kind, signature, " +
+                "start_line, end_line, module_id, source_set, semiotic_layer, arch_layer, " +
+                "is_test_double, in_degree, out_degree, description, is_top_level, " +
+                "cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score"
+    }
+
     private val db = NativeSqliteDatabase(dbPath)
     private val figmaDao = FigmaGraphStoreDao(db)
     private val composeDao = ComposeGraphStoreDao(db)
@@ -872,10 +880,7 @@ class SqliteGraphStore(val dbPath: String) {
             val targetLine = codeLink.startLine
             val spanStmt = db.prepare(
                 """
-                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree, description, is_top_level,
-                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+                SELECT $NODES_SELECT_COLUMNS
                 FROM nodes
                 WHERE project_id = ?
                   AND kind NOT IN ('file', 'file_scope', 'module')
@@ -901,10 +906,7 @@ class SqliteGraphStore(val dbPath: String) {
         if (codeLink.symbolFragment != null) {
             val symStmt = db.prepare(
                 """
-                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree, description, is_top_level,
-                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+                SELECT $NODES_SELECT_COLUMNS
                 FROM nodes
                 WHERE project_id = ?
                   AND (name = ? OR qualified_name LIKE ? ESCAPE '\')
@@ -939,10 +941,7 @@ class SqliteGraphStore(val dbPath: String) {
         val epNodeId = "$projectId:endpoint#$canonRoute"
         val epStmt = db.prepare(
             """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level,
-                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+            SELECT $NODES_SELECT_COLUMNS
             FROM nodes
             WHERE project_id = ? AND (node_id = ? OR name = ?)
             LIMIT 1;
@@ -966,10 +965,7 @@ class SqliteGraphStore(val dbPath: String) {
         val projTarget = "$projectId:$target"
         val stmt = db.prepare(
             """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level,
-                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+            SELECT $NODES_SELECT_COLUMNS
             FROM nodes
             WHERE project_id = ? AND (
                 node_id = ?
@@ -1033,10 +1029,7 @@ class SqliteGraphStore(val dbPath: String) {
         val escaped = NativeSqliteStatement.escapeSqlLike(norm)
         val stmt = db.prepare(
             """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level,
-                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+            SELECT $NODES_SELECT_COLUMNS
             FROM nodes
             WHERE project_id = ? AND (
                 file_id = ?
@@ -1070,10 +1063,7 @@ class SqliteGraphStore(val dbPath: String) {
             val placeholders = chunk.joinToString(",") { "?" }
             val stmt = db.prepare(
                 """
-                SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                       start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                       is_test_double, in_degree, out_degree, description, is_top_level,
-                       cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+                SELECT $NODES_SELECT_COLUMNS
                 FROM nodes
                 WHERE project_id = ? AND file_id IN ($placeholders)
                 ORDER BY in_degree DESC;
@@ -1217,13 +1207,7 @@ class SqliteGraphStore(val dbPath: String) {
         val placeholders = chunk.joinToString(",") { "?" }
         val kindClause = if (kind != null) " AND kind = ?" else ""
         val nodesStmt = db.prepare(
-            """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level,
-                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
-            FROM nodes WHERE node_id IN ($placeholders)$kindClause;
-            """.trimIndent()
+            "SELECT $NODES_SELECT_COLUMNS FROM nodes WHERE node_id IN ($placeholders)$kindClause;"
         )
         try {
             chunk.forEachIndexed { i, id -> nodesStmt.bindString(1 + i, id) }
@@ -1355,13 +1339,7 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun listNodes(projectId: String): List<GraphNode> {
         val stmt = db.prepare(
-            """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level,
-                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
-            FROM nodes WHERE project_id = ? ORDER BY node_id ASC;
-            """.trimIndent()
+            "SELECT $NODES_SELECT_COLUMNS FROM nodes WHERE project_id = ? ORDER BY node_id ASC;"
         )
         val results = mutableListOf<GraphNode>()
         try {

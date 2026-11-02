@@ -181,13 +181,7 @@ internal class GraphTraversalDao(
     private fun fetchNodeChunk(projectId: String, chunk: List<String>, outNodes: MutableList<GraphNode>) {
         val placeholders = chunk.joinToString(",") { "?" }
         val stmt = db.prepare(
-            """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level,
-                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
-            FROM nodes WHERE project_id = ? AND node_id IN ($placeholders);
-            """.trimIndent()
+            "SELECT ${SqliteGraphStore.NODES_SELECT_COLUMNS} FROM nodes WHERE project_id = ? AND node_id IN ($placeholders);"
         )
         try {
             stmt.bindString(1, projectId)
@@ -203,10 +197,7 @@ internal class GraphTraversalDao(
     fun getGodNodes(projectId: String, topN: Int = 10): List<GraphNode> {
         val stmt = db.prepare(
             """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level,
-                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+            SELECT ${SqliteGraphStore.NODES_SELECT_COLUMNS}
             FROM nodes
             WHERE project_id = ? AND kind NOT IN ('file', 'file_scope', 'module', 'plan_contract', 'obsidian_note', 'endpoint', 'url_ref', 'tag', 'skill', 'slash_command')
             ORDER BY (in_degree * 2 + out_degree) DESC, in_degree DESC
@@ -248,10 +239,7 @@ internal class GraphTraversalDao(
         val escRoute = NativeSqliteStatement.escapeSqlLike(canonRoute)
         val epStmt = db.prepare(
             """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level,
-                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+            SELECT ${SqliteGraphStore.NODES_SELECT_COLUMNS}
             FROM nodes
             WHERE project_id = ? AND kind = 'endpoint'
               AND (node_id = ? OR name = ? OR name LIKE ? ESCAPE '\')
@@ -427,10 +415,7 @@ internal class GraphTraversalDao(
         val escRoute = NativeSqliteStatement.escapeSqlLike(canonRoute)
         val epStmt = db.prepare(
             """
-            SELECT node_id, project_id, file_id, name, qualified_name, kind, signature,
-                   start_line, end_line, module_id, source_set, semiotic_layer, arch_layer,
-                   is_test_double, in_degree, out_degree, description, is_top_level,
-                   cyclomatic_complexity, cognitive_complexity, max_nesting_depth, complexity_score
+            SELECT ${SqliteGraphStore.NODES_SELECT_COLUMNS}
             FROM nodes
             WHERE project_id = ? AND kind = 'endpoint'
               AND (node_id = ? OR name = ? OR name LIKE ? ESCAPE '\')
