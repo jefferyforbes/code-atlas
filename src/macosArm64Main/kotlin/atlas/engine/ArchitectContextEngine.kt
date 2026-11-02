@@ -19,20 +19,20 @@ class ArchitectContextEngine(
     val inlineCeilingBytes: Int = 3500
 ) {
 
+    internal data class ClassSkeletonSpec(
+        val store: SqliteGraphStore,
+        val projectId: String,
+        val node: GraphNode,
+        val relPath: String,
+        val maxMembers: Int = 8,
+        val trailingNewline: Boolean = true
+    )
+
     companion object {
         internal val STOP_WORDS = setOf(
             "how", "does", "the", "work", "what", "is", "where", "to", "in", "for", "a",
             "an", "and", "or", "of", "from", "with", "by", "on", "at", "it", "this", "that",
             "we", "can", "could", "should", "add", "build", "create", "implement"
-        )
-
-        internal data class ClassSkeletonSpec(
-            val store: SqliteGraphStore,
-            val projectId: String,
-            val node: GraphNode,
-            val relPath: String,
-            val maxMembers: Int = 8,
-            val trailingNewline: Boolean = true
         )
 
         internal fun formatClassSkeleton(

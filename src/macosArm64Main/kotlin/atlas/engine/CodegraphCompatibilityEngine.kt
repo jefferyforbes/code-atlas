@@ -144,7 +144,7 @@ class CodegraphCompatibilityEngine(
         sb.append("// line ").append(node.startLine).append(" [").append(node.kind).append("]\n")
         if (node.kind == "class" || node.kind == "interface" || node.kind == "object" || node.kind == "struct") {
             ArchitectContextEngine.formatClassSkeleton(
-                ArchitectContextEngine.Companion.ClassSkeletonSpec(store, projectId, node, fileRelPath, maxMembers = 6, trailingNewline = false),
+                ArchitectContextEngine.ClassSkeletonSpec(store, projectId, node, fileRelPath, maxMembers = 6, trailingNewline = false),
                 sb
             )
         } else {
