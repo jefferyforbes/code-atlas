@@ -50,38 +50,6 @@ class ComposeStabilityExtractor {
         const val BIT_I18N_001: Int = 1 shl 10  // Hardcoded string literal in Text("...") or contentDescription = "..."
         const val BIT_ARCH_001: Int = 1 shl 11  // Context passed to ViewModel or Screen composable missing @Preview
 
-        private val PRIMITIVE_STABLE_TYPES = setOf(
-            "Int", "Long", "Short", "Byte", "Float", "Double", "Boolean", "Char",
-            "String", "CharSequence", "Unit", "Nothing",
-            "UInt", "ULong", "UShort", "UByte",
-            "Modifier", "Color", "Dp", "TextUnit", "TextStyle", "Shape", "Painter", "ImageVector",
-            "Alignment", "Arrangement", "PaddingValues", "WindowInsets", "ContentScale", "AnnotatedString"
-        )
-
-        private val IMMUTABLE_COLLECTION_PREFIXES = listOf(
-            "ImmutableList", "ImmutableSet", "ImmutableMap",
-            "PersistentList", "PersistentSet", "PersistentMap",
-            "kotlinx.collections.immutable.ImmutableList",
-            "kotlinx.collections.immutable.ImmutableSet",
-            "kotlinx.collections.immutable.ImmutableMap",
-            "kotlinx.collections.immutable.PersistentList",
-            "kotlinx.collections.immutable.PersistentSet",
-            "kotlinx.collections.immutable.PersistentMap"
-        )
-
-        private val STANDARD_COLLECTION_PREFIXES = setOf(
-            "List", "Set", "Map", "Collection", "Iterable", "Sequence",
-            "kotlin.collections.List", "kotlin.collections.Set", "kotlin.collections.Map",
-            "kotlin.collections.Collection", "kotlin.collections.Iterable"
-        )
-
-        private val MUTABLE_TYPE_PREFIXES = setOf(
-            "MutableList", "MutableSet", "MutableMap", "ArrayList", "HashMap", "HashSet",
-            "LinkedHashMap", "LinkedHashSet", "Array", "IntArray", "LongArray", "FloatArray",
-            "ByteArray", "Flow", "MutableStateFlow", "MutableSharedFlow", "StateFlow", "SharedFlow",
-            "Channel", "Context", "Activity", "Application", "ViewModel"
-        )
-
         private val PACKAGE_RE = Regex("""(?m)^\s*package\s+([A-Za-z0-9_.]+)""")
         private val SIDE_EFFECT_CALLBACK_RE = Regex("""^on[A-Z]\w*(And|Then|Navigate|Route|Pop|Dismiss|Fetch|Load)[A-Z]\w*$""")
         private val UI_EMITTING_CALL_RE = Regex("""\b(Column|Row|Box|Scaffold|Surface|Card|Text|Button|Icon|IconButton|LazyColumn|LazyRow|LazyVerticalGrid|LazyHorizontalGrid|OutlinedTextField|TextField|TopAppBar|ModalBottomSheet|AlertDialog|Image|Spacer)\s*\(""")
@@ -101,11 +69,6 @@ class ComposeStabilityExtractor {
         private val FUN_KEYWORD_RE = Regex("""\bfun\b""")
         private val PREVIEW_ANNOTATION_RE = Regex("""@Preview[A-Za-z0-9_]*""")
         private val COMPOSABLE_FUN_RE = Regex("""@Composable\b[\s\S]*?\bfun\s+(?:<[^>]+>\s*)?(?:([A-Za-z0-9_.<>?]+)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(""")
-        private val BODY_VAR_RE = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)""")
-        private val CTOR_VAR_RE = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)\s*:""")
-        private val RAW_COLLECTION_PROP_RE = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map|MutableList|MutableSet|MutableMap)<""")
-        private val WORKSPACE_COLLECTION_PROP_RE = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map)<""")
-        private val CLASS_DECL_RE = Regex("""((?:@(?:Immutable|Stable)\b[\s\S]*?)?)\b(data\s+class|value\s+class|enum\s+class|sealed\s+interface|sealed\s+class|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*(\([^)]*\))?""")
         private val WHITESPACE_RE = Regex("""\s+""")
         private val EFFECT_CALL_RE = Regex("""\b(remember|rememberSaveable|LaunchedEffect|DisposableEffect)\b""")
         private val CONDITIONAL_PAREN_RE = Regex("""\b(if|when|for|while)\s*\(""")
@@ -579,7 +542,7 @@ class ComposeStabilityExtractor {
         val bodyOpenBraceIdx = declCtx.slices.bodyOpenBraceIdx
         for (callMatch in COMPOSE_CALL_RE.findAll(maskedBodySlice)) {
             val calleeName = callMatch.groupValues[1]
-            if (calleeName == declCtx.funName || calleeName in PRIMITIVE_STABLE_TYPES) continue
+            if (calleeName == declCtx.funName || calleeName in ComposeTypeStabilityAnalyzer.PRIMITIVE_STABLE_TYPES) continue
             val callOffset = bodyOpenBraceIdx + callMatch.range.first
             val callLine = lineForOffset(fileCtx.lineOffsets, callOffset)
             composeEdges.add(
@@ -781,110 +744,6 @@ class ComposeStabilityExtractor {
     ): List<TraceRecord> =
         ComposeTelemetryParser.parseTraceTelemetry(rawLogText, defaultSessionId)
 
-    private fun isClassBodyTermination(maskedText: String, k: Int): Boolean {
-        if (maskedText[k] == ';') return true
-        if (maskedText[k] != '\n' || k + 1 >= maskedText.length) return false
-        val remainder = maskedText.substring(k + 1).trimStart()
-        return remainder.startsWith("class ") ||
-            remainder.startsWith("interface ") ||
-            remainder.startsWith("fun ") ||
-            remainder.startsWith("@Composable")
-    }
-
-    private fun findClassBodyOpenBrace(maskedText: String, fromOffset: Int): Int? {
-        var k = fromOffset
-        while (k < maskedText.length) {
-            val c = maskedText[k]
-            if (c == '{') return k
-            if (isClassBodyTermination(maskedText, k)) return null
-            k++
-        }
-        return null
-    }
-
-    private fun extractDepthOneBodyText(maskedText: String, openBrace: Int): String? {
-        val closeBrace = findBalancedCloseBrace(maskedText, openBrace)
-        if (closeBrace <= openBrace + 1) return null
-
-        var depth = 1
-        var bIdx = openBrace + 1
-        val classLevelChars = CharArray(closeBrace - openBrace - 1)
-        while (bIdx < closeBrace) {
-            val ch = maskedText[bIdx]
-            val slot = bIdx - openBrace - 1
-            when (ch) {
-                '{' -> { depth++; classLevelChars[slot] = ' ' }
-                '}' -> { depth--; classLevelChars[slot] = ' ' }
-                else -> { classLevelChars[slot] = if (depth == 1) ch else ' ' }
-            }
-            bIdx++
-        }
-        return classLevelChars.concatToString()
-    }
-
-    private fun findDepthOneBodyVar(maskedText: String, fromOffset: Int): String? {
-        val openBrace = findClassBodyOpenBrace(maskedText, fromOffset) ?: return null
-        val bodyText = extractDepthOneBodyText(maskedText, openBrace) ?: return null
-        val bodyVarMatch = BODY_VAR_RE.find(bodyText)
-        return bodyVarMatch?.groupValues?.get(1)
-    }
-
-    private fun evaluateSpecialClassKind(kindKw: String, hasStableAnnotation: Boolean): Pair<String, String>? {
-        if (kindKw == "enum class" || kindKw == "value class") {
-            return "STABLE" to "ENUM_OR_VALUE_CLASS"
-        }
-        if (kindKw == "interface" && !hasStableAnnotation) {
-            return "UNCERTAIN" to "UNANNOTATED_INTERFACE"
-        }
-        return null
-    }
-
-    private fun evaluateCollectionPropertyStability(
-        className: String,
-        propName: String,
-        colType: String,
-        stabilityPatterns: List<Regex>
-    ): Pair<String, String> {
-        val matchedByConf = stabilityPatterns.any { it.matches("kotlin.collections.$colType") }
-        if (matchedByConf) {
-            return "STABLE" to "STABILITY_CONFIG_MATCH:kotlin.collections.$colType"
-        }
-        return "UNSTABLE" to "UNSTABLE_COLLECTION_PROPERTY:$propName($colType)"
-    }
-
-    private fun evaluateClassStability(
-        className: String,
-        kindKw: String,
-        hasStableAnnotation: Boolean,
-        ctorSlice: String,
-        bodyVarName: String?,
-        stabilityPatterns: List<Regex>
-    ): Pair<String, String> {
-        val special = evaluateSpecialClassKind(kindKw, hasStableAnnotation)
-        if (special != null) return special
-
-        val ctorVarMatch = CTOR_VAR_RE.find(ctorSlice)
-        val rawCollectionMatch = RAW_COLLECTION_PROP_RE.find(ctorSlice)
-        val varPropName = ctorVarMatch?.groupValues?.get(1) ?: bodyVarName
-
-        if (hasStableAnnotation && (varPropName != null || rawCollectionMatch != null)) {
-            val offender = varPropName ?: rawCollectionMatch?.groupValues?.get(1) ?: "field"
-            return "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:$className.$offender"
-        }
-        if (varPropName != null) {
-            return "UNSTABLE" to "MUTABLE_VAR_PROPERTY:$varPropName"
-        }
-        if (rawCollectionMatch != null) {
-            val propName = rawCollectionMatch.groupValues[1]
-            val colType = rawCollectionMatch.groupValues[2]
-            return evaluateCollectionPropertyStability(className, propName, colType, stabilityPatterns)
-        }
-        if (hasStableAnnotation) {
-            return "STABLE" to "EXPLICIT_STABLE_ANNOTATION"
-        }
-        return "STABLE" to "ALL_VAL_PROPERTIES_STABLE"
-    }
-
     /**
      * Extracts class stability metadata directly from a Kotlin source text slice.
      */
@@ -892,76 +751,12 @@ class ComposeStabilityExtractor {
         sourceText: String,
         maskedText: String,
         stabilityPatterns: List<Regex> = emptyList()
-    ): Map<String, Pair<String, String>> {
-        val result = mutableMapOf<String, Pair<String, String>>()
-
-        for (declMatch in CLASS_DECL_RE.findAll(maskedText)) {
-            val annotations = declMatch.groupValues[1]
-            val kindKw = declMatch.groupValues[2].replace(WHITESPACE_RE, " ")
-            val className = declMatch.groupValues[3]
-            val ctorSlice = declMatch.groupValues[4]
-            val hasStableAnnotation = annotations.contains("@Immutable") || annotations.contains("@Stable")
-
-            val bodyVarName = findDepthOneBodyVar(maskedText, declMatch.range.last)
-            result[className] = evaluateClassStability(
-                className, kindKw, hasStableAnnotation, ctorSlice, bodyVarName, stabilityPatterns
-            )
-        }
-        return result
-    }
-
-    private fun evaluateWorkspaceVarProperty(
-        wn: GraphNode,
-        sig: String,
-        hasStable: Boolean
-    ): Pair<String, String> {
-        val prop = BODY_VAR_RE.find(sig)?.groupValues?.get(1) ?: "prop"
-        if (hasStable) {
-            return "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:${wn.name}.$prop"
-        }
-        return "UNSTABLE" to "MUTABLE_VAR_PROPERTY:$prop"
-    }
-
-    private fun evaluateWorkspaceCollectionProperty(
-        wn: GraphNode,
-        rawColMatch: MatchResult,
-        hasStable: Boolean,
-        stabilityPatterns: List<Regex>
-    ): Pair<String, String> {
-        val propName = rawColMatch.groupValues[1]
-        val colType = rawColMatch.groupValues[2]
-        val matchedByConf = stabilityPatterns.any { it.matches("kotlin.collections.$colType") }
-        if (matchedByConf) {
-            return "STABLE" to "STABILITY_CONFIG_MATCH:kotlin.collections.$colType"
-        }
-        if (hasStable) {
-            return "UNSTABLE" to "BROKEN_STABILITY_CONTRACT:${wn.name}.$propName"
-        }
-        return "UNSTABLE" to "UNSTABLE_COLLECTION_PROPERTY:$propName($colType)"
-    }
-
-    private fun evaluateWorkspaceClassSignature(
-        wn: GraphNode,
-        stabilityPatterns: List<Regex>
-    ): Pair<String, String>? {
-        val sig = wn.signature
-        val hasStable = sig.contains("@Immutable") || sig.contains("@Stable")
-
-        if (sig.contains("var ")) {
-            return evaluateWorkspaceVarProperty(wn, sig, hasStable)
-        }
-        val rawColMatch = WORKSPACE_COLLECTION_PROP_RE.find(sig)
-        if (rawColMatch != null) {
-            return evaluateWorkspaceCollectionProperty(wn, rawColMatch, hasStable, stabilityPatterns)
-        }
-        if (hasStable) {
-            return "STABLE" to "EXPLICIT_STABLE_ANNOTATION"
-        }
-        if (sig.contains("data class") && sig.contains('(') && sig.contains(')')) {
-            return "STABLE" to "WORKSPACE_DATA_CLASS"
-        }
-        return null
-    }
+    ): Map<String, Pair<String, String>> =
+        ComposeTypeStabilityAnalyzer.analyzeClassesInSource(
+            maskedText = maskedText,
+            stabilityPatterns = stabilityPatterns,
+            findBalancedCloseBrace = ::findBalancedCloseBrace
+        )
 
     private fun analyzeLocalClasses(
         sourceText: String,
@@ -969,21 +764,14 @@ class ComposeStabilityExtractor {
         stabilityPatterns: List<Regex>,
         workspaceNodes: List<GraphNode>,
         precomputedClassStability: Map<String, Pair<String, String>> = emptyMap()
-    ): Map<String, Pair<String, String>> {
-        val result = mutableMapOf<String, Pair<String, String>>()
-        result.putAll(precomputedClassStability)
-        result.putAll(analyzeClassesInSource(sourceText, maskedText, stabilityPatterns))
-
-        // Also incorporate workspace class signatures
-        for (wn in workspaceNodes) {
-            if (wn.kind !in setOf("class", "interface") || wn.name in result) continue
-            val stability = evaluateWorkspaceClassSignature(wn, stabilityPatterns)
-            if (stability != null) {
-                result[wn.name] = stability
-            }
-        }
-        return result
-    }
+    ): Map<String, Pair<String, String>> =
+        ComposeTypeStabilityAnalyzer.analyzeLocalClasses(
+            maskedText = maskedText,
+            stabilityPatterns = stabilityPatterns,
+            workspaceNodes = workspaceNodes,
+            precomputedClassStability = precomputedClassStability,
+            findBalancedCloseBrace = ::findBalancedCloseBrace
+        )
 
     private fun extractParamName(declPart: String, colonIdx: Int): String? {
         val rawPrefix = declPart.substring(0, colonIdx).trim()
@@ -1070,108 +858,23 @@ class ComposeStabilityExtractor {
         return params
     }
 
-    private fun matchStabilityConfig(
-        outerType: String,
-        shortOuter: String,
-        pkg: String,
-        patterns: List<Regex>
-    ): String? {
-        val fqCandidates = listOfNotNull(
-            outerType,
-            if (!outerType.contains('.') && pkg.isNotEmpty()) "$pkg.$outerType" else null,
-            if (shortOuter in setOf("List", "Set", "Map", "Collection")) "kotlin.collections.$shortOuter" else null
-        )
-        for (cand in fqCandidates) {
-            val matchedRegex = patterns.firstOrNull { it.matches(cand) }
-            if (matchedRegex != null) {
-                return matchedRegex.pattern
-            }
-        }
-        return null
-    }
-
-    private fun inferImmutableCollectionStability(
-        outerType: String,
-        genericArgs: List<String>,
-        pkg: String,
-        stabilityPatterns: List<Regex>,
-        localClassStability: Map<String, Pair<String, String>>,
-        workspaceNodes: List<GraphNode>
-    ): Pair<String, String>? {
-        val shortOuter = outerType.substringAfterLast('.')
-        if (!IMMUTABLE_COLLECTION_PREFIXES.any { outerType == it || shortOuter == it }) {
-            return null
-        }
-        for (arg in genericArgs) {
-            val (argStab, argReason) = inferTypeStability(arg, pkg, stabilityPatterns, localClassStability, workspaceNodes)
-            if (argStab != "STABLE") {
-                return argStab to "GENERIC_ARG_$argReason"
-            }
-        }
-        return "STABLE" to "KOTLINX_IMMUTABLE_COLLECTION"
-    }
-
-    private fun inferCollectionOrMutableStability(
-        outerType: String,
-        shortOuter: String
-    ): Pair<String, String>? {
-        if (outerType in STANDARD_COLLECTION_PREFIXES || shortOuter in STANDARD_COLLECTION_PREFIXES) {
-            return "UNSTABLE" to "STANDARD_COLLECTION_INTERFACE:$shortOuter"
-        }
-        if (outerType in MUTABLE_TYPE_PREFIXES || shortOuter in MUTABLE_TYPE_PREFIXES) {
-            return "UNSTABLE" to "MUTABLE_COLLECTION_OR_STREAM:$shortOuter"
-        }
-        return null
-    }
-
     fun inferTypeStability(
         typeSig: String,
         pkg: String,
         stabilityPatterns: List<Regex>,
         localClassStability: Map<String, Pair<String, String>>,
         workspaceNodes: List<GraphNode>
-    ): Pair<String, String> {
-        val clean = typeSig.trim().removeSuffix("?").trim()
-        val fastHit = inferFastPrimitiveOrFunctionStability(clean)
-        if (fastHit != null) return fastHit
-
-        val outerType = clean.substringBefore('<').trim()
-        val shortOuter = outerType.substringAfterLast('.')
-        val configPattern = matchStabilityConfig(outerType, shortOuter, pkg, stabilityPatterns)
-        if (configPattern != null) {
-            return "STABLE" to "STABILITY_CONFIG_MATCH:$configPattern"
-        }
-
-        val genericArgs = extractTopLevelGenericArgs(clean)
-        val immutableHit = inferImmutableCollectionStability(
-            outerType, genericArgs, pkg, stabilityPatterns, localClassStability, workspaceNodes
+    ): Pair<String, String> =
+        ComposeTypeStabilityAnalyzer.inferTypeStability(
+            typeSig = typeSig,
+            ctx = ComposeTypeStabilityAnalyzer.TypeStabilityContext(
+                pkg = pkg,
+                stabilityPatterns = stabilityPatterns,
+                localClassStability = localClassStability,
+                workspaceNodes = workspaceNodes,
+                splitTopLevelComma = ::splitTopLevelComma
+            )
         )
-        return immutableHit ?: inferFallbackTypeStability(outerType, shortOuter, localClassStability)
-    }
-
-    private fun inferFastPrimitiveOrFunctionStability(clean: String): Pair<String, String>? {
-        if (clean.isEmpty()) return "STABLE" to "PRIMITIVE_OR_STRING"
-        if (clean.contains("->")) return "STABLE" to "FUNCTION_TYPE"
-        val shortOuter = clean.substringBefore('<').trim().substringAfterLast('.')
-        if (shortOuter in PRIMITIVE_STABLE_TYPES) return "STABLE" to "PRIMITIVE_OR_STRING"
-        return null
-    }
-
-    private fun extractTopLevelGenericArgs(clean: String): List<String> {
-        if (!clean.contains('<') || !clean.endsWith('>')) return emptyList()
-        return splitTopLevelComma(clean.substringAfter('<').substringBeforeLast('>'))
-    }
-
-    private fun inferFallbackTypeStability(
-        outerType: String,
-        shortOuter: String,
-        localClassStability: Map<String, Pair<String, String>>
-    ): Pair<String, String> {
-        inferCollectionOrMutableStability(outerType, shortOuter)?.let { return it }
-        (localClassStability[shortOuter] ?: localClassStability[outerType])?.let { return it }
-        if (shortOuter == "State") return "STABLE" to "COMPOSE_STATE_WRAPPER"
-        return "RUNTIME" to "EXTERNAL_MODULE_TYPE:$outerType"
-    }
 
     private fun findBalancedCloseParen(text: String, openParenIdx: Int): Int {
         if (openParenIdx < 0 || openParenIdx >= text.length || text[openParenIdx] != '(') return -1
