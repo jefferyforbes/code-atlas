@@ -47,9 +47,9 @@ internal class GraphTraversalDao(
                 WHERE e.project_id = ? AND c.hop < ?
                   AND instr(c.path, ',' || e.source_node_id || ',') = 0
             )
-            SELECT DISTINCT c.source_id, c.target_id, c.edge_type, c.provenance, MIN(c.hop) AS hop,
-                            COALESCE(n.name, ''), COALESCE(n.file_id, ''), COALESCE(n.start_line, 1),
-                            COALESCE(n.semiotic_layer, 'semantic'), COALESCE(n.arch_layer, 'domain')
+            SELECT c.source_id, c.target_id, c.edge_type, c.provenance, MIN(c.hop) AS hop,
+                   COALESCE(n.name, ''), COALESCE(n.file_id, ''), COALESCE(n.start_line, 1),
+                   COALESCE(n.semiotic_layer, 'semantic'), COALESCE(n.arch_layer, 'domain')
             FROM caller_chain c
             LEFT JOIN nodes n ON n.node_id = c.source_id
             GROUP BY c.source_id, c.target_id, c.edge_type
@@ -88,9 +88,9 @@ internal class GraphTraversalDao(
                 WHERE e.project_id = ? AND c.hop < ?
                   AND instr(c.path, ',' || e.target_node_id || ',') = 0
             )
-            SELECT DISTINCT c.source_id, c.target_id, c.edge_type, c.provenance, MIN(c.hop) AS hop,
-                            COALESCE(n.name, ''), COALESCE(n.file_id, ''), COALESCE(n.start_line, 1),
-                            COALESCE(n.semiotic_layer, 'semantic'), COALESCE(n.arch_layer, 'domain')
+            SELECT c.source_id, c.target_id, c.edge_type, c.provenance, MIN(c.hop) AS hop,
+                   COALESCE(n.name, ''), COALESCE(n.file_id, ''), COALESCE(n.start_line, 1),
+                   COALESCE(n.semiotic_layer, 'semantic'), COALESCE(n.arch_layer, 'domain')
             FROM callee_chain c
             LEFT JOIN nodes n ON n.node_id = c.target_id
             GROUP BY c.source_id, c.target_id, c.edge_type

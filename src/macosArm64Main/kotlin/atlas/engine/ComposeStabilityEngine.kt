@@ -504,8 +504,14 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         val nodeMode: String,
         val cascadeCount: Int,
         val workspaceRoot: String?,
+        val classNodes: List<GraphNode>,
         val candidates: MutableList<RawCandidate>
     )
+
+    private fun loadClassNodesIfNeeded(projectSlug: String, hasViolations: Boolean): List<GraphNode> {
+        if (!hasViolations) return emptyList()
+        return store.listNodes(projectSlug).filter { it.kind in setOf("class", "data class", "value class", "interface") }
+    }
 
     fun runDoctor(
         projectSlug: String,
@@ -522,6 +528,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         val paramsByNode = store.listComposeParamsForProject(projectSlug)
         val traceMetrics = store.listComposeTraceMetrics(projectSlug)
         val overallMode = if (traceMetrics.isNotEmpty()) "MEASURED" else "ESTIMATED"
+        val classNodes = loadClassNodesIfNeeded(projectSlug, violatingNodes.isNotEmpty())
 
         val candidates = mutableListOf<RawCandidate>()
         for (node in violatingNodes) {
@@ -529,7 +536,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
             val cascadeCount = store.queryComposeCascade(projectSlug, node.nodeId, maxDepth = 4).size
             val trace = traceMetrics[node.nodeId]
             val nodeMode = if (trace != null) "MEASURED" else "ESTIMATED"
-            val evalCtx = CandidateEvalContext(projectSlug, node, nodeMode, cascadeCount, workspaceRoot, candidates)
+            val evalCtx = CandidateEvalContext(projectSlug, node, nodeMode, cascadeCount, workspaceRoot, classNodes, candidates)
 
             collectStabilityParamCandidates(evalCtx, nodeParams, trace)
             collectStateAndPerfCandidates(node, trace, cascadeCount, candidates)
@@ -583,10 +590,9 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         }
     }
 
-    private fun resolveTargetClassNode(projectSlug: String, className: String): GraphNode? {
-        return store.listNodes(projectSlug).firstOrNull {
-            (it.name == className || it.qualifiedName.endsWith(".$className")) &&
-                it.kind in setOf("class", "data class", "value class", "interface")
+    private fun resolveTargetClassNode(classNodes: List<GraphNode>, className: String): GraphNode? {
+        return classNodes.firstOrNull {
+            it.name == className || it.qualifiedName.endsWith(".$className")
         }
     }
 
@@ -639,7 +645,7 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         val writeSiteSafe = mutationCount == 0
 
         val (defBefore, defAfter, rationale) = buildVarToValTemplates(writeSiteSafe, className, propName, mutationCount)
-        val classNode = resolveTargetClassNode(ctx.projectSlug, className)
+        val classNode = resolveTargetClassNode(ctx.classNodes, className)
         val targetFilePath = resolveTargetFilePath(classNode, ctx.node.filePath)
         val defaultSnippet = Triple(classNode?.startLine ?: ctx.node.startLine, defBefore, defAfter)
         val (targetLine, before, after) = resolveDiskVarSnippet(
@@ -786,14 +792,8 @@ class ComposeStabilityEngine(private val store: SqliteGraphStore) {
         var before = "interface ${p.typeSignature}"
         var after = "@Stable\ninterface ${p.typeSignature}"
         val typeName = p.typeSignature.substringBefore('<').substringAfterLast('.').trim()
-        val classNode = store.listNodes(ctx.projectSlug).firstOrNull {
-            (it.name == typeName || it.qualifiedName.endsWith(".$typeName")) &&
-                it.kind in setOf("class", "data class", "value class", "interface")
-        }
-        val targetFilePath = classNode?.let {
-            val f = it.fileId
-            if (f.contains(':')) f.substringAfter(':') else f
-        } ?: ctx.node.filePath
+        val classNode = resolveTargetClassNode(ctx.classNodes, typeName)
+        val targetFilePath = resolveTargetFilePath(classNode, ctx.node.filePath)
         var targetLine = classNode?.startLine ?: ctx.node.startLine
 
         if (ctx.workspaceRoot != null) {

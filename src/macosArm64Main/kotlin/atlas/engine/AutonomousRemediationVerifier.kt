@@ -71,11 +71,11 @@ class AutonomousRemediationVerifier(
     }
 
     private enum class PassedStage {
-        NONE,
-        PRE_FLIGHT,
-        AST_VALID,
-        CHECKS_PASSED,
-        TESTS_PRESERVED
+        None,
+        PreFlight,
+        AstValid,
+        ChecksPassed,
+        TestsPreserved
     }
 
     private fun failResult(
@@ -83,17 +83,17 @@ class AutonomousRemediationVerifier(
         req: VerificationRequest,
         message: String,
         details: List<String>,
-        passedStage: PassedStage = PassedStage.NONE
+        passedStage: PassedStage = PassedStage.None
     ): RemediationVerificationResult {
         return RemediationVerificationResult(
             valid = false,
             phase = phase,
             ruleId = req.ruleId,
             filePath = req.relPath,
-            preFlightPassed = passedStage >= PassedStage.PRE_FLIGHT,
-            astValid = passedStage >= PassedStage.AST_VALID,
-            checksPassed = passedStage >= PassedStage.CHECKS_PASSED,
-            testsPreserved = passedStage >= PassedStage.TESTS_PRESERVED,
+            preFlightPassed = passedStage >= PassedStage.PreFlight,
+            astValid = passedStage >= PassedStage.AstValid,
+            checksPassed = passedStage >= PassedStage.ChecksPassed,
+            testsPreserved = passedStage >= PassedStage.TestsPreserved,
             message = message,
             details = details
         )
@@ -176,7 +176,7 @@ class AutonomousRemediationVerifier(
         if (modifiedContent == originalContent) {
             val msg = "Application failed: Replacement produced identical content."
             details.add("No changes resulted from replacing beforeSnippet with afterSnippet.")
-            return Pair("", failResult("APPLICATION", req, msg, details, PassedStage.PRE_FLIGHT))
+            return Pair("", failResult("APPLICATION", req, msg, details, PassedStage.PreFlight))
         }
         return Pair(modifiedContent, null)
     }
@@ -479,24 +479,24 @@ class AutonomousRemediationVerifier(
         val astResult = validateAstIntegrity(req.projectSlug, req.relPath, originalContent, modifiedContent, details)
         if (!astResult.astValid) {
             val msg = "Post-remediation verification failed: Modified source produces an invalid AST."
-            return failResult("POST_VERIFICATION", req, msg, details, PassedStage.PRE_FLIGHT)
+            return failResult("POST_VERIFICATION", req, msg, details, PassedStage.PreFlight)
         }
 
         val checksPassed = verifyRulesAndInvariants(req, originalContent, modifiedContent, astResult, details)
         if (!checksPassed) {
             val msg = "Post-remediation verification failed: Checks did not pass post-remediation."
-            return failResult("POST_VERIFICATION", req, msg, details, PassedStage.AST_VALID)
+            return failResult("POST_VERIFICATION", req, msg, details, PassedStage.AstValid)
         }
 
         val testsPreserved = verifyTestSuitePreservation(fullPath, originalContent, modifiedContent, req, details)
         if (!testsPreserved) {
             val msg = "Post-remediation verification failed: Test suite preservation check failed."
-            return failResult("POST_VERIFICATION", req, msg, details, PassedStage.CHECKS_PASSED)
+            return failResult("POST_VERIFICATION", req, msg, details, PassedStage.ChecksPassed)
         }
 
         val writeErr = commitRemediation(fullPath, modifiedContent, req, details)
         if (writeErr != null) {
-            return failResult("APPLICATION", req, writeErr, details, PassedStage.TESTS_PRESERVED)
+            return failResult("APPLICATION", req, writeErr, details, PassedStage.TestsPreserved)
         }
 
         val diffSnippet = formatUnifiedDiff(req.relPath, req.beforeSnippet, req.afterSnippet)

@@ -62,6 +62,7 @@ class AtlasMcpServer(
     val enableCodegraphTools: Boolean = (PlatformFiles.getenv("ATLAS_CODEGRAPH_COMPAT") == "1")
 ) {
     companion object {
+        const val VERSION = "0.7.0"
         const val SPILLOVER_THRESHOLD_BYTES = 32768
         private var spilloverSeq = 0L
         private val COMPOSE_QUERY_ACTIONS = setOf("summary", "compose_summary", "cascade", "compose_cascade", "blame", "compose_blame")
@@ -1441,7 +1442,7 @@ class AtlasMcpServer(
     }
 
     private fun isAllResolved(ratchets: ComplexityRatchets): Boolean {
-        return ratchets.ratchet != null || ratchets.highRatchet != null || ratchets.paramHighRatchet != null
+        return ratchets.ratchet != null && ratchets.highRatchet != null && ratchets.paramHighRatchet != null
     }
 
     private fun tryReadBaseline(
@@ -1839,7 +1840,7 @@ class AtlasMcpServer(
             }
             putJsonObject("serverInfo") {
                 put("name", "atlas")
-                put("version", "0.7.0")
+                put("version", VERSION)
             }
         }
     }
