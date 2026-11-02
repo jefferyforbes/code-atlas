@@ -142,17 +142,12 @@ class ComplexityDoctorEngine(
     }
 
     private fun collectFunctionPrescriptions(
-        filePath: String,
-        sourceText: String,
-        func: GraphNode,
-        inDegree: Int,
-        lang: String,
-        projectId: String
+        ctx: DoctorNodeContext
     ): List<ComplexityDoctorReport.Prescription> {
         val list = mutableListOf<ComplexityDoctorReport.Prescription>()
-        val guard = synthesizeGuardInversion(filePath, sourceText, func, inDegree, lang, projectId)
+        val guard = synthesizeGuardInversion(ctx)
         if (guard != null) list.add(guard)
-        val elvis = synthesizeElvisGuard(filePath, sourceText, func, inDegree, lang, projectId)
+        val elvis = synthesizeElvisGuard(ctx)
         if (elvis != null) list.add(elvis)
         return list
     }
@@ -177,9 +172,8 @@ class ComplexityDoctorEngine(
         for (func in nodes) {
             if (func.kind !in setOf("function", "method", "composable")) continue
             if (!isFunctionTargetMatch(func, nodeId, sym, simpleSym)) continue
-            candidatePrescriptions.addAll(
-                collectFunctionPrescriptions(filePath, sourceText, func, inDegree, lang, projectId)
-            )
+            val ctx = DoctorNodeContext(projectId, filePath, lang, sourceText, func, inDegree)
+            candidatePrescriptions.addAll(collectFunctionPrescriptions(ctx))
         }
 
         return candidatePrescriptions
@@ -365,28 +359,32 @@ class ComplexityDoctorEngine(
         }
     }
 
+    private data class SnippetReplacement(
+        val beforeSnippet: String,
+        val afterSnippet: String
+    )
+
     private fun buildInvertedCandidateText(
         sourceText: String,
         lines: List<String>,
         ifInfo: OuterIfInfo,
         closeIfIdx: Int,
-        spanEndIdx: Int,
-        defaultReturn: String
-    ): Pair<String, String>? {
+        elseRes: ElseResolution
+    ): SnippetReplacement? {
         val innerLines = lines.subList(ifInfo.lineIdx + 1, closeIfIdx)
         if (innerLines.isEmpty()) return null
 
         val unindentedInner = unindentInnerLines(innerLines, ifInfo.indent)
         val invertedCond = invertCondition(ifInfo.rawCondition)
 
-        val beforeSnippet = lines.subList(ifInfo.lineIdx, spanEndIdx + 1).joinToString("\n")
+        val beforeSnippet = lines.subList(ifInfo.lineIdx, elseRes.spanEndIdx + 1).joinToString("\n")
         val afterLines = mutableListOf<String>()
-        afterLines.add("${ifInfo.indent}if ($invertedCond) $defaultReturn")
+        afterLines.add("${ifInfo.indent}if ($invertedCond) ${elseRes.defaultReturn}")
         afterLines.addAll(unindentedInner)
         val afterSnippet = afterLines.joinToString("\n")
 
         if (!AutonomousRemediationVerifier.hasSingleOccurrence(sourceText, beforeSnippet)) return null
-        return Pair(beforeSnippet, afterSnippet)
+        return SnippetReplacement(beforeSnippet, afterSnippet)
     }
 
     private data class DoctorNodeContext(
@@ -401,10 +399,11 @@ class ComplexityDoctorEngine(
     private fun evaluateGuardInversionPrescription(
         ctx: DoctorNodeContext,
         candidateText: String,
-        snippets: Pair<String, String>,
+        snippets: SnippetReplacement,
         ifLineIdx: Int
     ): ComplexityDoctorReport.Prescription? {
-        val (beforeSnippet, afterSnippet) = snippets
+        val beforeSnippet = snippets.beforeSnippet
+        val afterSnippet = snippets.afterSnippet
         val maskedCandidate = PolyglotAstExtractor.maskCommentsAndStrings(candidateText, ctx.lang)
         if (!AutonomousRemediationVerifier.hasBalancedDelimiters(maskedCandidate)) return null
 
@@ -450,31 +449,25 @@ class ComplexityDoctorEngine(
     }
 
     private fun synthesizeGuardInversion(
-        filePath: String,
-        sourceText: String,
-        node: GraphNode,
-        inDegree: Int,
-        lang: String,
-        projectId: String
+        ctx: DoctorNodeContext
     ): ComplexityDoctorReport.Prescription? {
-        val lines = sourceText.lines()
-        val startIdx = (node.startLine - 1).coerceAtLeast(0)
-        val endIdx = (node.endLine - 1).coerceAtMost(lines.size - 1)
+        val lines = ctx.sourceText.lines()
+        val startIdx = (ctx.node.startLine - 1).coerceAtLeast(0)
+        val endIdx = (ctx.node.endLine - 1).coerceAtMost(lines.size - 1)
         val bodyStart = findFunctionBodyStart(lines, startIdx, endIdx) ?: return null
 
         val ifInfo = findOuterIfLine(lines, bodyStart, endIdx) ?: return null
         if (ifInfo.rawCondition.isEmpty()) return null
 
-        val closeIfIdx = findMatchingIfClose(lines, ifInfo.lineIdx, endIdx, lang) ?: return null
+        val closeIfIdx = findMatchingIfClose(lines, ifInfo.lineIdx, endIdx, ctx.lang) ?: return null
         if (closeIfIdx <= ifInfo.lineIdx) return null
 
-        val elseRes = resolveElseOrTrailingReturn(lines, closeIfIdx, endIdx, lang) ?: return null
+        val elseRes = resolveElseOrTrailingReturn(lines, closeIfIdx, endIdx, ctx.lang) ?: return null
         val snippets = buildInvertedCandidateText(
-            sourceText, lines, ifInfo, closeIfIdx, elseRes.spanEndIdx, elseRes.defaultReturn
+            ctx.sourceText, lines, ifInfo, closeIfIdx, elseRes
         ) ?: return null
 
-        val candidateText = sourceText.replace(snippets.first, snippets.second)
-        val ctx = DoctorNodeContext(projectId, filePath, lang, sourceText, node, inDegree)
+        val candidateText = ctx.sourceText.replace(snippets.beforeSnippet, snippets.afterSnippet)
         return evaluateGuardInversionPrescription(ctx, candidateText, snippets, ifInfo.lineIdx)
     }
 
@@ -519,9 +512,10 @@ class ComplexityDoctorEngine(
     private fun evaluateElvisPrescription(
         ctx: DoctorNodeContext,
         lineIdx: Int,
-        snippets: Pair<String, String>
+        snippets: SnippetReplacement
     ): ComplexityDoctorReport.Prescription? {
-        val (beforeSnippet, afterSnippet) = snippets
+        val beforeSnippet = snippets.beforeSnippet
+        val afterSnippet = snippets.afterSnippet
         if (!AutonomousRemediationVerifier.hasSingleOccurrence(ctx.sourceText, beforeSnippet)) return null
 
         val candidateText = ctx.sourceText.replace(beforeSnippet, afterSnippet)
@@ -590,24 +584,18 @@ class ComplexityDoctorEngine(
         val beforeSnippet = lines.subList(declLineIdx, nullCheck.spanEnd + 1).joinToString("\n")
         val afterSnippet = "${indent}val $varName = $initExpr$elvisRet"
 
-        return evaluateElvisPrescription(ctx, declLineIdx, beforeSnippet to afterSnippet)
+        return evaluateElvisPrescription(ctx, declLineIdx, SnippetReplacement(beforeSnippet, afterSnippet))
     }
 
     private fun synthesizeElvisGuard(
-        filePath: String,
-        sourceText: String,
-        node: GraphNode,
-        inDegree: Int,
-        lang: String,
-        projectId: String
+        ctx: DoctorNodeContext
     ): ComplexityDoctorReport.Prescription? {
-        val lines = sourceText.lines()
-        val startIdx = (node.startLine - 1).coerceAtLeast(0)
-        val endIdx = (node.endLine - 1).coerceAtMost(lines.size - 1)
+        val lines = ctx.sourceText.lines()
+        val startIdx = (ctx.node.startLine - 1).coerceAtLeast(0)
+        val endIdx = (ctx.node.endLine - 1).coerceAtMost(lines.size - 1)
         if (startIdx >= endIdx || startIdx >= lines.size) return null
 
         val declRegex = Regex("""^(\s*)(?:val|var)\s+([A-Za-z0-9_]+)\s*=\s*(.+)$""")
-        val ctx = DoctorNodeContext(projectId, filePath, lang, sourceText, node, inDegree)
 
         for (i in startIdx until endIdx) {
             val prescription = trySynthesizeElvisGuardAtLine(lines, i..endIdx, declRegex, ctx)
