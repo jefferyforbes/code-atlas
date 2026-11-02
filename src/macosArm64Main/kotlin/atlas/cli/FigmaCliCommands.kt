@@ -11,6 +11,7 @@ import atlas.util.PlatformFiles
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 
@@ -132,10 +133,10 @@ internal object FigmaCliCommands {
                 put("file_key", fileKey)
                 put("target", normTarget)
                 putJsonArray("nodes") {
-                    nodes.forEach { n -> add(AtlasCli.jsonCompact.parseToJsonElement(AtlasCli.jsonCompact.encodeToString(n))) }
+                    nodes.forEach { n -> add(AtlasCli.jsonCompact.encodeToJsonElement(n)) }
                 }
                 if (variable != null) {
-                    put("variable", AtlasCli.jsonCompact.parseToJsonElement(AtlasCli.jsonCompact.encodeToString(variable)))
+                    put("variable", AtlasCli.jsonCompact.encodeToJsonElement(variable))
                 }
             }
             println(AtlasCli.jsonPretty.encodeToString(jsonElement))
