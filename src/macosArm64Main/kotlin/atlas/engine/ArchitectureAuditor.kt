@@ -864,55 +864,51 @@ class ArchitectureAuditor(
         return adj
     }
 
-    private fun detectDependencyCycles(adj: Map<String, List<String>>): List<List<String>> {
-        val visited = mutableSetOf<String>()
-        val recStack = mutableListOf<String>()
-        val foundCycles = mutableListOf<List<String>>()
-        val reportedSigs = mutableSetOf<String>()
+    private data class CycleSearchState(
+        val adj: Map<String, List<String>>,
+        val visited: MutableSet<String> = mutableSetOf(),
+        val recStack: MutableList<String> = mutableListOf(),
+        val foundCycles: MutableList<List<String>> = mutableListOf(),
+        val reportedSigs: MutableSet<String> = mutableSetOf()
+    )
 
+    private fun detectDependencyCycles(adj: Map<String, List<String>>): List<List<String>> {
+        val state = CycleSearchState(adj)
         for (nodeId in adj.keys.sorted()) {
-            if (nodeId !in visited) {
-                dfsCycleFinder(nodeId, adj, visited, recStack, foundCycles, reportedSigs)
+            if (nodeId !in state.visited) {
+                dfsCycleFinder(nodeId, state)
             }
         }
-        return foundCycles
+        return state.foundCycles
     }
 
     private fun dfsCycleFinder(
         curr: String,
-        adj: Map<String, List<String>>,
-        visited: MutableSet<String>,
-        recStack: MutableList<String>,
-        foundCycles: MutableList<List<String>>,
-        reportedSigs: MutableSet<String>
+        state: CycleSearchState
     ) {
-        visited.add(curr)
-        recStack.add(curr)
+        state.visited.add(curr)
+        state.recStack.add(curr)
 
-        val neighbors = adj[curr] ?: emptyList()
+        val neighbors = state.adj[curr] ?: emptyList()
         for (next in neighbors) {
-            processNextNeighbor(next, adj, visited, recStack, foundCycles, reportedSigs)
+            processNextNeighbor(next, state)
         }
-        recStack.removeAt(recStack.size - 1)
+        state.recStack.removeAt(state.recStack.size - 1)
     }
 
     private fun processNextNeighbor(
         next: String,
-        adj: Map<String, List<String>>,
-        visited: MutableSet<String>,
-        recStack: MutableList<String>,
-        foundCycles: MutableList<List<String>>,
-        reportedSigs: MutableSet<String>
+        state: CycleSearchState
     ) {
-        val cycleIdx = recStack.indexOf(next)
+        val cycleIdx = state.recStack.indexOf(next)
         if (cycleIdx >= 0) {
-            val cycle = recStack.subList(cycleIdx, recStack.size).toList() + next
+            val cycle = state.recStack.subList(cycleIdx, state.recStack.size).toList() + next
             val sig = normalizeCycleSignature(cycle)
-            if (reportedSigs.add(sig)) {
-                foundCycles.add(cycle)
+            if (state.reportedSigs.add(sig)) {
+                state.foundCycles.add(cycle)
             }
-        } else if (next !in visited) {
-            dfsCycleFinder(next, adj, visited, recStack, foundCycles, reportedSigs)
+        } else if (next !in state.visited) {
+            dfsCycleFinder(next, state)
         }
     }
 

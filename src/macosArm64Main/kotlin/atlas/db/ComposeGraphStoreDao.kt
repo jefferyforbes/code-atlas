@@ -71,19 +71,23 @@ internal class ComposeGraphStoreDao(private val db: NativeSqliteDatabase) {
         stmt.step()
     }
 
+    private data class ComposeUpsertStatements(
+        val insertStmt: NativeSqliteStatement,
+        val updateStmt: NativeSqliteStatement
+    )
+
     private fun upsertSingleComposeNode(
-        stmts: Pair<NativeSqliteStatement, NativeSqliteStatement>,
+        stmts: ComposeUpsertStatements,
         n: ComposeNodeRecord,
         existingProv: Map<String, Int>,
         preserveHigherProvenance: Boolean
     ) {
-        val (nodeStmt, updStmt) = stmts
         val prevRank = existingProv[n.nodeId] ?: 0
         val newRank = provenanceRank(n.provenance)
         if (preserveHigherProvenance && prevRank > newRank) {
-            updateComposeNodeLinesAndMask(updStmt, n)
+            updateComposeNodeLinesAndMask(stmts.updateStmt, n)
         } else {
-            bindComposeNodeRow(nodeStmt, n)
+            bindComposeNodeRow(stmts.insertStmt, n)
         }
     }
 
@@ -146,7 +150,7 @@ internal class ComposeGraphStoreDao(private val db: NativeSqliteDatabase) {
                     WHERE node_id = ?;
                     """.trimIndent()
                 )
-                val nodeStmts = nodeStmt to updStmt
+                val nodeStmts = ComposeUpsertStatements(nodeStmt, updStmt)
                 for (n in nodes) {
                     upsertSingleComposeNode(nodeStmts, n, existingProv, preserveHigherProvenance)
                 }

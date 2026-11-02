@@ -193,17 +193,26 @@ class SqliteGraphStore(val dbPath: String) {
         return null
     }
 
+    private data class RawSymbolFileContext(
+        val projectId: String,
+        val normalizedFileId: String
+    )
+
+    private data class RawSymbolBatchStatements(
+        val deleteStmt: NativeSqliteStatement,
+        val insertStmt: NativeSqliteStatement
+    )
+
     private fun bindRawSymbolEdgeRow(
         stmt: NativeSqliteStatement,
-        fileContext: Pair<String, String>,
+        fileContext: RawSymbolFileContext,
         edge: GraphEdge,
         targetSym: String
     ) {
-        val (projectId, normalizedFileId) = fileContext
         stmt.reset()
         stmt.clearBindings()
-        stmt.bindString(1, projectId)
-        stmt.bindString(2, normalizedFileId)
+        stmt.bindString(1, fileContext.projectId)
+        stmt.bindString(2, fileContext.normalizedFileId)
         stmt.bindString(3, edge.sourceNodeId)
         stmt.bindString(4, targetSym)
         stmt.bindString(5, edge.edgeType)
@@ -216,12 +225,11 @@ class SqliteGraphStore(val dbPath: String) {
 
     private fun bindIndexedMarker(
         stmt: NativeSqliteStatement,
-        projectId: String,
-        normalizedFileId: String
+        fileContext: RawSymbolFileContext
     ) {
         val markerEdge = GraphEdge(
             edgeId = "",
-            projectId = projectId,
+            projectId = fileContext.projectId,
             sourceNodeId = "",
             targetNodeId = "",
             edgeType = "INDEXED_MARKER",
@@ -229,33 +237,32 @@ class SqliteGraphStore(val dbPath: String) {
             confidence = 1.0,
             lineNumber = 0
         )
-        bindRawSymbolEdgeRow(stmt, projectId to normalizedFileId, markerEdge, "")
+        bindRawSymbolEdgeRow(stmt, fileContext, markerEdge, "")
     }
 
     private fun replaceFileRawSymbolEdgesInBatch(
-        delStmt: NativeSqliteStatement,
-        insStmt: NativeSqliteStatement,
+        stmts: RawSymbolBatchStatements,
         projectId: String,
         fileId: String,
         edges: List<GraphEdge>
     ) {
         val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
-        delStmt.reset()
-        delStmt.clearBindings()
-        delStmt.bindString(1, projectId)
-        delStmt.bindString(2, normalizedFileId)
-        delStmt.step()
+        stmts.deleteStmt.reset()
+        stmts.deleteStmt.clearBindings()
+        stmts.deleteStmt.bindString(1, projectId)
+        stmts.deleteStmt.bindString(2, normalizedFileId)
+        stmts.deleteStmt.step()
 
         var insertedCount = 0
-        val fileCtx = projectId to normalizedFileId
+        val fileCtx = RawSymbolFileContext(projectId, normalizedFileId)
         for (edge in edges) {
             if (edge.edgeType == "CONTAINS") continue
             val targetSym = resolveTargetSymbol(projectId, edge.targetNodeId) ?: continue
-            bindRawSymbolEdgeRow(insStmt, fileCtx, edge, targetSym)
+            bindRawSymbolEdgeRow(stmts.insertStmt, fileCtx, edge, targetSym)
             insertedCount++
         }
         if (insertedCount == 0) {
-            bindIndexedMarker(insStmt, projectId, normalizedFileId)
+            bindIndexedMarker(stmts.insertStmt, fileCtx)
         }
     }
 
@@ -264,17 +271,19 @@ class SqliteGraphStore(val dbPath: String) {
         withSavepoint("sp_batch_raw_edges") {
             val scope = StatementScope(db)
             try {
-                val delStmt = scope.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
-                val insStmt = scope.prepare(
-                    """
-                    INSERT INTO raw_symbol_edges (
-                        project_id, file_id, source_node_id, target_symbol,
-                        edge_type, confidence, provenance, line_number, edge_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """.trimIndent()
+                val stmts = RawSymbolBatchStatements(
+                    deleteStmt = scope.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;"),
+                    insertStmt = scope.prepare(
+                        """
+                        INSERT INTO raw_symbol_edges (
+                            project_id, file_id, source_node_id, target_symbol,
+                            edge_type, confidence, provenance, line_number, edge_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """.trimIndent()
+                    )
                 )
                 for ((fileId, edges) in fileEdgesMap) {
-                    replaceFileRawSymbolEdgesInBatch(delStmt, insStmt, projectId, fileId, edges)
+                    replaceFileRawSymbolEdgesInBatch(stmts, projectId, fileId, edges)
                 }
             } finally {
                 scope.closeAll()
@@ -614,34 +623,38 @@ class SqliteGraphStore(val dbPath: String) {
         stmt.step()
     }
 
+    private data class NodeSearchIndexStatements(
+        val delVocab: NativeSqliteStatement,
+        val delFtsByNodeId: NativeSqliteStatement,
+        val insFts: NativeSqliteStatement,
+        val insVocab: NativeSqliteStatement
+    )
+
     private fun upsertNodeSearchIndexes(
-        delVocab: NativeSqliteStatement,
-        delFtsByNodeId: NativeSqliteStatement,
-        insFts: NativeSqliteStatement,
-        insVocab: NativeSqliteStatement,
+        stmts: NodeSearchIndexStatements,
         node: GraphNode
     ) {
-        delVocab.reset(); delVocab.clearBindings(); delVocab.bindString(1, node.nodeId); delVocab.step()
-        delFtsByNodeId.reset(); delFtsByNodeId.clearBindings(); delFtsByNodeId.bindString(1, node.nodeId); delFtsByNodeId.step()
+        stmts.delVocab.reset(); stmts.delVocab.clearBindings(); stmts.delVocab.bindString(1, node.nodeId); stmts.delVocab.step()
+        stmts.delFtsByNodeId.reset(); stmts.delFtsByNodeId.clearBindings(); stmts.delFtsByNodeId.bindString(1, node.nodeId); stmts.delFtsByNodeId.step()
 
-        insFts.reset()
-        insFts.clearBindings()
-        insFts.bindString(1, node.nodeId)
-        insFts.bindString(2, node.nodeId)
-        insFts.bindString(3, node.projectId)
-        insFts.bindString(4, node.name)
-        insFts.bindString(5, node.qualifiedName)
-        insFts.bindString(6, node.signature)
-        insFts.bindString(7, node.fileId)
-        insFts.step()
+        stmts.insFts.reset()
+        stmts.insFts.clearBindings()
+        stmts.insFts.bindString(1, node.nodeId)
+        stmts.insFts.bindString(2, node.nodeId)
+        stmts.insFts.bindString(3, node.projectId)
+        stmts.insFts.bindString(4, node.name)
+        stmts.insFts.bindString(5, node.qualifiedName)
+        stmts.insFts.bindString(6, node.signature)
+        stmts.insFts.bindString(7, node.fileId)
+        stmts.insFts.step()
 
         for (seg in NameSegmentTokenizer.tokenize("${node.name} ${node.qualifiedName}")) {
-            insVocab.reset()
-            insVocab.clearBindings()
-            insVocab.bindString(1, seg)
-            insVocab.bindString(2, node.nodeId)
-            insVocab.bindString(3, node.projectId)
-            insVocab.step()
+            stmts.insVocab.reset()
+            stmts.insVocab.clearBindings()
+            stmts.insVocab.bindString(1, seg)
+            stmts.insVocab.bindString(2, node.nodeId)
+            stmts.insVocab.bindString(3, node.projectId)
+            stmts.insVocab.step()
         }
     }
 
@@ -778,9 +791,15 @@ class SqliteGraphStore(val dbPath: String) {
                     """.trimIndent()
                 )
 
+                val searchIndexStmts = NodeSearchIndexStatements(
+                    delVocab = delVocab,
+                    delFtsByNodeId = delFtsByNodeId,
+                    insFts = insFts,
+                    insVocab = insVocab
+                )
                 for (node in nodes) {
                     bindUpsertNode(insNode, node)
-                    upsertNodeSearchIndexes(delVocab, delFtsByNodeId, insFts, insVocab, node)
+                    upsertNodeSearchIndexes(searchIndexStmts, node)
                 }
 
                 for (edge in edges) {
@@ -1119,13 +1138,20 @@ class SqliteGraphStore(val dbPath: String) {
         }
     }
 
+    private data class NameSearchFilter(
+        val query: String,
+        val limit: Int,
+        val kind: String?
+    )
+
     private fun scoreExactAndFuzzyNames(
         projectId: String,
-        query: String,
-        limitAndKind: Pair<Int, String?>,
+        filter: NameSearchFilter,
         scores: MutableMap<String, Double>
     ) {
-        val (limit, kind) = limitAndKind
+        val query = filter.query
+        val limit = filter.limit
+        val kind = filter.kind
         val escapedQuery = NativeSqliteStatement.escapeSqlLike(query)
         val kindClause = if (kind != null) " AND kind = ?" else ""
 
@@ -1224,7 +1250,7 @@ class SqliteGraphStore(val dbPath: String) {
             scoreVocabCoverage(projectId, segments, scores)
         }
 
-        scoreExactAndFuzzyNames(projectId, query, limit to kind, scores)
+        scoreExactAndFuzzyNames(projectId, NameSearchFilter(query, limit, kind), scores)
 
         if (scores.isEmpty()) return emptyList()
 

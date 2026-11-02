@@ -118,11 +118,12 @@ class ArchitectContextEngine(
         val skeletons = keyNodes.map { extractStructuralSkeleton(projectId, it) }
         val callHierarchy = buildCallHierarchy(projectId, keyNodes.take(5))
 
+        val aciSummary = AciSummary(aciScore, isFastPath)
         val fullMarkdown = buildFullMarkdown(
             headerTitle = effectiveSeeds.firstOrNull() ?: projectId,
             scope = scope,
-            aciSummary = aciScore to isFastPath,
-            sections = skeletons to callHierarchy
+            aciSummary = aciSummary,
+            sections = MarkdownSections(skeletons, callHierarchy)
         )
 
         val fullBytes = fullMarkdown.encodeToByteArray().size
@@ -154,9 +155,9 @@ class ArchitectContextEngine(
         PlatformFiles.writeText(spilloverPath, fullMarkdown)
 
         val inlineSummary = buildSpilloverSummary(
-            spilloverMeta = Triple(slug, spilloverPath, fullBytes),
+            spilloverMeta = SpilloverMetadata(slug, spilloverPath, fullBytes),
             scope = scope,
-            aciSummary = aciScore to isFastPath,
+            aciSummary = aciSummary,
             topSkeletons = skeletons.take(3)
         )
 
@@ -307,17 +308,33 @@ class ArchitectContextEngine(
             .ifEmpty { "architect" }
     }
 
+    private data class AciSummary(
+        val aciScore: Double,
+        val isFastPath: Boolean
+    )
+
+    private data class MarkdownSections(
+        val skeletons: List<String>,
+        val callHierarchy: List<String>
+    )
+
+    private data class SpilloverMetadata(
+        val slug: String,
+        val spilloverPath: String,
+        val fullBytes: Int
+    )
+
     private fun buildFullMarkdown(
         headerTitle: String,
         scope: ScopeRecommendation,
-        aciSummary: Pair<Double, Boolean>,
-        sections: Pair<List<String>, List<String>>
+        aciSummary: AciSummary,
+        sections: MarkdownSections
     ): String {
         val sb = StringBuilder()
         sb.append("# Architect Context: ").append(headerTitle).append("\n\n")
-        appendConcurrencyBoundarySection(sb, scope, aciSummary.first, aciSummary.second)
-        appendSkeletonsSection(sb, sections.first)
-        appendCallHierarchySection(sb, sections.second)
+        appendConcurrencyBoundarySection(sb, scope, aciSummary.aciScore, aciSummary.isFastPath)
+        appendSkeletonsSection(sb, sections.skeletons)
+        appendCallHierarchySection(sb, sections.callHierarchy)
         return sb.toString().trimEnd()
     }
 
@@ -375,13 +392,16 @@ class ArchitectContextEngine(
     }
 
     private fun buildSpilloverSummary(
-        spilloverMeta: Triple<String, String, Int>,
+        spilloverMeta: SpilloverMetadata,
         scope: ScopeRecommendation,
-        aciSummary: Pair<Double, Boolean>,
+        aciSummary: AciSummary,
         topSkeletons: List<String>
     ): String {
-        val (slug, spilloverPath, fullBytes) = spilloverMeta
-        val (aciScore, isFastPath) = aciSummary
+        val slug = spilloverMeta.slug
+        val spilloverPath = spilloverMeta.spilloverPath
+        val fullBytes = spilloverMeta.fullBytes
+        val aciScore = aciSummary.aciScore
+        val isFastPath = aciSummary.isFastPath
         val scopeFiles = scope.files
         val scopeModules = scope.modules
         val collidingPlans = scope.collidingPlans

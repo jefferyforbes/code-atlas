@@ -275,13 +275,31 @@ internal class GraphTraversalDao(
         }
     }
 
+    private data class CanonicalRouteAndUrl(
+        val canonicalRoute: String?,
+        val canonicalUrl: String
+    )
+
+    private data class FigmaDeepLinkQuery(
+        val projectId: String,
+        val rawQuery: String,
+        val figmaLink: UrlTargetResolver.FigmaDeepLink,
+        val limit: Int
+    )
+
+    private data class ShortestPathEndpoints(
+        val sourceNodeId: String,
+        val targetNodeId: String
+    )
+
     private fun queryMatchedUrlEdges(
         projectId: String,
-        canonRouteAndUrl: Pair<String?, String>,
+        target: CanonicalRouteAndUrl,
         limit: Int,
         outMatched: MutableMap<String, GraphNode>
     ) {
-        val (canonRoute, canonUrl) = canonRouteAndUrl
+        val canonRoute = target.canonicalRoute
+        val canonUrl = target.canonicalUrl
         val escUrl = NativeSqliteStatement.escapeSqlLike(canonUrl)
         val edgeStmt = db.prepare(
             """
@@ -329,18 +347,19 @@ internal class GraphTraversalDao(
         }
 
         val canonUrl = UrlTargetResolver.normalizeExternalUrl(trimmed)
-        queryMatchedUrlEdges(projectId, canonRoute to canonUrl, limit, matchedNodes)
+        queryMatchedUrlEdges(projectId, CanonicalRouteAndUrl(canonRoute, canonUrl), limit, matchedNodes)
 
         return matchedNodes.values.toList()
     }
 
     private fun searchFigmaDeepLink(
-        projectAndQuery: Pair<String, String>,
-        figmaLink: UrlTargetResolver.FigmaDeepLink,
-        limit: Int,
+        req: FigmaDeepLinkQuery,
         jsonCodec: Json
     ): JsonObject {
-        val (projectId, query) = projectAndQuery
+        val projectId = req.projectId
+        val query = req.rawQuery
+        val figmaLink = req.figmaLink
+        val limit = req.limit
         val figmaNodes = if (figmaLink.nodeId != null) {
             listOfNotNull(figmaDao.queryFigmaNodeById(figmaLink.fileKey, figmaLink.nodeId))
         } else {
@@ -497,7 +516,7 @@ internal class GraphTraversalDao(
 
         val figmaLink = UrlTargetResolver.parseFigmaUrl(trimmed)
         if (figmaLink != null) {
-            return searchFigmaDeepLink(projectId to trimmed, figmaLink, limit, jsonCodec)
+            return searchFigmaDeepLink(FigmaDeepLinkQuery(projectId, trimmed, figmaLink, limit), jsonCodec)
         }
 
         val codeLink = UrlTargetResolver.parseCodeLocationUrl(trimmed)
@@ -570,7 +589,7 @@ internal class GraphTraversalDao(
             """.trimIndent()
         )
         return try {
-            bfsShortestPath(edgeStmt, projectId, sourceNodeId to targetNodeId, maxHops)
+            bfsShortestPath(edgeStmt, projectId, ShortestPathEndpoints(sourceNodeId, targetNodeId), maxHops)
         } finally {
             edgeStmt.close()
         }
@@ -579,10 +598,11 @@ internal class GraphTraversalDao(
     private fun bfsShortestPath(
         edgeStmt: NativeSqliteStatement,
         projectId: String,
-        endpoints: Pair<String, String>,
+        endpoints: ShortestPathEndpoints,
         maxHops: Int
     ): List<String> {
-        val (sourceNodeId, targetNodeId) = endpoints
+        val sourceNodeId = endpoints.sourceNodeId
+        val targetNodeId = endpoints.targetNodeId
         val queue = mutableListOf(Pair(sourceNodeId, listOf(sourceNodeId)))
         val visited = mutableSetOf(sourceNodeId)
         var head = 0

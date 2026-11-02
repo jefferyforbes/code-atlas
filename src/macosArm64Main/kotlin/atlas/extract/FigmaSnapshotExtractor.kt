@@ -113,10 +113,11 @@ class FigmaSnapshotExtractor {
         nodesMap: JsonObject,
         collector: FigmaTraversalCollector
     ) {
+        val defaultParentScope = FigmaParentScope(null, "Page 1", null)
         for ((_, nodeVal) in nodesMap) {
             val targetNode = (nodeVal as? JsonObject)?.let { it["document"]?.jsonObject ?: it }
             if (targetNode != null) {
-                traverseNodeTree(collector, targetNode, null, "Page 1", null)
+                traverseNodeTree(collector, targetNode, defaultParentScope)
             }
         }
     }
@@ -125,22 +126,20 @@ class FigmaSnapshotExtractor {
         rootElement: JsonArray,
         collector: FigmaTraversalCollector
     ) {
+        val defaultParentScope = FigmaParentScope(null, "Page 1", null)
         for (item in rootElement.filterIsInstance<JsonObject>()) {
-            traverseNodeTree(collector, item, null, "Page 1", null)
+            traverseNodeTree(collector, item, defaultParentScope)
         }
     }
 
     private fun traverseDocumentRoots(
-        fileKey: String,
+        collector: FigmaTraversalCollector,
         rootElement: JsonElement,
-        rootObj: JsonObject?,
-        nodes: MutableList<FigmaNode>,
-        edges: MutableMap<String, FigmaEdge>
+        rootObj: JsonObject?
     ) {
-        val collector = FigmaTraversalCollector(fileKey, nodes, edges)
         val docObj = rootObj?.get("document")?.jsonObject
         if (docObj != null) {
-            traverseNodeTree(collector, docObj, null, "Document", null)
+            traverseNodeTree(collector, docObj, FigmaParentScope(null, "Document", null))
             return
         }
 
@@ -151,7 +150,7 @@ class FigmaSnapshotExtractor {
         }
 
         if (rootObj != null && (rootObj.containsKey("id") || rootObj.containsKey("type"))) {
-            traverseNodeTree(collector, rootObj, null, "Page 1", null)
+            traverseNodeTree(collector, rootObj, FigmaParentScope(null, "Page 1", null))
             return
         }
 
@@ -180,7 +179,11 @@ class FigmaSnapshotExtractor {
             extractVariablesFromAstRoot(fileKey, rootObj, extractedVars, extractedEdges)
         }
 
-        traverseDocumentRoots(fileKey, rootElement, rootObj, extractedNodes, extractedEdges)
+        traverseDocumentRoots(
+            FigmaTraversalCollector(fileKey, extractedNodes, extractedEdges),
+            rootElement,
+            rootObj
+        )
 
         return FigmaExtractedSnapshot(
             document = document,
@@ -265,12 +268,33 @@ class FigmaSnapshotExtractor {
         val rawType: String
     )
 
+    private data class FigmaNodeFlags(
+        val isInteractive: Boolean,
+        val hasEmoji: Boolean,
+        val hasReaction: Boolean
+    )
+
+    private data class FigmaParentScope(
+        val parentId: String?,
+        val pageName: String,
+        val sectionId: String?
+    )
+
+    private data class LayoutSizingKeys(
+        val primaryKey: String,
+        val aliasKey: String,
+        val targetMode: String,
+        val counterMode: String
+    )
+
     private fun buildFigmaNode(
         identity: FigmaNodeIdentity,
         nodeObj: JsonObject,
-        flags: Triple<Boolean, Boolean, Boolean>
+        flags: FigmaNodeFlags
     ): FigmaNode {
-        val (isInteractive, hasEmoji, hasReaction) = flags
+        val isInteractive = flags.isInteractive
+        val hasEmoji = flags.hasEmoji
+        val hasReaction = flags.hasReaction
         val autoLayout = extractAutoLayout(nodeObj)
         val bbox = extractBoundingBox(nodeObj)
         val fills = nodeObj["fills"]?.jsonArray
@@ -317,13 +341,11 @@ class FigmaSnapshotExtractor {
     private fun traverseChildren(
         collector: FigmaTraversalCollector,
         children: JsonArray?,
-        parentId: String,
-        pageName: String,
-        sectionId: String?
+        parentScope: FigmaParentScope
     ) {
         if (children == null) return
         for (child in children.filterIsInstance<JsonObject>()) {
-            traverseNodeTree(collector, child, parentId, pageName, sectionId)
+            traverseNodeTree(collector, child, parentScope)
         }
     }
 
@@ -342,16 +364,14 @@ class FigmaSnapshotExtractor {
     private fun traverseNodeTree(
         collector: FigmaTraversalCollector,
         nodeObj: JsonObject,
-        parentId: String?,
-        pageName: String,
-        sectionId: String?
+        parentScope: FigmaParentScope
     ) {
         val nodeId = nodeObj["id"].asString() ?: nodeObj["nodeId"].asString() ?: return
         val name = nodeObj["name"].asString() ?: ""
         val rawType = nodeObj["type"].asString()?.uppercase() ?: "FRAME"
 
-        val effectivePageName = if (rawType == "CANVAS" && name.isNotBlank()) name else pageName
-        val (currentSectionId, nextSectionId) = resolveNodeSectionScope(nodeObj, nodeId, rawType, sectionId)
+        val effectivePageName = if (rawType == "CANVAS" && name.isNotBlank()) name else parentScope.pageName
+        val (currentSectionId, nextSectionId) = resolveNodeSectionScope(nodeObj, nodeId, rawType, parentScope.sectionId)
 
         val hasEmoji = detectEmoji(nodeObj, name)
         val hasReaction = extractReactions(collector.fileKey, nodeId, nodeObj, collector.edges)
@@ -361,7 +381,7 @@ class FigmaSnapshotExtractor {
         if (rawType == "INSTANCE") {
             extractInstantiates(collector.fileKey, nodeId, nodeObj, collector.edges)
         }
-        recordContainsEdge(collector.fileKey, parentId, nodeId, collector.edges)
+        recordContainsEdge(collector.fileKey, parentScope.parentId, nodeId, collector.edges)
 
         val figmaNode = buildFigmaNode(
             identity = FigmaNodeIdentity(
@@ -369,49 +389,49 @@ class FigmaSnapshotExtractor {
                 fileKey = collector.fileKey,
                 pageName = effectivePageName,
                 sectionId = currentSectionId,
-                parentId = parentId,
+                parentId = parentScope.parentId,
                 name = name,
                 rawType = rawType
             ),
             nodeObj = nodeObj,
-            flags = Triple(isInteractive, hasEmoji, hasReaction)
+            flags = FigmaNodeFlags(isInteractive, hasEmoji, hasReaction)
         )
         collector.nodes.add(figmaNode)
 
-        traverseChildren(collector, nodeObj["children"]?.jsonArray, nodeId, effectivePageName, nextSectionId)
+        traverseChildren(
+            collector,
+            nodeObj["children"]?.jsonArray,
+            FigmaParentScope(nodeId, effectivePageName, nextSectionId)
+        )
     }
 
     private fun resolveFallbackSizing(
-        align: String?,
-        primarySizing: String?,
-        counterSizing: String?,
+        nodeObj: JsonObject,
         layoutMode: String,
-        targetMode: String,
-        counterMode: String
-    ): String = when {
-        align == "STRETCH" && layoutMode == counterMode -> "FILL"
-        layoutMode == targetMode && primarySizing == "AUTO" -> "HUG"
-        layoutMode == counterMode && counterSizing == "AUTO" -> "HUG"
-        else -> "FIXED"
+        keys: LayoutSizingKeys
+    ): String {
+        val align = nodeObj["layoutAlign"].asString()?.uppercase()
+        val primarySizing = nodeObj["primaryAxisSizingMode"].asString()?.uppercase()
+        val counterSizing = nodeObj["counterAxisSizingMode"].asString()?.uppercase()
+        return when {
+            align == "STRETCH" && layoutMode == keys.counterMode -> "FILL"
+            layoutMode == keys.targetMode && primarySizing == "AUTO" -> "HUG"
+            layoutMode == keys.counterMode && counterSizing == "AUTO" -> "HUG"
+            else -> "FIXED"
+        }
     }
 
     private fun extractLayoutSizing(
         nodeObj: JsonObject,
-        primaryKey: String,
-        aliasKey: String,
         layoutMode: String,
-        targetMode: String,
-        counterMode: String
+        keys: LayoutSizingKeys
     ): String {
-        val explicit = nodeObj[primaryKey].asString()?.uppercase()
-            ?: nodeObj[aliasKey].asString()?.uppercase()
+        val explicit = nodeObj[keys.primaryKey].asString()?.uppercase()
+            ?: nodeObj[keys.aliasKey].asString()?.uppercase()
         if (explicit != null) {
             return if (explicit in VALID_SIZINGS) explicit else "FIXED"
         }
-        val align = nodeObj["layoutAlign"].asString()?.uppercase()
-        val primarySizing = nodeObj["primaryAxisSizingMode"].asString()?.uppercase()
-        val counterSizing = nodeObj["counterAxisSizingMode"].asString()?.uppercase()
-        val fallback = resolveFallbackSizing(align, primarySizing, counterSizing, layoutMode, targetMode, counterMode)
+        val fallback = resolveFallbackSizing(nodeObj, layoutMode, keys)
         return if (fallback in VALID_SIZINGS) fallback else "FIXED"
     }
 
@@ -425,10 +445,14 @@ class FigmaSnapshotExtractor {
     private fun extractAutoLayout(nodeObj: JsonObject): AutoLayoutFlex {
         val layoutMode = nodeObj["layoutMode"].asString()?.uppercase() ?: "NONE"
         val sizingH = extractLayoutSizing(
-            nodeObj, "layoutSizingHorizontal", "sizingHorizontal", layoutMode, "HORIZONTAL", "VERTICAL"
+            nodeObj,
+            layoutMode,
+            LayoutSizingKeys("layoutSizingHorizontal", "sizingHorizontal", "HORIZONTAL", "VERTICAL")
         )
         val sizingV = extractLayoutSizing(
-            nodeObj, "layoutSizingVertical", "sizingVertical", layoutMode, "VERTICAL", "HORIZONTAL"
+            nodeObj,
+            layoutMode,
+            LayoutSizingKeys("layoutSizingVertical", "sizingVertical", "VERTICAL", "HORIZONTAL")
         )
         val textAutoResize = nodeObj["textAutoResize"].asString()?.uppercase() ?: "NONE"
 
