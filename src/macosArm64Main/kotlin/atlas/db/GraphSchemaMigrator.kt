@@ -7,11 +7,38 @@ import atlas.util.PlatformFiles
  */
 internal object GraphSchemaMigrator {
 
+    private const val CURRENT_SCHEMA_VERSION = 8
+
+    private fun readUserVersion(db: NativeSqliteDatabase): Int {
+        val stmt = db.prepare("PRAGMA user_version;")
+        try {
+            return if (stmt.step()) stmt.columnInt(0) else 0
+        } finally {
+            stmt.close()
+        }
+    }
+
+    private fun hasInitializedSchema(db: NativeSqliteDatabase): Boolean {
+        val stmt = db.prepare(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('files', 'nodes', 'edges', 'compose_nodes');"
+        )
+        try {
+            return stmt.step() && stmt.columnInt(0) == 4
+        } finally {
+            stmt.close()
+        }
+    }
+
     fun initSchema(db: NativeSqliteDatabase) {
+        if (readUserVersion(db) == CURRENT_SCHEMA_VERSION && hasInitializedSchema(db)) {
+            db.exec("PRAGMA synchronous = NORMAL;")
+            return
+        }
         migrateLegacySchema(db)
         db.exec(SCHEMA_DDL)
         migrateComposeSchema(db)
         migrateNodesSchema(db)
+        db.exec("PRAGMA user_version = $CURRENT_SCHEMA_VERSION;")
     }
 
     fun migrateComposeSchema(db: NativeSqliteDatabase) {

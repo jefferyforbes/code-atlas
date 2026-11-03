@@ -681,27 +681,51 @@ class ComposeStabilityExtractor {
         precomputedClassStability: Map<String, Pair<String, String>> = emptyMap()
     ): ExtractionBundle {
         val masked = PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "kotlin")
-        val lineOffsets = buildLineOffsets(sourceText)
-        val pkg = PACKAGE_RE.find(masked)?.groupValues?.get(1)?.trim() ?: ""
-        val sourceSet = detectKmpSourceSet(relPath)
-        val fileId = "$projectSlug:$relPath"
-
         val localClassStability = analyzeLocalClasses(
             sourceText, masked, stabilityPatterns, workspaceNodes, precomputedClassStability
         )
+        return extractWithPrecomputedStability(
+            PrecomputedComposeInput(
+                projectSlug = projectSlug,
+                relPath = relPath,
+                sourceText = sourceText,
+                masked = masked,
+                stabilityPatterns = stabilityPatterns,
+                localClassStability = localClassStability,
+                workspaceNodes = workspaceNodes
+            )
+        )
+    }
+
+    internal data class PrecomputedComposeInput(
+        val projectSlug: String,
+        val relPath: String,
+        val sourceText: String,
+        val masked: String,
+        val stabilityPatterns: List<Regex>,
+        val localClassStability: Map<String, Pair<String, String>>,
+        val workspaceNodes: List<GraphNode> = emptyList()
+    )
+
+    internal fun extractWithPrecomputedStability(input: PrecomputedComposeInput): ExtractionBundle {
+        val masked = input.masked
+        val lineOffsets = buildLineOffsets(input.sourceText)
+        val pkg = PACKAGE_RE.find(masked)?.groupValues?.get(1)?.trim() ?: ""
+        val sourceSet = detectKmpSourceSet(input.relPath)
+        val fileId = "${input.projectSlug}:${input.relPath}"
         val hasPreviewInFile = PREVIEW_ANNOTATION_RE.containsMatchIn(masked)
         val fileCtx = ComposeFileContext(
-            sourceText = sourceText,
+            sourceText = input.sourceText,
             masked = masked,
             lineOffsets = lineOffsets,
             fileId = fileId,
-            projectSlug = projectSlug,
-            relPath = relPath,
+            projectSlug = input.projectSlug,
+            relPath = input.relPath,
             pkg = pkg,
             sourceSet = sourceSet,
-            stabilityPatterns = stabilityPatterns,
-            localClassStability = localClassStability,
-            workspaceNodes = workspaceNodes,
+            stabilityPatterns = input.stabilityPatterns,
+            localClassStability = input.localClassStability,
+            workspaceNodes = input.workspaceNodes,
             hasPreviewInFile = hasPreviewInFile
         )
 
@@ -714,7 +738,7 @@ class ComposeStabilityExtractor {
             composeNodes.add(record)
         }
 
-        extractFilePropertyMutations(fileId, projectSlug, masked, lineOffsets, composeEdges)
+        extractFilePropertyMutations(fileId, input.projectSlug, masked, lineOffsets, composeEdges)
 
         return ExtractionBundle(
             nodes = composeNodes,

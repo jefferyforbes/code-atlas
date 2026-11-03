@@ -3,6 +3,7 @@ package atlas.engine
 import atlas.bridge.VaultPlanBridge
 import atlas.db.SqliteGraphStore
 import atlas.extract.ComposeStabilityExtractor
+import atlas.extract.ComposeTypeStabilityAnalyzer
 import atlas.extract.ModuleBoundaryDetector
 import atlas.extract.PolyglotAstExtractor
 import atlas.extract.SemioticLayerClassifier
@@ -393,25 +394,35 @@ class WorkspaceIndexer(
         scan: ScanCollector,
         mergedNodeMap: MutableMap<String, GraphNode>
     ): Pair<List<ComposeNodeRecord>, List<ComposeParamRecord>> {
+        if (scan.pendingKotlinComposeFiles.isEmpty()) return Pair(emptyList(), emptyList())
         val workspaceNodesSnapshot = mergedNodeMap.values.toList()
-        val precomputedStability = mutableMapOf<String, Pair<String, String>>()
-        for ((_, sourceText, _) in scan.pendingKotlinComposeFiles) {
+        val rawStability = mutableMapOf<String, Pair<String, String>>()
+        val maskedByRel = HashMap<String, String>(scan.pendingKotlinComposeFiles.size)
+        for ((relStr, sourceText, _) in scan.pendingKotlinComposeFiles) {
             val masked = PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "kotlin")
-            precomputedStability.putAll(composeExtractor.analyzeClassesInSource(sourceText, masked, stabilityPatterns))
+            maskedByRel[relStr] = masked
+            rawStability.putAll(composeExtractor.analyzeClassesInSource(sourceText, masked, stabilityPatterns))
         }
+        val precomputedStability = ComposeTypeStabilityAnalyzer.buildWorkspaceClassStability(
+            workspaceNodesSnapshot,
+            rawStability,
+            stabilityPatterns
+        )
 
         val allNewComposeNodes = mutableListOf<ComposeNodeRecord>()
         val allNewComposeParams = mutableListOf<ComposeParamRecord>()
         for ((relStr, sourceText, baseEdges) in scan.pendingKotlinComposeFiles) {
             val fileId = "${ctx.projectId}:$relStr"
             store.deleteComposeNodesForFile(ctx.projectId, relStr)
-            val bundle = composeExtractor.extractKotlinFile(
-                projectSlug = ctx.projectId,
-                relPath = relStr,
-                sourceText = sourceText,
-                stabilityPatterns = stabilityPatterns,
-                workspaceNodes = workspaceNodesSnapshot,
-                precomputedClassStability = precomputedStability
+            val bundle = composeExtractor.extractWithPrecomputedStability(
+                ComposeStabilityExtractor.PrecomputedComposeInput(
+                    projectSlug = ctx.projectId,
+                    relPath = relStr,
+                    sourceText = sourceText,
+                    masked = maskedByRel[relStr] ?: PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "kotlin"),
+                    stabilityPatterns = stabilityPatterns,
+                    localClassStability = precomputedStability
+                )
             )
             if (isComposeSourceFile(bundle, sourceText)) {
                 allNewComposeNodes.addAll(bundle.nodes)
@@ -553,57 +564,64 @@ class WorkspaceIndexer(
             cachedFiles = cachedFiles,
             filesWithRawEdges = filesWithRawEdges
         )
-        val scan = scanWorkspaceFiles(scanCtx)
-        val filesDeleted = purgeDeletedFiles(projectId, root, cachedFiles, scan.validDiskFiles, normalizedSubpaths)
+        val scan = store.withSavepoint("sp_scan_workspace") {
+            val s = scanWorkspaceFiles(scanCtx)
+            val deleted = purgeDeletedFiles(projectId, root, cachedFiles, s.validDiskFiles, normalizedSubpaths)
+            Pair(s, deleted)
+        }
+        val scanResult = scan.first
+        val filesDeleted = scan.second
 
-        if (!effectiveForce && scan.filesIndexed == 0 && filesDeleted == 0 && cachedFiles.isNotEmpty()) {
-            return buildStatsResponse(projectId, 0, scan.filesSkipped)
+        if (!effectiveForce && scanResult.filesIndexed == 0 && filesDeleted == 0 && cachedFiles.isNotEmpty()) {
+            return buildStatsResponse(projectId, 0, scanResult.filesSkipped)
         }
 
-        val mergedNodeMap = store.listNodes(projectId).associateBy { it.nodeId }.toMutableMap()
-        for (n in modNodes) mergedNodeMap[n.nodeId] = n
-        for (n in scan.changedNodes) mergedNodeMap[n.nodeId] = n
+        return store.withSavepoint("sp_finalize_index") {
+            val mergedNodeMap = store.listNodes(projectId).associateBy { it.nodeId }.toMutableMap()
+            for (n in modNodes) mergedNodeMap[n.nodeId] = n
+            for (n in scanResult.changedNodes) mergedNodeMap[n.nodeId] = n
 
-        val (allNewComposeNodes, allNewComposeParams) = processComposeFiles(
-            ctx = scanCtx,
-            stabilityPatterns = stabilityPatterns,
-            scan = scan,
-            mergedNodeMap = mergedNodeMap
-        )
+            val (allNewComposeNodes, allNewComposeParams) = processComposeFiles(
+                ctx = scanCtx,
+                stabilityPatterns = stabilityPatterns,
+                scan = scanResult,
+                mergedNodeMap = mergedNodeMap
+            )
 
-        val combinedNodes = mergedNodeMap.values.toList()
-        val (resolvedEdges, kmpEdges) = resolveWorkspaceEdges(
-            projectId = projectId,
-            combinedNodes = combinedNodes,
-            pendingRawEdges = scan.pendingRawEdges,
-            allNewComposeNodes = allNewComposeNodes,
-            allNewComposeParams = allNewComposeParams
-        )
+            val combinedNodes = mergedNodeMap.values.toList()
+            val (resolvedEdges, kmpEdges) = resolveWorkspaceEdges(
+                projectId = projectId,
+                combinedNodes = combinedNodes,
+                pendingRawEdges = scanResult.pendingRawEdges,
+                allNewComposeNodes = allNewComposeNodes,
+                allNewComposeParams = allNewComposeParams
+            )
 
-        reevaluateMarkdownFiles(
-            ctx = scanCtx,
-            scan = scan,
-            reEvaluate = scan.codeFilesIndexed > 0 || filesDeleted > 0
-        )
+            reevaluateMarkdownFiles(
+                ctx = scanCtx,
+                scan = scanResult,
+                reEvaluate = scanResult.codeFilesIndexed > 0 || filesDeleted > 0
+            )
 
-        val docNodes = mutableListOf<GraphNode>()
-        val docEdges = mutableListOf<GraphEdge>()
-        for ((relMd, mdText) in scan.markdownQueue) {
-            val (dNodes, dEdges) = VaultPlanBridge.extractMarkdownAndPlans(projectId, relMd, mdText, combinedNodes)
-            docNodes.addAll(dNodes)
-            docEdges.addAll(dEdges)
+            val docNodes = mutableListOf<GraphNode>()
+            val docEdges = mutableListOf<GraphEdge>()
+            for ((relMd, mdText) in scanResult.markdownQueue) {
+                val (dNodes, dEdges) = VaultPlanBridge.extractMarkdownAndPlans(projectId, relMd, mdText, combinedNodes)
+                docNodes.addAll(dNodes)
+                docEdges.addAll(dEdges)
+            }
+
+            val endpointNodes = extractEndpoints(projectId, resolvedEdges, docEdges)
+
+            store.upsertNodesAndEdges(
+                projectId = projectId,
+                nodes = modNodes + scanResult.changedNodes.distinctBy { it.nodeId } + docNodes.distinctBy { it.nodeId } + endpointNodes,
+                edges = modEdges + resolvedEdges + kmpEdges + docEdges
+            )
+            store.setProjectMetadata(projectId, "extractor_version", PolyglotAstExtractor.EXTRACTOR_VERSION)
+
+            buildStatsResponse(projectId, scanResult.filesIndexed, scanResult.filesSkipped)
         }
-
-        val endpointNodes = extractEndpoints(projectId, resolvedEdges, docEdges)
-
-        store.upsertNodesAndEdges(
-            projectId = projectId,
-            nodes = modNodes + scan.changedNodes.distinctBy { it.nodeId } + docNodes.distinctBy { it.nodeId } + endpointNodes,
-            edges = modEdges + resolvedEdges + kmpEdges + docEdges
-        )
-        store.setProjectMetadata(projectId, "extractor_version", PolyglotAstExtractor.EXTRACTOR_VERSION)
-
-        return buildStatsResponse(projectId, scan.filesIndexed, scan.filesSkipped)
     }
 
     /**

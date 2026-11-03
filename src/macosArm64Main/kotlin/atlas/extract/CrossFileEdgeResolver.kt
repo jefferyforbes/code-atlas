@@ -11,8 +11,30 @@ internal object CrossFileEdgeResolver {
     private class NodeLookupIndex(
         val byName: Map<String, List<GraphNode>>,
         val byQName: Map<String, GraphNode>,
-        val byNodeId: Map<String, GraphNode>
-    )
+        val byNodeId: Map<String, GraphNode>,
+        private val simpleNames: MutableMap<String, String> = mutableMapOf(),
+        private val tokenSets: MutableMap<String, Set<String>> = mutableMapOf(),
+        private val receiverTokens: MutableMap<String, Set<String>> = mutableMapOf()
+    ) {
+        fun simpleNameOf(cand: GraphNode): String =
+            simpleNames.getOrPut(cand.fileId) {
+                cand.fileId.substringAfterLast('/').substringBeforeLast('.')
+            }
+
+        fun tokensOf(cand: GraphNode, candSimpleName: String): Set<String> =
+            tokenSets.getOrPut(cand.nodeId) {
+                val set = LinkedHashSet<String>()
+                set.addAll(NameSegmentTokenizer.tokenize(candSimpleName))
+                set.addAll(NameSegmentTokenizer.tokenize(cand.name))
+                set.addAll(NameSegmentTokenizer.tokenize(cand.qualifiedName))
+                set
+            }
+
+        fun tokensOfReceiver(clean: String): Set<String> =
+            receiverTokens.getOrPut(clean) {
+                NameSegmentTokenizer.tokenize(clean).toSet()
+            }
+    }
 
     private data class DisambiguationContext(
         val srcNode: GraphNode?,
@@ -114,45 +136,40 @@ internal object CrossFileEdgeResolver {
             qn.endsWith(".$clean", ignoreCase = true)
     }
 
-    private fun scoreTokenOverlap(clean: String, candSimpleName: String, candName: String, qn: String): Double {
-        val recTokens = NameSegmentTokenizer.tokenize(clean).toSet()
+    private fun scoreTokenOverlap(
+        recTokens: Set<String>,
+        candTokens: Set<String>
+    ): Double {
         if (recTokens.isEmpty()) return 0.0
-
-        val candTokens = (
-            NameSegmentTokenizer.tokenize(candSimpleName) +
-            NameSegmentTokenizer.tokenize(candName) +
-            NameSegmentTokenizer.tokenize(qn)
-        ).toSet()
-
         val tokenMatches = recTokens.count { it in candTokens }
         if (tokenMatches == 0) return 0.0
-
         val fraction = tokenMatches.toDouble() / recTokens.size
         return fraction * 40.0
     }
 
     private fun scoreReceiverCandidate(
         cand: GraphNode,
-        receiver: String?,
-        srcFileId: String
+        cleanReceiver: String,
+        srcFileId: String,
+        index: NodeLookupIndex
     ): Double {
-        if (receiver.isNullOrBlank()) return 0.0
-        val clean = receiver.trim()
-
-        val specialScore = scoreSpecialReceiver(clean, cand.fileId, srcFileId)
+        val specialScore = scoreSpecialReceiver(cleanReceiver, cand.fileId, srcFileId)
         if (specialScore != null) return specialScore
 
-        val candSimpleName = cand.fileId.substringAfterLast('/').substringBeforeLast('.')
+        val candSimpleName = index.simpleNameOf(cand)
         val qn = cand.qualifiedName
 
-        if (isExactReceiverMatch(clean, candSimpleName, cand.name, qn)) {
+        if (isExactReceiverMatch(cleanReceiver, candSimpleName, cand.name, qn)) {
             return 100.0
         }
-        if (qn.contains(clean, ignoreCase = true) || cand.signature.contains(clean, ignoreCase = true)) {
+        if (qn.contains(cleanReceiver, ignoreCase = true) || cand.signature.contains(cleanReceiver, ignoreCase = true)) {
             return 60.0
         }
 
-        return scoreTokenOverlap(clean, candSimpleName, cand.name, qn)
+        val recTokens = index.tokensOfReceiver(cleanReceiver)
+        if (recTokens.isEmpty()) return 0.0
+        val candTokens = index.tokensOf(cand, candSimpleName)
+        return scoreTokenOverlap(recTokens, candTokens)
     }
 
     private fun extractSymbolReceiver(sym: String): String? = when {
@@ -164,13 +181,18 @@ internal object CrossFileEdgeResolver {
     private fun resolveReceiverMatches(
         candidates: List<GraphNode>,
         receiver: String?,
-        srcFileId: String
+        srcFileId: String,
+        index: NodeLookupIndex
     ): List<GraphNode> {
-        if (receiver == null) return emptyList()
-        val scored = candidates.map { cand ->
-            cand to scoreReceiverCandidate(cand, receiver, srcFileId)
+        val cleanReceiver = receiver?.trim().orEmpty()
+        if (cleanReceiver.isEmpty()) return emptyList()
+        var maxScore = 0.0
+        val scored = ArrayList<Pair<GraphNode, Double>>(candidates.size)
+        for (cand in candidates) {
+            val s = scoreReceiverCandidate(cand, cleanReceiver, srcFileId, index)
+            if (s > maxScore) maxScore = s
+            scored.add(cand to s)
         }
-        val maxScore = scored.maxOfOrNull { it.second } ?: 0.0
         if (maxScore <= 0.0) return emptyList()
         return scored.filter { it.second == maxScore }.map { it.first }
     }
@@ -284,7 +306,7 @@ internal object CrossFileEdgeResolver {
         val ctx = DisambiguationContext(srcNode, srcFileId, srcModId, fileImports)
 
         val receiver = extractSymbolReceiver(sym)
-        val receiverMatches = resolveReceiverMatches(candidates, receiver, srcFileId)
+        val receiverMatches = resolveReceiverMatches(candidates, receiver, srcFileId, index)
         val candidatePool = if (receiverMatches.isNotEmpty()) receiverMatches else candidates
         val chosenPool = selectCandidatePool(candidatePool, receiverMatches, candidates, ctx)
         val chosen = pickBestCandidate(chosenPool)

@@ -29,9 +29,6 @@ internal object KotlinAstExtractor {
         RegexOption.MULTILINE
     )
 
-    private val INFIX_CALL_RE = Regex(
-        """(?<=\s|[)\]a-zA-Z0-9_])\s+(?<callee>[a-zA-Z_][a-zA-Z0-9_]{1,})\s+(?=[A-Za-z0-9_"'(\[])"""
-    )
     private val INFIX_STOPWORDS = setOf(
         "val", "var", "fun", "class", "interface", "object", "package", "import",
         "return", "throw", "if", "else", "when", "for", "while", "do", "try", "catch", "finally",
@@ -40,6 +37,22 @@ internal object KotlinAstExtractor {
         "inline", "noinline", "crossinline", "suspend", "expect", "actual", "const", "lateinit",
         "override", "private", "protected", "public", "internal", "operator", "infix", "tailrec", "external"
     )
+
+    private fun isInfixPrecedingChar(c: Char): Boolean =
+        c.isWhitespace() || c.isLetterOrDigit() || c == ')' || c == ']' || c == '_'
+
+    private fun isInfixRhsStartChar(c: Char): Boolean =
+        c.isLetterOrDigit() || c == '_' || c == '"' || c == '\'' || c == '(' || c == '['
+
+    private fun isIdentifierStart(c: Char): Boolean = c.isLetter() || c == '_'
+
+    private fun isIdentifierPart(c: Char): Boolean = c.isLetterOrDigit() || c == '_'
+
+    private fun skipHorizontalAndVerticalWhitespace(text: String, from: Int): Int {
+        var i = from
+        while (i < text.length && text[i].isWhitespace()) i++
+        return i
+    }
 
     private val LOCAL_VAL_COLON_RE = Regex("""(?:val|var)\s+([A-Za-z0-9_$]+)\s*:\s*([A-Z][A-Za-z0-9_$.]*)""")
     private val LOCAL_VAL_ASSIGN_RE = Regex("""(?:val|var)\s+([A-Za-z0-9_$]+)\s*=\s*([A-Z][A-Za-z0-9_$.]*)\s*(?:<[^>]+>)?\s*\(""")
@@ -168,10 +181,12 @@ internal object KotlinAstExtractor {
         return parseSupertypeEntries(parts)
     }
 
-    private fun extractKotlinImports(maskedText: String): List<Pair<String, Int>> =
-        KT_IMP_RE.findAll(maskedText).map { match ->
-            Pair(match.groupValues[1], PolyglotAstExtractor.lineNumberAtOffset(maskedText, match.range.first))
+    private fun extractKotlinImports(maskedText: String): List<Pair<String, Int>> {
+        val cursor = MonotonicLineCursor(maskedText, 1)
+        return KT_IMP_RE.findAll(maskedText).map { match ->
+            Pair(match.groupValues[1], cursor.lineAt(match.range.first))
         }.toList()
+    }
 
     private fun extractKotlinReceiverTypes(
         text: String,
@@ -223,9 +238,6 @@ internal object KotlinAstExtractor {
         return Triple(kw, name, modTokens)
     }
 
-    private fun lineNumberOfOffset(text: String, offset: Int): Int =
-        PolyglotAstExtractor.lineNumberAtOffset(text, offset)
-
     private fun resolveDeclStartOffset(m: MatchResult): Int {
         val modGroup = m.groups["modifiers"]
         if (modGroup != null && modGroup.value.isNotEmpty()) {
@@ -236,13 +248,13 @@ internal object KotlinAstExtractor {
 
     private fun resolveKotlinDeclLines(
         match: MatchResult,
-        maskedText: String,
+        cursor: MonotonicLineCursor,
         lines: List<String>,
         cleanLines: List<String>
     ): Triple<Int, Int, Int> {
-        val matchStartLine = lineNumberOfOffset(maskedText, match.range.first)
+        val matchStartLine = cursor.lineAt(match.range.first)
         val declStartOffset = resolveDeclStartOffset(match)
-        val startLine = lineNumberOfOffset(maskedText, declStartOffset)
+        val startLine = cursor.lineAt(declStartOffset)
         val endLine = PolyglotAstExtractor.findBlockEndLine(lines, startLine, cleanLines)
         return Triple(matchStartLine, startLine, endLine)
     }
@@ -313,6 +325,24 @@ internal object KotlinAstExtractor {
         return Pair(targetSym, provenance)
     }
 
+    private class MonotonicLineCursor(val body: String, var currentLine: Int) {
+        private var lastPos: Int = 0
+
+        fun lineAt(offset: Int): Int {
+            val clamped = offset.coerceIn(0, body.length)
+            for (k in lastPos until clamped) {
+                if (body[k] == '\n') currentLine++
+            }
+            lastPos = clamped
+            return currentLine
+        }
+    }
+
+    private fun isStandardCallEligible(nodeName: String, receiver: String?, callee: String): Boolean {
+        val isSelf = callee == nodeName && (receiver.isNullOrEmpty() || receiver == "this")
+        return !isSelf && callee !in PolyglotAstExtractor.CALL_STOPWORDS
+    }
+
     private fun extractKotlinStandardCallEdges(
         node: GraphNode,
         body: String,
@@ -320,15 +350,15 @@ internal object KotlinAstExtractor {
         seenCallees: MutableSet<String>,
         edges: MutableList<GraphEdge>
     ) {
+        val cursor = MonotonicLineCursor(body, node.startLine)
         for (callMatch in PolyglotAstExtractor.CALL_RE.findAll(body)) {
             val receiver = callMatch.groups["receiver"]?.value?.trim()
             val callee = callMatch.groups["callee"]?.value ?: continue
-            val isSelf = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
-            if (isSelf || callee in PolyglotAstExtractor.CALL_STOPWORDS) continue
+            if (!isStandardCallEligible(node.name, receiver, callee)) continue
 
             val (targetSym, provenance) = resolveCallTargetAndProvenance(receiver, callee, localReceiverTypes)
             if (seenCallees.add(targetSym)) {
-                val callLine = node.startLine + PolyglotAstExtractor.countNewlinesBefore(body, callMatch.range.first)
+                val callLine = cursor.lineAt(callMatch.range.first)
                 edges.add(
                     GraphEdge(
                         edgeId = "${node.nodeId}:call:$targetSym:$callLine",
@@ -345,29 +375,70 @@ internal object KotlinAstExtractor {
         }
     }
 
+    private fun scanIdentifierBounds(body: String, wsStart: Int): Pair<Int, Int>? {
+        val idStart = skipHorizontalAndVerticalWhitespace(body, wsStart)
+        if (idStart >= body.length || !isIdentifierStart(body[idStart])) return null
+        var idEnd = idStart + 1
+        while (idEnd < body.length && isIdentifierPart(body[idEnd])) idEnd++
+        return if (idEnd - idStart >= 2) Pair(idStart, idEnd) else null
+    }
+
+    private fun hasValidInfixRhs(body: String, idEnd: Int): Boolean {
+        if (idEnd >= body.length || !body[idEnd].isWhitespace()) return false
+        val rhsStart = skipHorizontalAndVerticalWhitespace(body, idEnd)
+        return rhsStart < body.length && isInfixRhsStartChar(body[rhsStart])
+    }
+
+    private fun matchInfixTokenAt(body: String, wsStart: Int): Triple<String, Int, Int>? {
+        val validLeft = wsStart in 1 until body.length && body[wsStart].isWhitespace() && isInfixPrecedingChar(body[wsStart - 1])
+        if (!validLeft) return null
+        val (idStart, idEnd) = scanIdentifierBounds(body, wsStart) ?: return null
+        if (!hasValidInfixRhs(body, idEnd)) return null
+        return Triple(body.substring(idStart, idEnd), wsStart, idEnd)
+    }
+
+    private fun isInfixCalleeEligible(nodeName: String, callee: String): Boolean =
+        callee != nodeName && callee !in INFIX_STOPWORDS && callee !in PolyglotAstExtractor.CALL_STOPWORDS
+
+    private fun recordInfixEdgeIfNew(
+        node: GraphNode,
+        callee: String,
+        matchStart: Int,
+        cursor: MonotonicLineCursor,
+        seenCallees: MutableSet<String>,
+        edges: MutableList<GraphEdge>
+    ) {
+        if (!isInfixCalleeEligible(node.name, callee) || !seenCallees.add(callee)) return
+        val callLine = cursor.lineAt(matchStart)
+        edges.add(
+            GraphEdge(
+                edgeId = "${node.nodeId}:infix:$callee:$callLine",
+                projectId = node.projectId,
+                sourceNodeId = node.nodeId,
+                targetNodeId = "sym:$callee",
+                edgeType = "CALLS",
+                provenance = "INFERRED_INFIX_CALL",
+                confidence = 0.85,
+                lineNumber = callLine
+            )
+        )
+    }
+
     private fun extractKotlinInfixCallEdges(
         node: GraphNode,
         body: String,
         seenCallees: MutableSet<String>,
         edges: MutableList<GraphEdge>
     ) {
-        for (infixMatch in INFIX_CALL_RE.findAll(body)) {
-            val callee = infixMatch.groups["callee"]?.value ?: continue
-            val isIgnored = callee == node.name || callee in INFIX_STOPWORDS || callee in PolyglotAstExtractor.CALL_STOPWORDS
-            if (!isIgnored && seenCallees.add(callee)) {
-                val callLine = node.startLine + PolyglotAstExtractor.countNewlinesBefore(body, infixMatch.range.first)
-                edges.add(
-                    GraphEdge(
-                        edgeId = "${node.nodeId}:infix:$callee:$callLine",
-                        projectId = node.projectId,
-                        sourceNodeId = node.nodeId,
-                        targetNodeId = "sym:$callee",
-                        edgeType = "CALLS",
-                        provenance = "INFERRED_INFIX_CALL",
-                        confidence = 0.85,
-                        lineNumber = callLine
-                    )
-                )
+        val cursor = MonotonicLineCursor(body, node.startLine)
+        var pos = 1
+        while (pos < body.length) {
+            val matched = if (body[pos].isWhitespace()) matchInfixTokenAt(body, pos) else null
+            if (matched == null) {
+                pos++
+            } else {
+                recordInfixEdgeIfNew(node, matched.first, matched.second, cursor, seenCallees, edges)
+                pos = matched.third
             }
         }
     }
@@ -455,21 +526,26 @@ internal object KotlinAstExtractor {
         }
     }
 
+    private data class KotlinDeclParseState(
+        val ctx: PolyglotAstExtractor.FileExtractionContext,
+        val pkgName: String,
+        val cursor: MonotonicLineCursor,
+        val scopeStack: MutableList<PolyglotAstExtractor.ScopeEntry>,
+        val edges: MutableList<GraphEdge>
+    )
+
     private fun processSingleKotlinDeclaration(
         match: MatchResult,
-        ctx: PolyglotAstExtractor.FileExtractionContext,
-        pkgName: String,
-        scopeStack: MutableList<PolyglotAstExtractor.ScopeEntry>,
-        edges: MutableList<GraphEdge>
+        state: KotlinDeclParseState
     ): Pair<GraphNode, Boolean>? {
         val (kw, name, modTokens) = extractKotlinDeclHeader(match) ?: return null
         val annotations = match.groups["annotations"]?.value ?: ""
-        val (matchStartLine, startLine, endLine) = resolveKotlinDeclLines(match, ctx.maskedText, ctx.lines, ctx.cleanLines)
-        PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
+        val (matchStartLine, startLine, endLine) = resolveKotlinDeclLines(match, state.cursor, state.ctx.lines, state.ctx.cleanLines)
+        PolyglotAstExtractor.pruneScopeStack(state.scopeStack, startLine)
 
-        val isTopLevel = scopeStack.isEmpty()
+        val isTopLevel = state.scopeStack.isEmpty()
         val isPublicTop = isPublicTopLevel(isTopLevel, modTokens, kw)
-        val enclosingPrefix = scopeStack.joinToString(".") { it.name }
+        val enclosingPrefix = state.scopeStack.joinToString(".") { it.name }
         val decl = KotlinDeclSpec(
             name = name,
             kw = kw,
@@ -481,9 +557,9 @@ internal object KotlinAstExtractor {
             matchStartLine = matchStartLine,
             isTopLevel = isTopLevel
         )
-        val node = buildKotlinNode(ctx = ctx, pkgName = pkgName, decl = decl)
-        addKotlinEdges(node.nodeId, decl, ctx, edges)
-        pushScopeEntryIfContainer(kw, name, startLine, endLine, scopeStack)
+        val node = buildKotlinNode(ctx = state.ctx, pkgName = state.pkgName, decl = decl)
+        addKotlinEdges(node.nodeId, decl, state.ctx, state.edges)
+        pushScopeEntryIfContainer(kw, name, startLine, endLine, state.scopeStack)
         return Pair(node, isPublicTop)
     }
 
@@ -493,13 +569,17 @@ internal object KotlinAstExtractor {
         edges: MutableList<GraphEdge>
     ): Pair<List<GraphNode>, Int> {
         val nodes = mutableListOf<GraphNode>()
-        val scopeStack = mutableListOf<PolyglotAstExtractor.ScopeEntry>()
+        val state = KotlinDeclParseState(
+            ctx = ctx,
+            pkgName = pkgName,
+            cursor = MonotonicLineCursor(ctx.maskedText, 1),
+            scopeStack = mutableListOf(),
+            edges = edges
+        )
         var topLevelCount = 0
 
         for (match in KT_DECL_RE.findAll(ctx.maskedText)) {
-            val (node, isPublicTop) = processSingleKotlinDeclaration(
-                match, ctx, pkgName, scopeStack, edges
-            ) ?: continue
+            val (node, isPublicTop) = processSingleKotlinDeclaration(match, state) ?: continue
             nodes.add(node)
             if (isPublicTop) topLevelCount++
         }

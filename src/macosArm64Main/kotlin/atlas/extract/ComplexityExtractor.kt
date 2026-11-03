@@ -30,7 +30,7 @@ object ComplexityExtractor {
 
     private val LOGICAL_OP_RE = Regex("""&&|\|\|""")
     private val ELVIS_OP_RE = Regex("""\?:""")
-    private val TERNARY_OP_RE = Regex("""(?<=\S)\s+\?\s+[^:?]+\s+:""")
+    private val TERNARY_OP_RE = Regex("""\S\s+\?\s+[^:?]+\s+:""")
     private val FN_KEYWORD_RE = Regex("""\b(?:fun|def|func|fn|constructor|function)\b""")
 
     fun calculate(

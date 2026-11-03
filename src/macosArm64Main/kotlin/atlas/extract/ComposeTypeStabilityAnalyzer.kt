@@ -45,7 +45,9 @@ internal object ComposeTypeStabilityAnalyzer {
     private val CTOR_VAR_RE = Regex("""\bvar\s+([A-Za-z_][A-Za-z0-9_]*)\s*:""")
     private val RAW_COLLECTION_PROP_RE = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map|MutableList|MutableSet|MutableMap)<""")
     private val WORKSPACE_COLLECTION_PROP_RE = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map)<""")
-    private val CLASS_DECL_RE = Regex("""((?:@(?:Immutable|Stable)\b[\s\S]*?)?)\b(data\s+class|value\s+class|enum\s+class|sealed\s+interface|sealed\s+class|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*(\([^)]*\))?""")
+    private val CLASS_DECL_RE = Regex(
+        """((?:@(?:Immutable|Stable)\b(?:[ \t\r\n]+|@[A-Za-z0-9_]+(?:\([^)]*\))?)*)?)\b(data\s+class|value\s+class|enum\s+class|sealed\s+interface|sealed\s+class|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*(\([^)]*\))?"""
+    )
     private val WHITESPACE_RE = Regex("""\s+""")
 
     fun analyzeClassesInSource(
@@ -68,17 +70,13 @@ internal object ComposeTypeStabilityAnalyzer {
         return result
     }
 
-    fun analyzeLocalClasses(
-        maskedText: String,
-        stabilityPatterns: List<Regex>,
+    fun buildWorkspaceClassStability(
         workspaceNodes: List<GraphNode>,
         precomputedClassStability: Map<String, Pair<String, String>>,
-        findBalancedCloseBrace: (String, Int) -> Int
+        stabilityPatterns: List<Regex>
     ): Map<String, Pair<String, String>> {
-        val result = mutableMapOf<String, Pair<String, String>>()
+        val result = HashMap<String, Pair<String, String>>(precomputedClassStability.size + 64)
         result.putAll(precomputedClassStability)
-        result.putAll(analyzeClassesInSource(maskedText, stabilityPatterns, findBalancedCloseBrace))
-
         for (wn in workspaceNodes) {
             if (wn.kind !in setOf("class", "interface") || wn.name in result) continue
             val stability = evaluateWorkspaceClassSignature(wn, stabilityPatterns)
@@ -87,6 +85,29 @@ internal object ComposeTypeStabilityAnalyzer {
             }
         }
         return result
+    }
+
+    fun analyzeLocalClasses(
+        maskedText: String,
+        stabilityPatterns: List<Regex>,
+        workspaceNodes: List<GraphNode>,
+        precomputedClassStability: Map<String, Pair<String, String>>,
+        findBalancedCloseBrace: (String, Int) -> Int
+    ): Map<String, Pair<String, String>> {
+        val localInFile = analyzeClassesInSource(maskedText, stabilityPatterns, findBalancedCloseBrace)
+        if (workspaceNodes.isEmpty()) {
+            if (localInFile.isEmpty()) return precomputedClassStability
+            val merged = HashMap<String, Pair<String, String>>(precomputedClassStability.size + localInFile.size)
+            merged.putAll(precomputedClassStability)
+            merged.putAll(localInFile)
+            return merged
+        }
+        val base = buildWorkspaceClassStability(workspaceNodes, precomputedClassStability, stabilityPatterns)
+        if (localInFile.isEmpty()) return base
+        val merged = HashMap<String, Pair<String, String>>(base.size + localInFile.size)
+        merged.putAll(base)
+        merged.putAll(localInFile)
+        return merged
     }
 
     internal data class TypeStabilityContext(
