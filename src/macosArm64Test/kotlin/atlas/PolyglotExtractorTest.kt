@@ -3,6 +3,7 @@ package atlas
 import atlas.extract.PolyglotAstExtractor
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class PolyglotExtractorTest {
@@ -101,5 +102,32 @@ class PolyglotExtractorTest {
         assertEquals(1, cppTopCount)
         assertTrue(cppNodes.any { it.name == "QueryPlanner" && it.kind == "class" })
         assertTrue(cppEdges.any { it.edgeType == "IMPORTS" && it.targetNodeId == "sym:engine.h" })
+    }
+
+    @Test
+    fun `extractFile extracts chained Kotlin infix call operators without false positive RHS operands`() {
+        val ktSource = """
+            package sample.infix
+
+            fun evaluateRules(lhs: Int, mid: Int, rhs: Int): Boolean {
+                val combined = lhs combineWith mid mergeInto rhs
+                val multiline = combined
+                    verifyAgainst rhs
+                return multiline
+            }
+        """.trimIndent()
+
+        val (_, edges, _) = PolyglotAstExtractor.extractFile("proj", "src/InfixSample.kt", ktSource)
+        val infixEdges = edges.filter { it.provenance == "INFERRED_INFIX_CALL" }
+        val infixTargets = infixEdges.map { it.targetNodeId }.toSet()
+
+        assertTrue("sym:combineWith" in infixTargets, "First chained infix operator must be extracted")
+        assertTrue("sym:mergeInto" in infixTargets, "Second chained infix operator must be extracted")
+        assertTrue("sym:verifyAgainst" in infixTargets, "Multiline infix operator must be extracted")
+        assertFalse("sym:mid" in infixTargets, "Intermediate RHS operand 'mid' must NOT be extracted as an infix operator")
+        assertFalse("sym:rhs" in infixTargets, "Terminal RHS operand 'rhs' must NOT be extracted as an infix operator")
+
+        val multilineEdge = infixEdges.first { it.targetNodeId == "sym:verifyAgainst" }
+        assertEquals(5, multilineEdge.lineNumber, "Line cursor must track multiline infix call position")
     }
 }

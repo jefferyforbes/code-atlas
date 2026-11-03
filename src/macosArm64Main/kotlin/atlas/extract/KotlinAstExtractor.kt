@@ -44,9 +44,11 @@ internal object KotlinAstExtractor {
     private fun isInfixRhsStartChar(c: Char): Boolean =
         c.isLetterOrDigit() || c == '_' || c == '"' || c == '\'' || c == '(' || c == '['
 
-    private fun isIdentifierStart(c: Char): Boolean = c.isLetter() || c == '_'
+    private fun isIdentifierStart(c: Char): Boolean =
+        c in 'a'..'z' || c in 'A'..'Z' || c == '_'
 
-    private fun isIdentifierPart(c: Char): Boolean = c.isLetterOrDigit() || c == '_'
+    private fun isIdentifierPart(c: Char): Boolean =
+        c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' || c == '_'
 
     private fun skipHorizontalAndVerticalWhitespace(text: String, from: Int): Int {
         var i = from
@@ -383,38 +385,42 @@ internal object KotlinAstExtractor {
         return if (idEnd - idStart >= 2) Pair(idStart, idEnd) else null
     }
 
-    private fun hasValidInfixRhs(body: String, idEnd: Int): Boolean {
-        if (idEnd >= body.length || !body[idEnd].isWhitespace()) return false
+    private fun findValidInfixRhsStart(body: String, idEnd: Int): Int? {
+        if (idEnd >= body.length || !body[idEnd].isWhitespace()) return null
         val rhsStart = skipHorizontalAndVerticalWhitespace(body, idEnd)
-        return rhsStart < body.length && isInfixRhsStartChar(body[rhsStart])
+        return if (rhsStart < body.length && isInfixRhsStartChar(body[rhsStart])) rhsStart else null
     }
 
     private fun matchInfixTokenAt(body: String, wsStart: Int): Triple<String, Int, Int>? {
         val validLeft = wsStart in 1 until body.length && body[wsStart].isWhitespace() && isInfixPrecedingChar(body[wsStart - 1])
         if (!validLeft) return null
         val (idStart, idEnd) = scanIdentifierBounds(body, wsStart) ?: return null
-        if (!hasValidInfixRhs(body, idEnd)) return null
-        return Triple(body.substring(idStart, idEnd), wsStart, idEnd)
+        val rhsStart = findValidInfixRhsStart(body, idEnd) ?: return null
+        return Triple(body.substring(idStart, idEnd), wsStart, rhsStart)
     }
 
     private fun isInfixCalleeEligible(nodeName: String, callee: String): Boolean =
         callee != nodeName && callee !in INFIX_STOPWORDS && callee !in PolyglotAstExtractor.CALL_STOPWORDS
 
+    private data class InfixEdgeContext(
+        val node: GraphNode,
+        val cursor: MonotonicLineCursor,
+        val seenCallees: MutableSet<String>,
+        val edges: MutableList<GraphEdge>
+    )
+
     private fun recordInfixEdgeIfNew(
-        node: GraphNode,
+        ctx: InfixEdgeContext,
         callee: String,
-        matchStart: Int,
-        cursor: MonotonicLineCursor,
-        seenCallees: MutableSet<String>,
-        edges: MutableList<GraphEdge>
+        matchStart: Int
     ) {
-        if (!isInfixCalleeEligible(node.name, callee) || !seenCallees.add(callee)) return
-        val callLine = cursor.lineAt(matchStart)
-        edges.add(
+        if (!isInfixCalleeEligible(ctx.node.name, callee) || !ctx.seenCallees.add(callee)) return
+        val callLine = ctx.cursor.lineAt(matchStart)
+        ctx.edges.add(
             GraphEdge(
-                edgeId = "${node.nodeId}:infix:$callee:$callLine",
-                projectId = node.projectId,
-                sourceNodeId = node.nodeId,
+                edgeId = "${ctx.node.nodeId}:infix:$callee:$callLine",
+                projectId = ctx.node.projectId,
+                sourceNodeId = ctx.node.nodeId,
                 targetNodeId = "sym:$callee",
                 edgeType = "CALLS",
                 provenance = "INFERRED_INFIX_CALL",
@@ -424,20 +430,23 @@ internal object KotlinAstExtractor {
         )
     }
 
+    private fun advanceInfixScanPosition(body: String, pos: Int): Int =
+        if (body[pos].isWhitespace()) skipHorizontalAndVerticalWhitespace(body, pos + 1) else pos + 1
+
     private fun extractKotlinInfixCallEdges(
         node: GraphNode,
         body: String,
         seenCallees: MutableSet<String>,
         edges: MutableList<GraphEdge>
     ) {
-        val cursor = MonotonicLineCursor(body, node.startLine)
+        val ctx = InfixEdgeContext(node, MonotonicLineCursor(body, node.startLine), seenCallees, edges)
         var pos = 1
         while (pos < body.length) {
             val matched = if (body[pos].isWhitespace()) matchInfixTokenAt(body, pos) else null
             if (matched == null) {
-                pos++
+                pos = advanceInfixScanPosition(body, pos)
             } else {
-                recordInfixEdgeIfNew(node, matched.first, matched.second, cursor, seenCallees, edges)
+                recordInfixEdgeIfNew(ctx, matched.first, matched.second)
                 pos = matched.third
             }
         }

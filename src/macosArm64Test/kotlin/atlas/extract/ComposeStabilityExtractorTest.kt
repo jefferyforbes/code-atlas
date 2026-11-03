@@ -328,4 +328,48 @@ class ComposeStabilityExtractorTest {
         assertTrue(mutatedProps.contains("title"), "cached.title = 'updated' MUST be extracted as a property mutation")
         assertTrue(mutatedProps.contains("description"), "state.description = 'New description' MUST be extracted as a property mutation")
     }
+
+    @Test
+    fun `extractKotlinFile preserves Immutable and Stable annotations across visibility and class modifiers`() {
+        val src = """
+            package com.example.stability
+
+            import androidx.compose.runtime.Composable
+            import androidx.compose.runtime.Immutable
+            import androidx.compose.runtime.Stable
+            import kotlinx.collections.immutable.ImmutableList
+
+            @Immutable
+            internal data class InternalBannerState(
+                val items: ImmutableList<String>
+            )
+
+            @Stable
+            public interface BannerActions {
+                fun onDismiss()
+            }
+
+            @Composable
+            fun BannerCard(
+                state: InternalBannerState,
+                actions: BannerActions
+            ) {
+                Text(state.items.firstOrNull().orEmpty())
+            }
+        """.trimIndent()
+
+        val bundle = extractor.extractKotlinFile(
+            projectSlug = "proj",
+            relPath = "src/commonMain/kotlin/BannerCard.kt",
+            sourceText = src
+        )
+
+        val comp = bundle.nodes.first { it.fqName == "com.example.stability.BannerCard" }
+        val params = bundle.params.filter { it.nodeId == comp.nodeId }.associateBy { it.paramName }
+        assertEquals("STABLE", params["state"]?.stability, "@Immutable internal data class with ImmutableList<T> must be STABLE")
+        assertEquals("EXPLICIT_STABLE_ANNOTATION", params["state"]?.stabilityReason, "@Immutable internal data class must preserve EXPLICIT_STABLE_ANNOTATION")
+        assertEquals("STABLE", params["actions"]?.stability, "@Stable public interface must be STABLE")
+        assertEquals("EXPLICIT_STABLE_ANNOTATION", params["actions"]?.stabilityReason, "@Stable public interface must preserve EXPLICIT_STABLE_ANNOTATION")
+        assertTrue(comp.isSkippable, "BannerCard with @Immutable/@Stable modified types must be skippable")
+    }
 }
