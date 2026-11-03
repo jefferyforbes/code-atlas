@@ -46,7 +46,7 @@ internal object ComposeTypeStabilityAnalyzer {
     private val RAW_COLLECTION_PROP_RE = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map|MutableList|MutableSet|MutableMap)<""")
     private val WORKSPACE_COLLECTION_PROP_RE = Regex("""\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(List|Set|Map)<""")
     private val CLASS_DECL_RE = Regex(
-        """((?:@(?:Immutable|Stable)\b(?:[ \t\r\n]+|@[A-Za-z0-9_]+(?:\([^)]*\))?)*)?)\b(data\s+class|value\s+class|enum\s+class|sealed\s+interface|sealed\s+class|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*(\([^)]*\))?"""
+        """((?:@(?:Immutable|Stable)\b(?:[ \t\r\n]+|@[A-Za-z0-9_.]+(?:\([^)]*\))?|(?:public|internal|private|protected|open|abstract|final|inner|expect|actual|fun)\b)*)?)\b(data\s+class|value\s+class|enum\s+class|sealed\s+interface|sealed\s+class|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*(\([^)]*\))?"""
     )
     private val WHITESPACE_RE = Regex("""\s+""")
 
@@ -138,14 +138,23 @@ internal object ComposeTypeStabilityAnalyzer {
         return immutableHit ?: inferFallbackTypeStability(outerType, shortOuter, ctx.localClassStability)
     }
 
+    private fun skipLineLeadingWhitespace(text: String, from: Int): Int {
+        var i = from
+        while (i < text.length && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r')) i++
+        return i
+    }
+
+    private fun isTopLevelDeclStartAt(text: String, idx: Int): Boolean =
+        text.startsWith("class ", idx) ||
+            text.startsWith("interface ", idx) ||
+            text.startsWith("fun ", idx) ||
+            text.startsWith("@Composable", idx)
+
     private fun isClassBodyTermination(maskedText: String, k: Int): Boolean {
         if (maskedText[k] == ';') return true
         if (maskedText[k] != '\n' || k + 1 >= maskedText.length) return false
-        val remainder = maskedText.substring(k + 1).trimStart()
-        return remainder.startsWith("class ") ||
-            remainder.startsWith("interface ") ||
-            remainder.startsWith("fun ") ||
-            remainder.startsWith("@Composable")
+        val idx = skipLineLeadingWhitespace(maskedText, k + 1)
+        return idx < maskedText.length && isTopLevelDeclStartAt(maskedText, idx)
     }
 
     private fun findClassBodyOpenBrace(maskedText: String, fromOffset: Int): Int? {
