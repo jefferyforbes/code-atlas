@@ -130,6 +130,7 @@ internal object McpToolSchemas {
                     add("audit_compose")
                     add("compose_doctor")
                     add("synthesize_compose_scope")
+                    add("compose_scope")
                     add("verify_remediation")
                     add("audit_complexity")
                     add("complexity_doctor")

@@ -642,4 +642,178 @@ class ArchitectureRemediationEngineTest {
             cleanDir(tmpDir)
         }
     }
+
+    @Test
+    fun testArchitectureAuditorReceivesWorkspaceRootInRemediationEngine() {
+        val tmpDir = makeTempDir()
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val relPath = "src/OutsideCwd.kt"
+            PlatformFiles.mkdirs("$tmpDir/src")
+            val content = """
+                package com.example.service
+
+                class OutsideCwd {
+                    fun perform(p1: String, p2: String, p3: String, p4: String, p5: String, p6: String): String = p1
+                }
+            """.trimIndent()
+            PlatformFiles.writeText("$tmpDir/$relPath", content)
+
+            val indexer = WorkspaceIndexer(tmpDir, store)
+            indexer.indexWorkspace("test_proj")
+
+            // Engine instantiated with non-CWD workspaceRoot passes it to ArchitectureAuditor
+            val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir, store = store)
+            val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
+            val report = engine.planAndRemediate(
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = true
+                )
+            )
+
+            assertNotNull(report)
+            assertEquals(0, report.boost003Count)
+        } finally {
+            store.close()
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testLayerInversionClassificationCorrectionDelegatesToSemioticLayerClassifier() {
+        val tmpDir = makeTempDir()
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val domainCaller = GraphNode(
+                nodeId = "test_proj:src/DomainService.kt#handle",
+                projectId = "test_proj",
+                fileId = "test_proj:src/DomainService.kt",
+                name = "handle",
+                qualifiedName = "com.example.DomainService.handle",
+                kind = "function",
+                startLine = 5,
+                endLine = 15,
+                semioticLayer = "semantic",
+                archLayer = "domain"
+            )
+            // Node in /cli/ path: classified as presentation
+            val cliNode = GraphNode(
+                nodeId = "test_proj:src/cli/AtlasCli.kt#run",
+                projectId = "test_proj",
+                fileId = "test_proj:src/cli/AtlasCli.kt",
+                name = "run",
+                qualifiedName = "com.example.cli.AtlasCli.run",
+                kind = "function",
+                startLine = 1,
+                endLine = 20,
+                semioticLayer = "pragmatic",
+                archLayer = "presentation"
+            )
+            // Node in /util/ path: classified as infrastructure
+            val utilNode = GraphNode(
+                nodeId = "test_proj:src/util/Helper.kt#format",
+                projectId = "test_proj",
+                fileId = "test_proj:src/util/Helper.kt",
+                name = "format",
+                qualifiedName = "com.example.util.Helper.format",
+                kind = "function",
+                startLine = 1,
+                endLine = 10,
+                semioticLayer = "semantic",
+                archLayer = "infrastructure"
+            )
+            val edges = listOf(
+                GraphEdge("e1", "test_proj", domainCaller.nodeId, cliNode.nodeId, "CALLS"),
+                GraphEdge("e2", "test_proj", domainCaller.nodeId, utilNode.nodeId, "CALLS")
+            )
+            store.upsertNodesAndEdges("test_proj", listOf(domainCaller, cliNode, utilNode), edges)
+
+            val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store)
+
+            // Presentation violation
+            val presViolation = LayerInversionViolation(
+                rule = "ARCH-LAYER-INVERSION",
+                source = cliNode.nodeId,
+                target = domainCaller.nodeId,
+                edgeType = "CALLS",
+                lineNumber = 5,
+                message = "Layer inversion test"
+            )
+            val rxPres = engine.planAndRemediate(
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = true,
+                    ruleFilter = "ARCH-LAYER-INVERSION"
+                )
+            )
+            assertNotNull(rxPres)
+        } finally {
+            store.close()
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testAuditReportSeparatesComplexityViolationsAndParameterAdvisories() {
+        val tmpDir = makeTempDir()
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            // Function with 6 params (exceeds default warnParams=5) but compliant cognitive (2)
+            val paramNode = GraphNode(
+                nodeId = "test_proj:src/Service.kt#manyParams",
+                projectId = "test_proj",
+                fileId = "test_proj:src/Service.kt",
+                name = "manyParams",
+                qualifiedName = "com.example.Service.manyParams",
+                kind = "function",
+                signature = "fun manyParams(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int): Unit",
+                startLine = 1,
+                endLine = 5,
+                cognitiveComplexity = 2,
+                cyclomaticComplexity = 2,
+                semioticLayer = "semantic",
+                archLayer = "domain"
+            )
+            store.upsertNodesAndEdges("test_proj", listOf(paramNode), emptyList())
+
+            val auditor = ArchitectureAuditor(store, workspaceRoot = tmpDir)
+            val report = auditor.runFullAudit("test_proj")
+
+            // parameter count violations must go into parameterAdvisories, NOT complexityViolations
+            assertEquals(0, report.complexityViolations.size, "Blocking complexityViolations must be empty")
+            assertEquals(1, report.parameterAdvisories.size, "Advisory param violations must be in parameterAdvisories")
+            assertEquals("COMPLEXITY-002-PARAMS", report.parameterAdvisories.first().ruleId)
+            assertTrue(report.passed, "Audit must pass when only advisory parameter violations exist")
+
+            // Now add a blocking COMPLEXITY-001 violation
+            val blockingNode = GraphNode(
+                nodeId = "test_proj:src/Heavy.kt#complexMethod",
+                projectId = "test_proj",
+                fileId = "test_proj:src/Heavy.kt",
+                name = "complexMethod",
+                qualifiedName = "com.example.Heavy.complexMethod",
+                kind = "function",
+                startLine = 10,
+                endLine = 50,
+                cognitiveComplexity = 18,
+                cyclomaticComplexity = 8,
+                semioticLayer = "semantic",
+                archLayer = "domain"
+            )
+            store.upsertNodesAndEdges("test_proj", listOf(paramNode, blockingNode), emptyList())
+
+            val reportWithBlocker = auditor.runFullAudit("test_proj")
+            assertEquals(1, reportWithBlocker.complexityViolations.size, "Blocking COMPLEXITY-001 must be in complexityViolations")
+            assertEquals("COMPLEXITY-001", reportWithBlocker.complexityViolations.first().ruleId)
+            assertEquals(1, reportWithBlocker.parameterAdvisories.size, "Parameter advisories must remain in parameterAdvisories")
+            assertTrue(reportWithBlocker.passed, "Architectural audit passes invariants even when complexity violations exist (complexity is checked via separate ratchet gate)")
+        } finally {
+            store.close()
+            cleanDir(tmpDir)
+        }
+    }
 }

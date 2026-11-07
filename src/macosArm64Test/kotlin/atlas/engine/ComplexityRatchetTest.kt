@@ -636,7 +636,8 @@ class ComplexityRatchetTest {
                 put("project", "proj")
             })
             assertFalse(resArch["spillover"]?.jsonPrimitive?.booleanOrNull ?: false)
-            assertEquals(65, resArch["total_complexity_violations"]?.jsonPrimitive?.intOrNull)
+            assertEquals(0, resArch["total_complexity_violations"]?.jsonPrimitive?.intOrNull)
+            assertEquals(65, resArch["total_parameter_advisories"]?.jsonPrimitive?.intOrNull)
 
             server.close()
         } finally {

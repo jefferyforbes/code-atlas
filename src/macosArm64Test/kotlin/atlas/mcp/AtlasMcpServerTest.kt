@@ -1,19 +1,25 @@
 package atlas.mcp
 
+import atlas.util.PlatformFiles
+import kotlin.random.Random
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import platform.posix.getpid
 
 @OptIn(ExperimentalForeignApi::class)
 class AtlasMcpServerTest {
@@ -376,6 +382,176 @@ class AtlasMcpServerTest {
             assertEquals(5, payload["ratchet"]?.jsonPrimitive?.int)
             assertEquals(0, payload["high_ratchet"]?.jsonPrimitive?.int)
             assertEquals(0, payload["param_high_ratchet"]?.jsonPrimitive?.int)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun testLruProjectServerEvictionClosesStoreAndRetains16Servers() {
+        val pid = getpid()
+        val rnd = Random.nextInt(100000, 999999)
+        val rootDir = "/tmp/atlas_mcp_lru_root_${pid}_$rnd"
+        PlatformFiles.mkdirs(rootDir)
+        val server = AtlasMcpServer(workspaceRoot = rootDir)
+
+        try {
+            val projectDirs = (0..16).map { i ->
+                val p = "$rootDir/project_$i"
+                PlatformFiles.mkdirs(p)
+                p
+            }
+
+            for (i in 0..15) {
+                server.resolveServerForProject("proj_$i", explicitWorkspace = projectDirs[i])
+            }
+            assertEquals(16, server.projectServers.size, "Should hold 16 servers")
+
+            val firstNormalized = PlatformFiles.canonicalPath(projectDirs[0]).replace('\\', '/').trimEnd('/')
+            val firstServer = server.projectServers[firstNormalized]
+            assertNotNull(firstServer, "Server 0 should be present in cache")
+
+            server.resolveServerForProject("proj_16", explicitWorkspace = projectDirs[16])
+            assertEquals(16, server.projectServers.size, "Cache should remain capped at 16")
+            assertFalse(server.projectServers.containsKey(firstNormalized), "Server 0 must be evicted")
+
+            val queryResult = runCatching { firstServer.store.getStats("proj_0") }
+            assertTrue(queryResult.isFailure, "Evicted server's store must be closed")
+
+            val resolvedRoot = server.resolveServerForProject("root_proj", explicitWorkspace = rootDir)
+            assertEquals(server, resolvedRoot, "Resolving root server must return root instance")
+            assertFalse(server.projectServers.containsKey(PlatformFiles.canonicalPath(rootDir)), "Root server is never stored in projectServers")
+        } finally {
+            server.close()
+            PlatformFiles.delete(rootDir)
+        }
+    }
+
+    @Test
+    fun testHandleQueryGodNodesAndSearchHonorLimit() {
+        val pid = getpid()
+        val rnd = Random.nextInt(100000, 999999)
+        val tmpDir = "/tmp/atlas_mcp_query_limit_${pid}_$rnd"
+        PlatformFiles.mkdirs(tmpDir)
+        val server = AtlasMcpServer(workspaceRoot = tmpDir)
+
+        try {
+            val ktFile = """
+                package sample
+                class NodeA { fun a() {} }
+                class NodeB { fun b() {} }
+                class NodeC { fun c() {} }
+                class NodeD { fun d() {} }
+                class NodeE { fun e() {} }
+            """.trimIndent()
+            PlatformFiles.writeText("$tmpDir/Nodes.kt", ktFile)
+            server.indexer.indexWorkspace("limit_proj")
+
+            val searchRes = server.callTool("atlas_query", buildJsonObject {
+                put("project", "limit_proj")
+                put("action", "search")
+                put("query", "Node")
+                put("limit", 2)
+            })
+            val searchMatches = (searchRes["results"] ?: searchRes["matches"])?.jsonArray
+            assertNotNull(searchMatches, "search result must contain results array")
+            assertTrue(searchMatches.size in 1..2, "search must honor limit=2 (actual: ${searchMatches.size})")
+
+            val godRes = server.callTool("atlas_query", buildJsonObject {
+                put("project", "limit_proj")
+                put("action", "god_nodes")
+                put("limit", 3)
+            })
+            val godNodes = godRes["god_nodes"]?.jsonArray
+            assertNotNull(godNodes, "god_nodes result must contain god_nodes array")
+            assertTrue(godNodes.size <= 3, "god_nodes must honor limit=3 (actual: ${godNodes.size})")
+        } finally {
+            server.close()
+            PlatformFiles.delete(tmpDir)
+        }
+    }
+
+    @Test
+    fun testAtlasAuditComposeScopeAndSynthesizeComposeScopeBothSucceed() {
+        val server = AtlasMcpServer(workspaceRoot = ".")
+        try {
+            val res1 = server.callTool("atlas_audit", buildJsonObject {
+                put("project", "code-atlas")
+                put("action", "synthesize_compose_scope")
+            })
+            assertFalse(res1.containsKey("error"), "synthesize_compose_scope must succeed")
+            val hasKeys1 = res1.containsKey("target_files") || res1.containsKey("collision_risks") || res1.containsKey("safe_for_parallel_dispatch")
+            assertTrue(hasKeys1, "synthesize_compose_scope must return compose payload")
+
+            val res2 = server.callTool("atlas_audit", buildJsonObject {
+                put("project", "code-atlas")
+                put("action", "compose_scope")
+            })
+            assertFalse(res2.containsKey("error"), "compose_scope must succeed")
+            val hasKeys2 = res2.containsKey("target_files") || res2.containsKey("collision_risks") || res2.containsKey("safe_for_parallel_dispatch")
+            assertTrue(hasKeys2, "compose_scope must return compose payload")
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun testSpilloverPreservesErrorClassification() {
+        val pid = getpid()
+        val rnd = Random.nextInt(100000, 999999)
+        val tmpDir = "/tmp/atlas_mcp_spill_err_${pid}_$rnd"
+        PlatformFiles.mkdirs(tmpDir)
+        val server = AtlasMcpServer(workspaceRoot = tmpDir)
+
+        try {
+            val largeErrorMessage = "Custom error: " + "E".repeat(35000)
+            val errorPayload = buildJsonObject {
+                put("error", largeErrorMessage)
+                put("detail", "High blast radius failure")
+            }
+
+            val spilled = server.transport.enforceSpillover("err_proj", errorPayload)
+            val isSpillover = spilled["spillover"]?.jsonPrimitive?.booleanOrNull ?: false
+            assertTrue(isSpillover, "Payload >32KB must trigger spillover")
+            assertTrue(spilled.containsKey("error"), "Spillover envelope must retain 'error' key")
+            val preservedErr = spilled["error"]?.jsonPrimitive?.content ?: ""
+            assertTrue(preservedErr.isNotEmpty(), "Error message must be preserved")
+
+            val toolResp = server.transport.buildToolCallSuccess(JsonPrimitive(101), spilled)
+            val isError = toolResp["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false
+            assertTrue(isError, "Tool response envelope must retain isError=true for spilled error")
+        } finally {
+            server.close()
+            PlatformFiles.delete(tmpDir)
+        }
+    }
+
+    @Test
+    fun testJsonToolResponseWithTextKeyIsNotStripped() {
+        val server = AtlasMcpServer(workspaceRoot = ".")
+        try {
+            val normalJsonWithText = buildJsonObject {
+                put("text", "This is human readable advice")
+                put("score", 95)
+                put("recommendation", "Refactor module")
+            }
+            val wrappedNormal = server.transport.buildToolCallSuccess(JsonPrimitive(201), normalJsonWithText)
+            val normalContent = wrappedNormal["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()?.jsonObject
+            assertNotNull(normalContent)
+            val textContent1 = normalContent["text"]?.jsonPrimitive?.content ?: ""
+            val hasFullJson = textContent1.contains("\"score\": 95") || textContent1.contains("\"score\":95")
+            assertTrue(hasFullJson, "Normal JSON output must retain entire JSON structure and not be unwrapped to raw text")
+            assertTrue(textContent1.contains("This is human readable advice"), "JSON string must include text field")
+
+            val rawMarkdownOutput = buildJsonObject {
+                put("text", "### CodeGraph Explore Context\n- File: BasketScreen.kt")
+                put("_mcp_raw_text", true)
+            }
+            val wrappedRaw = server.transport.buildToolCallSuccess(JsonPrimitive(202), rawMarkdownOutput)
+            val rawContent = wrappedRaw["result"]?.jsonObject?.get("content")?.jsonArray?.firstOrNull()?.jsonObject
+            assertNotNull(rawContent)
+            val textContent2 = rawContent["text"]?.jsonPrimitive?.content ?: ""
+            assertEquals("### CodeGraph Explore Context\n- File: BasketScreen.kt", textContent2, "Raw text marker must unwrap text content directly without JSON encoding")
         } finally {
             server.close()
         }

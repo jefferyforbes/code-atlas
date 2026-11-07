@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.encodeToJsonElement
@@ -59,6 +60,9 @@ internal class McpJsonRpcTransport(
         PlatformFiles.writeSecureText(spillFile, rawJson)
 
         val gods = server.store.getGodNodes(projectId, topN = 5).map { it.name }
+        val isErr = payload.containsKey("error")
+        val origErr = payload["error"]
+
         return buildJsonObject {
             put("spillover", true)
             put("byte_length", byteLen)
@@ -66,6 +70,15 @@ internal class McpJsonRpcTransport(
             put("artifact_uri", spillFile)
             put("top_central_nodes", json.encodeToJsonElement(gods))
             put("summary", "Payload ($byteLen bytes) exceeded 32KB ceiling and was written to $spillFile.")
+            if (isErr) {
+                if (origErr is JsonPrimitive && origErr.isString && origErr.content.length <= 1024) {
+                    put("error", origErr.content)
+                } else {
+                    val errMsg = (origErr as? JsonPrimitive)?.contentOrNull?.take(256)
+                        ?: "Error payload exceeded 32KB threshold; see artifact_uri"
+                    put("error", errMsg)
+                }
+            }
         }
     }
 
@@ -169,14 +182,28 @@ internal class McpJsonRpcTransport(
         }
     }
 
-    private fun buildToolCallSuccess(reqId: JsonPrimitive?, out: JsonObject): JsonObject {
+    internal fun buildToolCallSuccess(reqId: JsonPrimitive?, out: JsonObject): JsonObject {
         val isToolErr = out.containsKey("error")
+        val hasRawTextMarker = out["_mcp_raw_text"]?.jsonPrimitive?.booleanOrNull == true ||
+            out["_rawText"]?.jsonPrimitive?.booleanOrNull == true
+        val rawText = if (hasRawTextMarker) out["text"]?.jsonPrimitive?.contentOrNull else null
+        val effectiveOut = if (hasRawTextMarker) {
+            buildJsonObject {
+                out.forEach { (k, v) ->
+                    if (k != "_mcp_raw_text" && k != "_rawText") put(k, v)
+                }
+            }
+        } else out
+
         return jsonRpcResult(reqId) {
             putJsonArray("content") {
                 addJsonObject {
                     put("type", "text")
-                    val rawText = out["text"]?.jsonPrimitive?.contentOrNull
-                    put("text", rawText ?: json.encodeToString(out))
+                    if (rawText != null) {
+                        put("text", rawText)
+                    } else {
+                        put("text", json.encodeToString(effectiveOut))
+                    }
                 }
             }
             if (isToolErr) {

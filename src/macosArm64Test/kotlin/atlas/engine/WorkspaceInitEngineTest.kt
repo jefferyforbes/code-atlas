@@ -4,6 +4,7 @@ import atlas.util.PlatformFiles
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -69,7 +70,7 @@ class WorkspaceInitEngineTest {
             assertTrue(PlatformFiles.exists(hookPath), "Hook file must be written to disk")
             val content1 = PlatformFiles.readText(hookPath)
             assertTrue(content1.contains("# Atlas pre-commit Hook"))
-            assertTrue(content1.contains("--project test-proj"))
+            assertTrue(content1.contains("--project 'test-proj'"))
 
             // Attempt installing again without --force
             val res2 = engine.initHook(project = "test-proj")
@@ -116,8 +117,8 @@ class WorkspaceInitEngineTest {
             assertTrue(res.success)
             assertNotNull(res.scriptContent)
             val script = res.scriptContent
-            assertTrue(script.contains("audit --workspace . --project test-proj 2>&1"), "Hook must run architectural audit")
-            assertTrue(script.contains("audit --workspace . --project test-proj --complexity --threshold 15 2>&1"), "Hook must run complexity audit")
+            assertTrue(script.contains("audit --workspace . --project 'test-proj' 2>&1"), "Hook must run architectural audit")
+            assertTrue(script.contains("audit --workspace . --project 'test-proj' --complexity --threshold 15 2>&1"), "Hook must run complexity audit")
         } finally {
             PlatformFiles.deleteRecursively(tempDir)
         }
@@ -147,8 +148,8 @@ class WorkspaceInitEngineTest {
             val res = engine.initHook(project = "organisation", dryRun = true)
             assertTrue(res.success)
             assertNotNull(res.scriptContent)
-            assertTrue(res.scriptContent.contains("--project custom-atlas-project"))
-            assertFalse(res.scriptContent.contains("--project organisation"))
+            assertTrue(res.scriptContent.contains("--project 'custom-atlas-project'"))
+            assertFalse(res.scriptContent.contains("--project 'organisation'"))
 
             // 4. Explicit non-organisation project slug is preserved
             val explicitSlug = engine.resolveProjectSlug("override-slug")
@@ -162,6 +163,24 @@ class WorkspaceInitEngineTest {
             assertTrue(resolvedDotSlug.isNotEmpty() && resolvedDotSlug != "organisation" && resolvedDotSlug != ".")
         } finally {
             PlatformFiles.deleteRecursively(tempDir)
+        }
+    }
+
+    @Test
+    fun testGenerateHookScriptEscapesSingleQuotesInProject() {
+        val engine = WorkspaceInitEngine(".")
+        val script = engine.generateHookScript(project = "test'slug; rm -rf /", hookType = "pre-commit", threshold = 10)
+        assertTrue(script.contains("--project 'test'\\''slug; rm -rf /'"))
+    }
+
+    @Test
+    fun testGenerateHookScriptRejectsInvalidThreshold() {
+        val engine = WorkspaceInitEngine(".")
+        assertFailsWith<IllegalArgumentException> {
+            engine.generateHookScript(project = "safe-proj", hookType = "pre-commit", threshold = 0)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            engine.generateHookScript(project = "safe-proj", hookType = "pre-commit", threshold = -5)
         }
     }
 }

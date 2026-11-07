@@ -364,7 +364,12 @@ class AutonomousRemediationVerifier(
             details.add("Test command '$testCommand' crashed: ${e.message}")
         } finally {
             if (!passed || req.dryRun) {
-                PlatformFiles.writeText(fullPath, originalContent)
+                val rolledBack = runCatching {
+                    PlatformFiles.writeText(fullPath, originalContent)
+                }.getOrDefault(false)
+                if (!rolledBack || PlatformFiles.readText(fullPath) != originalContent) {
+                    details.add("CRITICAL: Failed to rollback file at $fullPath to original content.")
+                }
             }
         }
         return passed
@@ -463,8 +468,7 @@ class AutonomousRemediationVerifier(
     )
 
     fun verifyAndApply(req: VerificationRequest): RemediationVerificationResult {
-        val root = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
-        val fullPath = if (req.relPath.startsWith("/")) req.relPath else "$root/${req.relPath}"
+        val fullPath = PlatformFiles.requirePathInsideRoot(workspaceRoot, req.relPath)
         val details = mutableListOf<String>()
 
         val (originalContent, preFlightErr) = validatePreFlight(req, fullPath, details)
@@ -555,7 +559,13 @@ class AutonomousRemediationVerifier(
             val escapedRoot = "'" + workspaceRoot.replace("'", "'\\''") + "'"
             val cmd = "cd $escapedRoot && $cmdStr"
             val rawStatus = system(cmd)
-            return if (rawStatus == -1) -1 else (rawStatus shr 8) and 0xff
+            if (rawStatus == -1) return -1
+            val signal = rawStatus and 0x7f
+            return if (signal != 0) {
+                128 + signal
+            } else {
+                (rawStatus shr 8) and 0xff
+            }
         }
 
         private val VAR_PROP_SNIPPET_RE = Regex("""\bvar\s+([A-Za-z0-9_]+)\s*:""")

@@ -16,6 +16,7 @@ import platform.posix.rmdir
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -601,6 +602,111 @@ class AutonomousRemediationVerifierTest {
             assertEquals("COMPLETED", resPassApply.phase)
             assertTrue(resPassApply.testsPreserved)
             assertTrue(PlatformFiles.readText(filePath).contains("val port = 9090"))
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testVerifyAndApplyRejectsPathTraversalAndAbsoluteEscapes() {
+        val tmpDir = makeTempDir()
+        try {
+            val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir)
+
+            // 1. Path traversal using ../ escaping workspace
+            assertFailsWith<IllegalArgumentException> {
+                verifier.verifyAndApply(
+                    AutonomousRemediationVerifier.VerificationRequest(
+                        projectSlug = "proj",
+                        relPath = "../outside.kt",
+                        beforeSnippet = "val a = 1",
+                        afterSnippet = "val a = 2"
+                    )
+                )
+            }
+
+            // 2. Absolute path outside workspace
+            assertFailsWith<IllegalArgumentException> {
+                verifier.verifyAndApply(
+                    AutonomousRemediationVerifier.VerificationRequest(
+                        projectSlug = "proj",
+                        relPath = "/etc/passwd",
+                        beforeSnippet = "root:x:0:0",
+                        afterSnippet = "root:x:0:1"
+                    )
+                )
+            }
+
+            // 3. Multi-level traversal
+            assertFailsWith<IllegalArgumentException> {
+                verifier.verifyAndApply(
+                    AutonomousRemediationVerifier.VerificationRequest(
+                        projectSlug = "proj",
+                        relPath = "dir/../../outside.kt",
+                        beforeSnippet = "val a = 1",
+                        afterSnippet = "val a = 2"
+                    )
+                )
+            }
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testExecuteShellInWorkspaceDecodesNormalAndSignalStatuses() {
+        val tmpDir = makeTempDir()
+        try {
+            // Normal exit 0
+            val exit0 = AutonomousRemediationVerifier.executeShellInWorkspace(tmpDir, "exit 0")
+            assertEquals(0, exit0)
+
+            // Normal exit 42
+            val exit42 = AutonomousRemediationVerifier.executeShellInWorkspace(tmpDir, "exit 42")
+            assertEquals(42, exit42)
+
+            // Signal termination: SIGSEGV (signal 11) -> 128 + 11 = 139
+            val exitSegv = AutonomousRemediationVerifier.executeShellInWorkspace(tmpDir, "kill -11 \$\$")
+            assertEquals(139, exitSegv)
+
+            // Signal termination: SIGKILL (signal 9) -> 128 + 9 = 137
+            val exitKill = AutonomousRemediationVerifier.executeShellInWorkspace(tmpDir, "kill -9 \$\$")
+            assertEquals(137, exitKill)
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testSignalKilledTestCommandTriggersAtomicRollback() {
+        val tmpDir = makeTempDir()
+        try {
+            val filePath = "$tmpDir/CrashingService.kt"
+            val initialContent = """
+                package com.example
+                class CrashingService { val state = "initial" }
+            """.trimIndent()
+            PlatformFiles.writeText(filePath, initialContent)
+
+            val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir)
+
+            // Test subprocess killed by SIGSEGV (signal 11 -> exit 139) must fail and rollback
+            val res = verifier.verifyAndApply(
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "CrashingService.kt",
+                    beforeSnippet = """val state = "initial"""",
+                    afterSnippet = """val state = "modified"""",
+                    dryRun = false,
+                    testCommand = "kill -11 \$\$"
+                )
+            )
+
+            assertFalse(res.valid, "Verification must fail when test process is terminated by signal")
+            assertEquals("POST_VERIFICATION", res.phase)
+            assertFalse(res.testsPreserved)
+            assertTrue(res.details.any { it.contains("exit code 139") }, "Details should report exit code 139 for SIGSEGV")
+            assertEquals(initialContent, PlatformFiles.readText(filePath), "Crashing test process must trigger rollback")
         } finally {
             cleanDir(tmpDir)
         }
