@@ -277,4 +277,129 @@ class NativeSqliteStatementTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testPrepareEmptyOrCommentThrowsIllegalArgumentException() {
+        val dbPath = "/tmp/atlas_stmt_test_empty_${getpid()}_${Random.nextInt(100000, 999999)}.db"
+        val db = NativeSqliteDatabase(dbPath)
+        try {
+            assertFailsWith<IllegalArgumentException> {
+                db.prepare("")
+            }
+            assertFailsWith<IllegalArgumentException> {
+                db.prepare("   \t\n  ")
+            }
+            assertFailsWith<IllegalArgumentException> {
+                db.prepare("-- comment only\n")
+            }
+            assertFailsWith<IllegalArgumentException> {
+                db.prepare("/* block comment */")
+            }
+        } finally {
+            db.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testPrepareInvalidSqlThrowsRuntimeException() {
+        val dbPath = "/tmp/atlas_stmt_test_invalidsql_${getpid()}_${Random.nextInt(100000, 999999)}.db"
+        val db = NativeSqliteDatabase(dbPath)
+        try {
+            assertFailsWith<RuntimeException> {
+                db.prepare("SELECT * FROM non_existent_table_xyz;")
+            }
+        } finally {
+            db.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testWithImmediateTransactionTopLevelCommitAndRollback() {
+        val dbPath = "/tmp/atlas_imm_tx_test_${getpid()}_${Random.nextInt(100000, 999999)}.db"
+        val db = NativeSqliteDatabase(dbPath)
+        try {
+            db.exec("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT);")
+            assertEquals(0, db.currentTransactionDepth)
+
+            // Test successful commit
+            db.withImmediateTransaction {
+                assertEquals(1, db.currentTransactionDepth)
+                db.exec("INSERT INTO entries VALUES (1, 'one');")
+            }
+            assertEquals(0, db.currentTransactionDepth)
+
+            var count = 0
+            db.prepare("SELECT COUNT(*) FROM entries WHERE id = 1;").use { stmt ->
+                if (stmt.step()) count = stmt.columnInt(0)
+            }
+            assertEquals(1, count)
+
+            // Test rollback on exception
+            assertFailsWith<RuntimeException> {
+                db.withImmediateTransaction {
+                    assertEquals(1, db.currentTransactionDepth)
+                    db.exec("INSERT INTO entries VALUES (2, 'two');")
+                    throw RuntimeException("Force rollback")
+                }
+            }
+            assertEquals(0, db.currentTransactionDepth)
+
+            var count2 = 0
+            db.prepare("SELECT COUNT(*) FROM entries WHERE id = 2;").use { stmt ->
+                if (stmt.step()) count2 = stmt.columnInt(0)
+            }
+            assertEquals(0, count2, "Rolled back row must not exist")
+        } finally {
+            db.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testWithImmediateTransactionNestedSavepoints() {
+        val dbPath = "/tmp/atlas_imm_nested_test_${getpid()}_${Random.nextInt(100000, 999999)}.db"
+        val db = NativeSqliteDatabase(dbPath)
+        try {
+            db.exec("CREATE TABLE logs (msg TEXT);")
+            assertEquals(0, db.currentTransactionDepth)
+
+            db.withImmediateTransaction {
+                assertEquals(1, db.currentTransactionDepth)
+                db.exec("INSERT INTO logs VALUES ('top-1');")
+
+                // Nested transaction that commits
+                db.withImmediateTransaction {
+                    assertEquals(2, db.currentTransactionDepth)
+                    db.exec("INSERT INTO logs VALUES ('nested-1');")
+                }
+                assertEquals(1, db.currentTransactionDepth)
+
+                // Nested transaction that rolls back
+                assertFailsWith<RuntimeException> {
+                    db.withImmediateTransaction {
+                        assertEquals(2, db.currentTransactionDepth)
+                        db.exec("INSERT INTO logs VALUES ('nested-aborted');")
+                        throw RuntimeException("Aborting inner savepoint")
+                    }
+                }
+                assertEquals(1, db.currentTransactionDepth)
+
+                db.exec("INSERT INTO logs VALUES ('top-2');")
+            }
+            assertEquals(0, db.currentTransactionDepth)
+
+            val messages = mutableListOf<String>()
+            db.prepare("SELECT msg FROM logs ORDER BY rowid;").use { stmt ->
+                while (stmt.step()) {
+                    messages.add(stmt.columnString(0))
+                }
+            }
+            assertEquals(listOf("top-1", "nested-1", "top-2"), messages)
+        } finally {
+            db.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }

@@ -27,7 +27,10 @@ class NativeSqliteDatabase(val path: String) {
             if (rc != SQLITE_OK) {
                 val err = sqlite3_errmsg(ppDb.value)?.toKString() ?: "Error $rc"
                 if (ppDb.value != null) {
-                    sqlite3_close_v2(ppDb.value)
+                    val closeRc = sqlite3_close_v2(ppDb.value)
+                    if (closeRc != SQLITE_OK) {
+                        PlatformFiles.logWarning("NativeSqliteDatabase", "sqlite3_close_v2 failed on open error: $closeRc")
+                    }
                 }
                 throw RuntimeException("Failed to open SQLite database at $path: $err")
             }
@@ -35,6 +38,10 @@ class NativeSqliteDatabase(val path: String) {
             dbPointer = ppDb.value
         }
     }
+
+    private var transactionDepth = 0
+
+    val currentTransactionDepth: Int get() = transactionDepth
 
     fun exec(sql: String) {
         memScoped {
@@ -53,35 +60,77 @@ class NativeSqliteDatabase(val path: String) {
             val ppStmt = alloc<CPointerVar<sqlite3_stmt>>()
             val rc = sqlite3_prepare_v2(dbPointer, sql, -1, ppStmt.ptr, null)
             if (rc != SQLITE_OK) {
+                if (ppStmt.value != null) {
+                    sqlite3_finalize(ppStmt.value)
+                }
                 val err = sqlite3_errmsg(dbPointer)?.toKString() ?: "Error $rc"
                 throw RuntimeException("SQLite prepare error ($rc): $err in SQL:\n$sql")
             }
-            return NativeSqliteStatement(dbPointer, ppStmt.value)
+            val stmtPtr = ppStmt.value
+                ?: throw IllegalArgumentException("SQLite prepare error: empty or comment-only SQL statement: [$sql]")
+            return NativeSqliteStatement(dbPointer, stmtPtr)
         }
     }
 
+    fun <T> withImmediateTransaction(block: () -> T): T =
+        executeTransaction(savepointName = null, block = block)
+
     fun <T> withSavepoint(name: String, block: () -> T): T {
         val safeName = name.filter { it.isLetterOrDigit() || it == '_' }.ifEmpty { "sp_default" }
-        exec("SAVEPOINT $safeName;")
+        return executeTransaction(savepointName = safeName, block = block)
+    }
+
+    private fun <T> executeTransaction(savepointName: String?, block: () -> T): T {
+        val depth = transactionDepth
+        val isTopLevel = (depth == 0)
+        val spName = savepointName ?: "sp_imm_$depth"
+
+        if (isTopLevel) {
+            exec("BEGIN IMMEDIATE TRANSACTION;")
+        } else {
+            exec("SAVEPOINT $spName;")
+        }
+        transactionDepth = depth + 1
+
         return try {
             val result = block()
-            exec("RELEASE SAVEPOINT $safeName;")
+            if (isTopLevel) {
+                exec("COMMIT;")
+            } else {
+                exec("RELEASE SAVEPOINT $spName;")
+            }
             result
         } catch (t: Throwable) {
             try {
-                exec("ROLLBACK TO SAVEPOINT $safeName;")
-                exec("RELEASE SAVEPOINT $safeName;")
+                if (isTopLevel) {
+                    exec("ROLLBACK;")
+                } else {
+                    exec("ROLLBACK TO SAVEPOINT $spName;")
+                    exec("RELEASE SAVEPOINT $spName;")
+                }
             } catch (e: Exception) {
-                PlatformFiles.logWarning("NativeSqliteDatabase", "savepoint rollback failed: ${e.message}")
+                PlatformFiles.logWarning("NativeSqliteDatabase", "transaction rollback failed: ${e.message}")
+                if (isTopLevel) {
+                    transactionDepth = 0
+                }
             }
             throw t
+        } finally {
+            if (transactionDepth > depth) {
+                transactionDepth = depth
+            }
         }
     }
 
     fun close() {
-        if (dbPointer != null) {
-            sqlite3_close_v2(dbPointer)
+        val ptr = dbPointer
+        if (ptr != null) {
+            val rc = sqlite3_close_v2(ptr)
+            if (rc != SQLITE_OK) {
+                PlatformFiles.logWarning("NativeSqliteDatabase", "sqlite3_close_v2 returned code $rc")
+            }
             dbPointer = null
+            transactionDepth = 0
         }
     }
 }
