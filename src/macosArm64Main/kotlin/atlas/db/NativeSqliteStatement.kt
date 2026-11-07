@@ -1,5 +1,6 @@
 package atlas.db
 
+import atlas.util.PlatformFiles
 import cnames.structs.sqlite3
 import cnames.structs.sqlite3_stmt
 import csqlite.*
@@ -13,6 +14,10 @@ class NativeSqliteStatement(
     private val db: CPointer<sqlite3>?,
     private var stmt: CPointer<sqlite3_stmt>?
 ) {
+    init {
+        requireNotNull(stmt) { "NativeSqliteStatement statement pointer cannot be null" }
+    }
+
     private fun requireStmt(): CPointer<sqlite3_stmt> =
         checkNotNull(stmt) { "Statement already closed" }
 
@@ -122,7 +127,10 @@ class NativeSqliteStatement(
         val s = stmt
         if (s != null) {
             stmt = null
-            sqlite3_finalize(s)
+            val rc = sqlite3_finalize(s)
+            if (rc != SQLITE_OK) {
+                PlatformFiles.logWarning("NativeSqliteStatement", "sqlite3_finalize returned code $rc")
+            }
         }
     }
 

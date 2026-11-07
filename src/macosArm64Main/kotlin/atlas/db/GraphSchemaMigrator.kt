@@ -7,7 +7,7 @@ import atlas.util.PlatformFiles
  */
 internal object GraphSchemaMigrator {
 
-    private const val CURRENT_SCHEMA_VERSION = 8
+    private const val CURRENT_SCHEMA_VERSION = 9
 
     private fun readUserVersion(db: NativeSqliteDatabase): Int {
         val stmt = db.prepare("PRAGMA user_version;")
@@ -35,10 +35,54 @@ internal object GraphSchemaMigrator {
             return
         }
         migrateLegacySchema(db)
+        migrateNodesFtsSchema(db)
         db.exec(SCHEMA_DDL)
         migrateComposeSchema(db)
         migrateNodesSchema(db)
+        migrateNodesFtsSchema(db)
         db.exec("PRAGMA user_version = $CURRENT_SCHEMA_VERSION;")
+    }
+
+    fun migrateNodesFtsSchema(db: NativeSqliteDatabase) {
+        try {
+            var sqlDef = ""
+            db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes_fts';").use { stmt ->
+                if (stmt.step()) {
+                    sqlDef = stmt.columnString(0)
+                }
+            }
+            if (sqlDef.contains("file_id UNINDEXED", ignoreCase = true)) {
+                db.exec("DROP TABLE IF EXISTS nodes_fts;")
+                db.exec(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+                        node_id,
+                        project_id,
+                        name,
+                        qualified_name,
+                        signature,
+                        file_id
+                    );
+                    """.trimIndent()
+                )
+                var hasNodes = false
+                db.prepare("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='nodes';").use { stmt ->
+                    if (stmt.step() && stmt.columnInt(0) > 0) {
+                        hasNodes = true
+                    }
+                }
+                if (hasNodes) {
+                    db.exec(
+                        """
+                        INSERT INTO nodes_fts (rowid, node_id, project_id, name, qualified_name, signature, file_id)
+                        SELECT rowid, node_id, project_id, name, qualified_name, signature, file_id FROM nodes;
+                        """.trimIndent()
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            PlatformFiles.logWarning("SqliteGraphStore", "nodes_fts schema migration failed: ${e.message}")
+        }
     }
 
     fun migrateComposeSchema(db: NativeSqliteDatabase) {
@@ -208,7 +252,7 @@ internal object GraphSchemaMigrator {
             name,
             qualified_name,
             signature,
-            file_id UNINDEXED
+            file_id
         );
 
         CREATE TABLE IF NOT EXISTS figma_documents (

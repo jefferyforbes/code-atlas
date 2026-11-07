@@ -241,4 +241,287 @@ class SqliteGraphStoreTest {
             PlatformFiles.deleteRecursively(tempRoot)
         }
     }
+
+    @Test
+    fun `test nodes_fts schema indexes file_id and migrates legacy unindexed schema`() {
+        val tempRoot = "/tmp/atlas_fts_mig_test_${kotlin.random.Random.nextInt(100000, 999999)}"
+        PlatformFiles.mkdirs(tempRoot)
+        val dbPath = "$tempRoot/atlas.db"
+
+        try {
+            // 1. Create a legacy database with user_version = 8 and nodes_fts having 'file_id UNINDEXED'
+            val rawDb = atlas.db.NativeSqliteDatabase(dbPath)
+            rawDb.exec("""
+                CREATE TABLE files (
+                    file_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    rel_path TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    module_id TEXT NOT NULL DEFAULT '',
+                    source_set TEXT NOT NULL DEFAULT 'main',
+                    semiotic_layer TEXT NOT NULL DEFAULT 'semantic',
+                    arch_layer TEXT NOT NULL DEFAULT 'domain',
+                    sha256 TEXT NOT NULL,
+                    mtime REAL NOT NULL DEFAULT 0.0,
+                    loc INTEGER NOT NULL DEFAULT 0,
+                    top_level_decl_count INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE nodes (
+                    node_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    file_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    qualified_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    signature TEXT NOT NULL DEFAULT '',
+                    start_line INTEGER NOT NULL DEFAULT 1,
+                    end_line INTEGER NOT NULL DEFAULT 1,
+                    module_id TEXT NOT NULL DEFAULT '',
+                    source_set TEXT NOT NULL DEFAULT 'main',
+                    semiotic_layer TEXT NOT NULL DEFAULT 'semantic',
+                    arch_layer TEXT NOT NULL DEFAULT 'domain',
+                    is_test_double INTEGER NOT NULL DEFAULT 0,
+                    in_degree INTEGER NOT NULL DEFAULT 0,
+                    out_degree INTEGER NOT NULL DEFAULT 0,
+                    description TEXT DEFAULT NULL,
+                    is_top_level INTEGER NOT NULL DEFAULT 1,
+                    cyclomatic_complexity INTEGER NOT NULL DEFAULT 1,
+                    cognitive_complexity INTEGER NOT NULL DEFAULT 0,
+                    max_nesting_depth INTEGER NOT NULL DEFAULT 0,
+                    complexity_score REAL NOT NULL DEFAULT 100.0
+                );
+                CREATE TABLE edges (
+                    edge_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    source_node_id TEXT NOT NULL,
+                    target_node_id TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    provenance TEXT NOT NULL DEFAULT 'EXTRACTED_AST',
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    line_number INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE compose_nodes (
+                    node_id TEXT NOT NULL PRIMARY KEY,
+                    project_slug TEXT NOT NULL,
+                    fqname TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    source_set TEXT NOT NULL DEFAULT 'commonMain',
+                    is_restartable INTEGER NOT NULL DEFAULT 1,
+                    is_skippable INTEGER NOT NULL DEFAULT 1,
+                    is_readonly INTEGER NOT NULL DEFAULT 0,
+                    is_inline INTEGER NOT NULL DEFAULT 0,
+                    returns_unit INTEGER NOT NULL DEFAULT 1,
+                    has_modifier_param INTEGER NOT NULL DEFAULT 0,
+                    modifier_is_first_optional INTEGER NOT NULL DEFAULT 1,
+                    modifier_has_default INTEGER NOT NULL DEFAULT 1,
+                    unstable_param_count INTEGER NOT NULL DEFAULT 0,
+                    runtime_param_count INTEGER NOT NULL DEFAULT 0,
+                    receiver_stability TEXT NOT NULL DEFAULT 'STABLE',
+                    provenance TEXT NOT NULL DEFAULT 'STATIC_INFERRED',
+                    violation_mask INTEGER NOT NULL DEFAULT 0
+                ) WITHOUT ROWID;
+                CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                    node_id,
+                    project_id,
+                    name,
+                    qualified_name,
+                    signature,
+                    file_id UNINDEXED
+                );
+                PRAGMA user_version = 8;
+            """.trimIndent())
+
+            // Insert sample node in legacy DB
+            rawDb.exec("""
+                INSERT INTO nodes (node_id, project_id, file_id, name, qualified_name, kind)
+                VALUES ('p:src/FtsTest.kt#testFunc', 'p', 'src/FtsTest.kt', 'testFunc', 'com.testFunc', 'function');
+            """.trimIndent())
+            rawDb.exec("""
+                INSERT INTO nodes_fts (rowid, node_id, project_id, name, qualified_name, signature, file_id)
+                VALUES (1, 'p:src/FtsTest.kt#testFunc', 'p', 'testFunc', 'com.testFunc', 'fun testFunc()', 'src/FtsTest.kt');
+            """.trimIndent())
+            rawDb.close()
+
+            // 2. Open via SqliteGraphStore, which triggers initSchema and migrateNodesFtsSchema
+            val store = SqliteGraphStore(dbPath)
+            try {
+                // Verify nodes_fts no longer contains 'file_id UNINDEXED'
+                var ftsSql = ""
+                store.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes_fts';").use { stmt ->
+                    if (stmt.step()) {
+                        ftsSql = stmt.columnString(0)
+                    }
+                }
+                assertTrue(
+                    !ftsSql.contains("UNINDEXED", ignoreCase = true),
+                    "Migrated nodes_fts table must not contain UNINDEXED on file_id: $ftsSql"
+                )
+
+                // Verify search still finds the migrated node
+                val searchResults = store.searchNodes("p", "testFunc", limit = 10)
+                assertEquals(1, searchResults.size)
+                assertEquals("p:src/FtsTest.kt#testFunc", searchResults.first().nodeId)
+
+                // Verify user_version is now 9
+                var userVersion = 0
+                store.prepare("PRAGMA user_version;").use { stmt ->
+                    if (stmt.step()) {
+                        userVersion = stmt.columnInt(0)
+                    }
+                }
+                assertEquals(9, userVersion)
+            } finally {
+                store.close()
+            }
+        } finally {
+            PlatformFiles.deleteRecursively(tempRoot)
+        }
+    }
+
+    @Test
+    fun `test SearchAndVocabDao rebuildVocabulary restores missing segment vocabulary`() {
+        val store = SqliteGraphStore(":memory:")
+        try {
+            val projectId = "proj_vocab_test"
+            val node = GraphNode(
+                nodeId = "$projectId:src/Service.kt#PaymentProcessor",
+                projectId = projectId,
+                fileId = "$projectId:src/Service.kt",
+                name = "PaymentProcessor",
+                qualifiedName = "com.checkout.PaymentProcessor",
+                kind = "class"
+            )
+            store.upsertNodesAndEdges(projectId, listOf(node), emptyList())
+
+            // Verify initial search finds the node
+            val res1 = store.searchNodes(projectId, "PaymentProcessor")
+            assertEquals(1, res1.size)
+
+            // Manually delete all rows from name_segment_vocab
+            store.exec("DELETE FROM name_segment_vocab WHERE project_id = '$projectId';")
+
+            // Rebuild vocabulary via SearchAndVocabDao delegator
+            store.rebuildVocabulary(projectId)
+
+            // Verify name_segment_vocab was repopulated
+            var vocabCount = 0
+            store.prepare("SELECT COUNT(*) FROM name_segment_vocab WHERE project_id = ?;").use { stmt ->
+                stmt.bindString(1, projectId)
+                if (stmt.step()) {
+                    vocabCount = stmt.columnInt(0)
+                }
+            }
+            assertTrue(vocabCount > 0, "name_segment_vocab should be repopulated after rebuildVocabulary")
+
+            val res2 = store.searchNodes(projectId, "Payment")
+            assertEquals(1, res2.size)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun `test unconditional nodes_fts purge by rowid even when oldNodes is empty`() {
+        val store = SqliteGraphStore(":memory:")
+        try {
+            val projectId = "proj_fts_purge"
+            val relPath = "src/EmptyOrOrphan.kt"
+            val fileId = "$projectId:$relPath"
+
+            // Insert file record
+            store.upsertFileRecord(
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = projectId,
+                    relPath = relPath,
+                    language = "kotlin",
+                    moduleId = "core",
+                    sourceSet = "main",
+                    semioticLayer = "pragmatic",
+                    archLayer = "domain",
+                    sha256 = "dummy",
+                    mtime = 1.0,
+                    loc = 5,
+                    topLevelDeclCount = 0
+                )
+            )
+
+            // Simulate an orphan or corrupted nodes_fts row without a matching nodes row
+            store.prepare(
+                """
+                INSERT INTO nodes_fts (rowid, node_id, project_id, name, qualified_name, signature, file_id)
+                VALUES (88888, '$projectId:orphan', '$projectId', 'Orphan', 'Orphan', '()', '$fileId');
+                """.trimIndent()
+            ).use { it.step() }
+
+            // Verify the rogue FTS row exists
+            var ftsCount = 0
+            store.prepare("SELECT COUNT(*) FROM nodes_fts WHERE file_id = ?;").use { stmt ->
+                stmt.bindString(1, fileId)
+                if (stmt.step()) ftsCount = stmt.columnInt(0)
+            }
+            assertEquals(1, ftsCount)
+
+            // Re-index/upsert the file record (oldNodes in nodes table is empty)
+            store.upsertFileRecord(
+                SqliteGraphStore.FileRecordUpsert(
+                    projectId = projectId,
+                    relPath = relPath,
+                    language = "kotlin",
+                    moduleId = "core",
+                    sourceSet = "main",
+                    semioticLayer = "pragmatic",
+                    archLayer = "domain",
+                    sha256 = "dummy2",
+                    mtime = 2.0,
+                    loc = 5,
+                    topLevelDeclCount = 0
+                )
+            )
+
+            // Verify nodes_fts for that file was purged unconditionally even though oldNodes was empty
+            var ftsCountAfter = 0
+            store.prepare("SELECT COUNT(*) FROM nodes_fts WHERE file_id = ?;").use { stmt ->
+                stmt.bindString(1, fileId)
+                if (stmt.step()) ftsCountAfter = stmt.columnInt(0)
+            }
+            assertEquals(0, ftsCountAfter, "nodes_fts must be purged unconditionally even when oldNodes is empty")
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun `test withImmediateTransaction commits on success and rolls back on exception`() {
+        val store = SqliteGraphStore(":memory:")
+        try {
+            val projectId = "proj_imm_tx"
+            store.withImmediateTransaction {
+                store.exec("INSERT INTO project_metadata (project_id, key, value) VALUES ('$projectId', 'k1', 'v1');")
+            }
+
+            assertEquals("v1", store.getProjectMetadata(projectId, "k1"))
+
+            // Verify rollback on exception
+            try {
+                store.withImmediateTransaction {
+                    store.exec("INSERT INTO project_metadata (project_id, key, value) VALUES ('$projectId', 'k2', 'v2');")
+                    throw IllegalStateException("forced rollback")
+                }
+            } catch (expected: IllegalStateException) {
+                assertEquals("forced rollback", expected.message)
+            }
+
+            // k2 must not have been committed
+            var k2Val: String? = null
+            store.prepare("SELECT value FROM project_metadata WHERE project_id = ? AND key = 'k2';").use { stmt ->
+                stmt.bindString(1, projectId)
+                if (stmt.step()) k2Val = stmt.columnString(0)
+            }
+            assertEquals(null, k2Val)
+        } finally {
+            store.close()
+        }
+    }
 }

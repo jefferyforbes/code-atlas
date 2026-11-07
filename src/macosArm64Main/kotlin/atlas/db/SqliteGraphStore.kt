@@ -1,7 +1,8 @@
 package atlas.db
 
-import atlas.extract.NameSegmentTokenizer
 import atlas.extract.UrlTargetResolver
+
+import atlas.extract.FigmaSnapshotExtractor
 import atlas.model.ComplexityScoreRecord
 import atlas.model.ComposeNodeRecord
 import atlas.model.ComposeParamRecord
@@ -49,7 +50,10 @@ class SqliteGraphStore(val dbPath: String) {
         fileNodesLookup = ::getNodesForFile,
         rowToNode = ::rowToNode
     )
-
+    private val searchAndVocabDao = SearchAndVocabDao(
+        db = db,
+        rowToNode = ::rowToNode
+    )
     init {
         GraphSchemaMigrator.initSchema(db)
     }
@@ -89,6 +93,8 @@ class SqliteGraphStore(val dbPath: String) {
     fun migrateComposeSchema() = GraphSchemaMigrator.migrateComposeSchema(db)
 
     fun migrateNodesSchema() = GraphSchemaMigrator.migrateNodesSchema(db)
+
+    fun <T> withImmediateTransaction(block: () -> T): T = db.withImmediateTransaction(block)
 
     fun <T> withSavepoint(name: String, block: () -> T): T = db.withSavepoint(name, block)
 
@@ -291,7 +297,7 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun replaceBatchRawSymbolEdges(projectId: String, fileEdgesMap: Map<String, List<GraphEdge>>) {
         if (fileEdgesMap.isEmpty()) return
-        withSavepoint("sp_batch_raw_edges") {
+        withImmediateTransaction {
             val scope = StatementScope(db)
             try {
                 val stmts = RawSymbolBatchStatements(
@@ -480,35 +486,37 @@ class SqliteGraphStore(val dbPath: String) {
             oldNodes.add(selectOld.columnString(0))
         }
 
-        if (oldNodes.isNotEmpty()) {
-            val delFtsByFile = scope.prepare("DELETE FROM nodes_fts WHERE file_id = ?;")
-            delFtsByFile.bindString(1, fileId)
-            delFtsByFile.step()
+        val delFtsByRowid = scope.prepare("DELETE FROM nodes_fts WHERE rowid IN (SELECT rowid FROM nodes WHERE file_id = ?);")
+        delFtsByRowid.bindString(1, fileId)
+        delFtsByRowid.step()
 
-            val delVocabByFile = scope.prepare(
-                "DELETE FROM name_segment_vocab WHERE node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);"
-            )
-            delVocabByFile.bindString(1, fileId)
-            delVocabByFile.step()
+        val delFtsByFile = scope.prepare("DELETE FROM nodes_fts WHERE file_id = ?;")
+        delFtsByFile.bindString(1, fileId)
+        delFtsByFile.step()
 
-            val delSourceEdges = scope.prepare(
-                "DELETE FROM edges WHERE project_id = ? AND source_node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);"
-            )
-            delSourceEdges.bindString(1, projectId)
-            delSourceEdges.bindString(2, fileId)
-            delSourceEdges.step()
+        val delVocabByFile = scope.prepare(
+            "DELETE FROM name_segment_vocab WHERE node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);"
+        )
+        delVocabByFile.bindString(1, fileId)
+        delVocabByFile.step()
 
-            val delTargetEdges = scope.prepare(
-                "DELETE FROM edges WHERE project_id = ? AND target_node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);"
-            )
-            delTargetEdges.bindString(1, projectId)
-            delTargetEdges.bindString(2, fileId)
-            delTargetEdges.step()
+        val delSourceEdges = scope.prepare(
+            "DELETE FROM edges WHERE project_id = ? AND source_node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);"
+        )
+        delSourceEdges.bindString(1, projectId)
+        delSourceEdges.bindString(2, fileId)
+        delSourceEdges.step()
 
-            val delNodes = scope.prepare("DELETE FROM nodes WHERE file_id = ?;")
-            delNodes.bindString(1, fileId)
-            delNodes.step()
-        }
+        val delTargetEdges = scope.prepare(
+            "DELETE FROM edges WHERE project_id = ? AND target_node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);"
+        )
+        delTargetEdges.bindString(1, projectId)
+        delTargetEdges.bindString(2, fileId)
+        delTargetEdges.step()
+
+        val delNodes = scope.prepare("DELETE FROM nodes WHERE file_id = ?;")
+        delNodes.bindString(1, fileId)
+        delNodes.step()
 
         val delRawEdges = scope.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
         delRawEdges.bindString(1, projectId)
@@ -519,7 +527,7 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun upsertFileRecord(record: FileRecordUpsert): String {
         val fileId = "${record.projectId}:${record.relPath}"
-        withSavepoint("sp_index_file") {
+        withImmediateTransaction {
             val scope = StatementScope(db)
             try {
                 purgeExistingFileNodesAndEdges(scope, record.projectId, fileId)
@@ -597,7 +605,7 @@ class SqliteGraphStore(val dbPath: String) {
 
     fun deleteFileRecord(projectId: String, relPath: String, recomputeDegrees: Boolean = true) {
         val fileId = "$projectId:$relPath"
-        withSavepoint("sp_delete_file") {
+        withImmediateTransaction {
             val scope = StatementScope(db)
             val oldNodes: List<String>
             try {
@@ -675,14 +683,12 @@ class SqliteGraphStore(val dbPath: String) {
         stmts.insFts.bindString(7, node.fileId)
         stmts.insFts.step()
 
-        for (seg in NameSegmentTokenizer.tokenize("${node.name} ${node.qualifiedName}")) {
-            stmts.insVocab.reset()
-            stmts.insVocab.clearBindings()
-            stmts.insVocab.bindString(1, seg)
-            stmts.insVocab.bindString(2, node.nodeId)
-            stmts.insVocab.bindString(3, node.projectId)
-            stmts.insVocab.step()
-        }
+        searchAndVocabDao.insertNodeVocabulary(
+            stmts.insVocab,
+            node.nodeId,
+            node.projectId,
+            "${node.name} ${node.qualifiedName}"
+        )
     }
 
     private fun bindUpsertEdge(stmt: NativeSqliteStatement, edge: GraphEdge) {
@@ -739,7 +745,7 @@ class SqliteGraphStore(val dbPath: String) {
         edges: List<GraphEdge>
     ) {
         if (nodes.isEmpty() && edges.isEmpty()) return
-        withSavepoint("sp_upsert_nodes_edges") {
+        withImmediateTransaction {
             val scope = StatementScope(db)
             try {
                 val delFtsByNodeId = scope.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
@@ -874,13 +880,77 @@ class SqliteGraphStore(val dbPath: String) {
         )
     }
 
-    private fun getNodeByCodeLocation(projectId: String, codeLink: UrlTargetResolver.CodeLocationLink): GraphNode? {
+fun getNode(projectId: String, target: String): GraphNode? {
+        val codeLink = UrlTargetResolver.parseCodeLocationUrl(target)
+        if (codeLink != null) {
+            return getNodeByCodeLocation(projectId, codeLink)
+        }
+
+        val routeNode = getNodeByHttpRoute(projectId, target)
+        if (routeNode != null) {
+            return routeNode
+        }
+
+        return getNodeByNameOrId(projectId, target)
+    }
+
+    fun queryByUrl(projectId: String, target: String): GraphNode? {
+        val direct = getNode(projectId, target)
+        if (direct != null) return direct
+
+        // Support filePath:line coordinate syntax
+        if (target.contains(':') && !target.startsWith("http://", ignoreCase = true) && !target.startsWith("https://", ignoreCase = true) && !target.startsWith("file://", ignoreCase = true)) {
+            val lastColon = target.lastIndexOf(':')
+            val pathPart = target.substring(0, lastColon)
+            val linePart = target.substring(lastColon + 1)
+            val lineNum = linePart.toIntOrNull()
+            if (lineNum != null && pathPart.isNotEmpty()) {
+                val nodesAtLoc = queryNodesAtLocation(projectId, pathPart, lineNum)
+                if (nodesAtLoc.isNotEmpty()) return nodesAtLoc.first()
+            }
+        }
+        return null
+    }
+
+    fun queryNodesAtLocation(projectId: String, filePath: String, line: Int): List<GraphNode> {
+        val norm = filePath.trim().trim('\'', '"').removePrefix("./").replace('\\', '/')
+        val escaped = NativeSqliteStatement.escapeSqlLike(norm)
+        val stmt = db.prepare(
+            """
+            SELECT ${SqliteGraphStore.NODES_SELECT_COLUMNS}
+            FROM nodes
+            WHERE project_id = ?
+              AND kind NOT IN ('file', 'file_scope', 'module')
+              AND start_line <= ? AND end_line >= ?
+              AND (file_id = ? OR file_id = ? OR file_id LIKE ? ESCAPE '\' OR file_id LIKE ? ESCAPE '\')
+            ORDER BY (end_line - start_line) ASC, start_line DESC, in_degree DESC;
+            """.trimIndent()
+        )
+        val results = mutableListOf<GraphNode>()
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindInt(2, line)
+            stmt.bindInt(3, line)
+            stmt.bindString(4, "$projectId:$norm")
+            stmt.bindString(5, norm)
+            stmt.bindString(6, "%:$escaped")
+            stmt.bindString(7, "%/$escaped")
+            while (stmt.step()) {
+                results.add(rowToNode(stmt))
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun getNodeByCodeLocation(projectId: String, codeLink: UrlTargetResolver.CodeLocationLink): GraphNode? {
         val escapedSuffix = NativeSqliteStatement.escapeSqlLike(codeLink.filePathSuffix)
         if (codeLink.startLine != null) {
             val targetLine = codeLink.startLine
             val spanStmt = db.prepare(
                 """
-                SELECT $NODES_SELECT_COLUMNS
+                SELECT ${SqliteGraphStore.NODES_SELECT_COLUMNS}
                 FROM nodes
                 WHERE project_id = ?
                   AND kind NOT IN ('file', 'file_scope', 'module')
@@ -906,7 +976,7 @@ class SqliteGraphStore(val dbPath: String) {
         if (codeLink.symbolFragment != null) {
             val symStmt = db.prepare(
                 """
-                SELECT $NODES_SELECT_COLUMNS
+                SELECT ${SqliteGraphStore.NODES_SELECT_COLUMNS}
                 FROM nodes
                 WHERE project_id = ?
                   AND (name = ? OR qualified_name LIKE ? ESCAPE '\')
@@ -935,13 +1005,13 @@ class SqliteGraphStore(val dbPath: String) {
             ?: fileNodes.firstOrNull()
     }
 
-    private fun getNodeByHttpRoute(projectId: String, target: String): GraphNode? {
+    fun getNodeByHttpRoute(projectId: String, target: String): GraphNode? {
         if (!UrlTargetResolver.isHttpRouteCandidate(target, hasExplicitRouteCall = false)) return null
         val canonRoute = UrlTargetResolver.normalizeRouteTemplate(target)
         val epNodeId = "$projectId:endpoint#$canonRoute"
         val epStmt = db.prepare(
             """
-            SELECT $NODES_SELECT_COLUMNS
+            SELECT ${SqliteGraphStore.NODES_SELECT_COLUMNS}
             FROM nodes
             WHERE project_id = ? AND (node_id = ? OR name = ?)
             LIMIT 1;
@@ -958,14 +1028,14 @@ class SqliteGraphStore(val dbPath: String) {
         return null
     }
 
-    private fun getNodeByNameOrId(projectId: String, target: String): GraphNode? {
+    fun getNodeByNameOrId(projectId: String, target: String): GraphNode? {
         val escapedTarget = NativeSqliteStatement.escapeSqlLike(target)
         val cleanHashTarget = target.removePrefix("#")
         val tagTarget = "tag#$cleanHashTarget"
         val projTarget = "$projectId:$target"
         val stmt = db.prepare(
             """
-            SELECT $NODES_SELECT_COLUMNS
+            SELECT ${SqliteGraphStore.NODES_SELECT_COLUMNS}
             FROM nodes
             WHERE project_id = ? AND (
                 node_id = ?
@@ -1008,20 +1078,6 @@ class SqliteGraphStore(val dbPath: String) {
         } finally {
             stmt.close()
         }
-    }
-
-    fun getNode(projectId: String, target: String): GraphNode? {
-        val codeLink = UrlTargetResolver.parseCodeLocationUrl(target)
-        if (codeLink != null) {
-            return getNodeByCodeLocation(projectId, codeLink)
-        }
-
-        val routeNode = getNodeByHttpRoute(projectId, target)
-        if (routeNode != null) {
-            return routeNode
-        }
-
-        return getNodeByNameOrId(projectId, target)
     }
 
     fun getNodesForFile(projectId: String, relPath: String): List<GraphNode> {
@@ -1082,194 +1138,15 @@ class SqliteGraphStore(val dbPath: String) {
         return results
     }
 
-    private fun scoreFtsSegments(
-        projectId: String,
-        segments: List<String>,
-        limit: Int,
-        scores: MutableMap<String, Double>
-    ) {
-        val ftsExpr = segments.joinToString(" OR ") { "\"${it.replace("\"", "\"\"")}\"*" }
-        try {
-            db.prepare(
-                """
-                SELECT node_id, bm25(nodes_fts) AS rank
-                FROM nodes_fts
-                WHERE project_id = ? AND nodes_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?;
-                """.trimIndent()
-            ).use { ftsStmt ->
-                ftsStmt.bindString(1, projectId)
-                ftsStmt.bindString(2, ftsExpr)
-                ftsStmt.bindInt(3, (limit * 10).coerceAtLeast(100))
-                while (ftsStmt.step()) {
-                    val nid = ftsStmt.columnString(0)
-                    val rank = ftsStmt.columnDouble(1)
-                    val current = scores.getOrElse(nid) { 0.0 }
-                    scores[nid] = current + (10.0 / (1.0 + abs(rank)))
-                }
-            }
-        } catch (e: Exception) {
-            PlatformFiles.logWarning("SqliteGraphStore", "FTS segment ranking failed: ${e.message}")
-        }
-    }
-
-    private fun scoreVocabCoverage(
-        projectId: String,
-        segments: List<String>,
-        scores: MutableMap<String, Double>
-    ) {
-        for (chunk in segments.chunked(250)) {
-            val placeholders = chunk.joinToString(",") { "?" }
-            val vocabSql = """
-                SELECT node_id, COUNT(*) AS matched_segments
-                FROM name_segment_vocab
-                WHERE project_id = ? AND segment IN ($placeholders)
-                GROUP BY node_id;
-            """.trimIndent()
-            val vocabStmt = db.prepare(vocabSql)
-            try {
-                vocabStmt.bindString(1, projectId)
-                chunk.forEachIndexed { i, s -> vocabStmt.bindString(2 + i, s) }
-                while (vocabStmt.step()) {
-                    val nid = vocabStmt.columnString(0)
-                    val matched = vocabStmt.columnInt(1)
-                    val coverage = matched.toDouble() / segments.size.toDouble()
-                    val current = scores.getOrElse(nid) { 0.0 }
-                    scores[nid] = current + (coverage * coverage * 15.0)
-                }
-            } finally {
-                vocabStmt.close()
-            }
-        }
-    }
-
-    private data class NameSearchFilter(
-        val query: String,
-        val limit: Int,
-        val kind: String?
-    )
-
-    private fun scoreExactAndFuzzyNames(
-        projectId: String,
-        filter: NameSearchFilter,
-        scores: MutableMap<String, Double>
-    ) {
-        val query = filter.query
-        val limit = filter.limit
-        val kind = filter.kind
-        val escapedQuery = NativeSqliteStatement.escapeSqlLike(query)
-        val kindClause = if (kind != null) " AND kind = ?" else ""
-
-        val likeStmt = db.prepare(
-            """
-            SELECT node_id, name, in_degree FROM nodes
-            WHERE project_id = ?
-              AND (name LIKE ? ESCAPE '\' OR qualified_name LIKE ? ESCAPE '\')$kindClause
-            ORDER BY (LOWER(name) = LOWER(?)) DESC,
-                     (LOWER(name) LIKE LOWER(?) ESCAPE '\') DESC,
-                     in_degree DESC,
-                     name ASC
-            LIMIT ?;
-            """.trimIndent()
-        )
-        try {
-            var idx = 1
-            likeStmt.bindString(idx++, projectId)
-            likeStmt.bindString(idx++, "%$escapedQuery%")
-            likeStmt.bindString(idx++, "%$escapedQuery%")
-            if (kind != null) likeStmt.bindString(idx++, kind)
-            likeStmt.bindString(idx++, query)
-            likeStmt.bindString(idx++, "$escapedQuery%")
-            likeStmt.bindInt(idx, (limit * 5).coerceAtLeast(50))
-            while (likeStmt.step()) {
-                val nid = likeStmt.columnString(0)
-                val name = likeStmt.columnString(1)
-                val inDeg = likeStmt.columnInt(2)
-                val bonus = when {
-                    name.equals(query, ignoreCase = true) -> 25.0
-                    name.startsWith(query, ignoreCase = true) -> 16.0
-                    else -> 12.0
-                } + minOf(10.0, inDeg.coerceAtLeast(0).toDouble() * 0.5)
-                val current = scores.getOrElse(nid) { 0.0 }
-                scores[nid] = current + bonus
-            }
-        } finally {
-            likeStmt.close()
-        }
-    }
-
-    private fun queryRankedNodesChunk(
-        chunk: List<String>,
-        kind: String?,
-        nodeMap: MutableMap<String, GraphNode>
-    ) {
-        val placeholders = chunk.joinToString(",") { "?" }
-        val kindClause = if (kind != null) " AND kind = ?" else ""
-        val nodesStmt = db.prepare(
-            "SELECT $NODES_SELECT_COLUMNS FROM nodes WHERE node_id IN ($placeholders)$kindClause;"
-        )
-        try {
-            chunk.forEachIndexed { i, id -> nodesStmt.bindString(1 + i, id) }
-            if (kind != null) nodesStmt.bindString(1 + chunk.size, kind)
-            while (nodesStmt.step()) {
-                val node = rowToNode(nodesStmt)
-                nodeMap[node.nodeId] = node
-            }
-        } finally {
-            nodesStmt.close()
-        }
-    }
-
-    private fun loadRankedNodesMap(
-        rankedIds: List<String>,
-        limit: Int,
-        kind: String? = null
-    ): Map<String, GraphNode> {
-        val nodeMap = mutableMapOf<String, GraphNode>()
-        val targetCap = (limit * 5).coerceAtLeast(50)
-        val batchIds = if (kind == null) rankedIds.take(targetCap) else rankedIds
-        for (chunk in batchIds.chunked(250)) {
-            if (nodeMap.size >= targetCap) break
-            queryRankedNodesChunk(chunk, kind, nodeMap)
-        }
-        return nodeMap
-    }
-
     fun searchNodes(
         projectId: String,
         query: String,
         limit: Int = 15,
         kind: String? = null
-    ): List<GraphNode> {
-        val scores = mutableMapOf<String, Double>()
-        val segments = NameSegmentTokenizer.tokenize(query)
+    ): List<GraphNode> = searchAndVocabDao.searchNodes(projectId, query, limit, kind)
 
-        if (segments.isNotEmpty()) {
-            scoreFtsSegments(projectId, segments, limit, scores)
-            scoreVocabCoverage(projectId, segments, scores)
-        }
-
-        scoreExactAndFuzzyNames(projectId, NameSearchFilter(query, limit, kind), scores)
-
-        if (scores.isEmpty()) return emptyList()
-
-        val rankedIds = scores.entries.sortedByDescending { it.value }.map { it.key }
-        val nodeMap = loadRankedNodesMap(rankedIds, limit, kind)
-
-        val candidates = rankedIds.mapNotNull { nid ->
-            val node = nodeMap[nid]
-            if (node != null && (kind == null || node.kind == kind)) node else null
-        }.sortedWith(
-            compareByDescending<GraphNode> { scores[it.nodeId] ?: 0.0 }
-                .thenByDescending { it.name.equals(query, ignoreCase = true) }
-                .thenByDescending { it.name.startsWith(query, ignoreCase = true) }
-                .thenByDescending { it.inDegree }
-                .thenBy { it.name }
-        )
-
-        return candidates.take(limit)
-    }
+    fun rebuildVocabulary(projectId: String) =
+        searchAndVocabDao.rebuildVocabulary(projectId)
 
     fun getCallers(projectId: String, nodeId: String, depth: Int = 2): List<GraphHop> =
         traversalDao.getCallers(projectId, nodeId, depth)
@@ -1500,9 +1377,9 @@ class SqliteGraphStore(val dbPath: String) {
         depth: Int = 2
     ): List<FigmaNode> = figmaDao.queryFigmaCallers(fileKey, componentNameOrId, depth)
 
-    fun prepare(sql: String): NativeSqliteStatement = db.prepare(sql)
+    internal fun prepare(sql: String): NativeSqliteStatement = db.prepare(sql)
 
-    fun exec(sql: String) {
+    internal fun exec(sql: String) {
         db.exec(sql)
     }
 
