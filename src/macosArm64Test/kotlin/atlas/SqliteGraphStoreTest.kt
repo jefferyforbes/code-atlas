@@ -1,12 +1,14 @@
 package atlas
 
 import atlas.db.SqliteGraphStore
+import atlas.engine.WorkspaceIndexer
 import atlas.model.ComposeNodeRecord
 import atlas.model.ComposeParamRecord
 import atlas.model.FigmaDocument
 import atlas.model.FigmaNode
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
+import atlas.util.PlatformFiles
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -160,6 +162,83 @@ class SqliteGraphStoreTest {
             assertTrue(complexNodes.any { it.nodeId == "n:caller" && it.cognitive == 3 })
         } finally {
             store.close()
+        }
+    }
+
+    @Test
+    fun `test WorkspaceIndexer preserves file local class stability priority and SQLite schema fast path on reopen`() {
+        val tempRoot = "/tmp/atlas-indexer-test-${kotlin.random.Random.nextInt(100_000, 999_999)}"
+        val dbPath = "$tempRoot/graph.db"
+        try {
+            PlatformFiles.mkdirs("$tempRoot/src/featureA")
+            PlatformFiles.mkdirs("$tempRoot/src/featureB")
+
+            PlatformFiles.writeText(
+                "$tempRoot/src/featureA/ScreenA.kt",
+                """
+                package com.example.featureA
+
+                import androidx.compose.runtime.Composable
+
+                data class UiState(val title: String)
+
+                @Composable
+                fun ScreenA(state: UiState) {
+                    Text(state.title)
+                }
+                """.trimIndent()
+            )
+            PlatformFiles.writeText(
+                "$tempRoot/src/featureB/ScreenB.kt",
+                """
+                package com.example.featureB
+
+                import androidx.compose.runtime.Composable
+
+                class UiState(var mutableCounter: Int)
+
+                @Composable
+                fun ScreenB(state: UiState) {
+                    Text(state.mutableCounter.toString())
+                }
+                """.trimIndent()
+            )
+
+            val store1 = SqliteGraphStore(dbPath)
+            try {
+                val indexer = WorkspaceIndexer(tempRoot, store1)
+                indexer.indexWorkspace(projectId = "collision-proj", force = true)
+            } finally {
+                store1.close()
+            }
+
+            // Reopen existing DB to exercise GraphSchemaMigrator PRAGMA user_version = 8 fast-path
+            val store2 = SqliteGraphStore(dbPath)
+            try {
+                val composeNodes = store2.listComposeNodes("collision-proj").associateBy { it.fqName }
+                val screenA = composeNodes["com.example.featureA.ScreenA"]
+                val screenB = composeNodes["com.example.featureB.ScreenB"]
+                assertNotNull(screenA)
+                assertNotNull(screenB)
+
+                val paramsA = store2.listComposeParams(screenA.nodeId).associateBy { it.paramName }
+                val paramsB = store2.listComposeParams(screenB.nodeId).associateBy { it.paramName }
+
+                assertEquals(
+                    "STABLE",
+                    paramsA["state"]?.stability,
+                    "File-local stable UiState in ScreenA.kt must not be overwritten by unstable UiState in ScreenB.kt"
+                )
+                assertEquals(
+                    "UNSTABLE",
+                    paramsB["state"]?.stability,
+                    "File-local unstable UiState in ScreenB.kt must not be overwritten by stable UiState in ScreenA.kt"
+                )
+            } finally {
+                store2.close()
+            }
+        } finally {
+            PlatformFiles.deleteRecursively(tempRoot)
         }
     }
 }

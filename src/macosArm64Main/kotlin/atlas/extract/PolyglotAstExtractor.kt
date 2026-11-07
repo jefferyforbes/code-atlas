@@ -172,14 +172,15 @@ class PolyglotAstExtractor {
             projectId: String,
             relPath: String,
             sourceText: String,
-            knownModules: List<String> = emptyList()
+            knownModules: List<String> = emptyList(),
+            precomputedMaskedText: String? = null
         ): Triple<List<GraphNode>, List<GraphEdge>, Int> {
             val ext = if (relPath.contains('.')) "." + relPath.substringAfterLast('.') else ""
             val lang = supportedLanguage(ext)
             val moduleId = ModuleBoundaryDetector.resolveModuleId(relPath, knownModules)
             val sourceSet = SemioticLayerClassifier.detectSourceSet(relPath)
 
-            val maskedText = maskCommentsAndStrings(sourceText, lang)
+            val maskedText = precomputedMaskedText ?: maskCommentsAndStrings(sourceText, lang)
             val ctx = SourceDispatchContext(projectId, relPath, sourceText, moduleId, sourceSet, maskedText)
             val extracted = dispatchLanguageExtraction(lang, ctx)
                 ?: return Triple(emptyList(), emptyList(), 0)

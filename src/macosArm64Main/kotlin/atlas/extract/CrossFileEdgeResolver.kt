@@ -13,12 +13,24 @@ internal object CrossFileEdgeResolver {
         val byQName: Map<String, GraphNode>,
         val byNodeId: Map<String, GraphNode>,
         private val simpleNames: MutableMap<String, String> = mutableMapOf(),
+        private val fileDirs: MutableMap<String, String> = mutableMapOf(),
+        private val parentScopes: MutableMap<String, String> = mutableMapOf(),
         private val tokenSets: MutableMap<String, Set<String>> = mutableMapOf(),
         private val receiverTokens: MutableMap<String, Set<String>> = mutableMapOf()
     ) {
         fun simpleNameOf(cand: GraphNode): String =
             simpleNames.getOrPut(cand.fileId) {
                 cand.fileId.substringAfterLast('/').substringBeforeLast('.')
+            }
+
+        fun dirOf(fileId: String): String =
+            fileDirs.getOrPut(fileId) {
+                fileId.substringBeforeLast('/', "")
+            }
+
+        fun parentScopeOf(node: GraphNode): String =
+            parentScopes.getOrPut(node.nodeId) {
+                node.qualifiedName.substringBeforeLast('.', "")
             }
 
         fun tokensOf(cand: GraphNode, candSimpleName: String): Set<String> =
@@ -40,7 +52,8 @@ internal object CrossFileEdgeResolver {
         val srcNode: GraphNode?,
         val srcFileId: String,
         val srcModId: String,
-        val fileImports: Set<String>
+        val fileImports: Set<String>,
+        val index: NodeLookupIndex
     )
 
     private data class DisambiguatedTarget(
@@ -204,26 +217,30 @@ internal object CrossFileEdgeResolver {
         return fileImports.any { imp -> qn.endsWith(".$imp") }
     }
 
-    private fun filterByLexicalScope(pool: List<GraphNode>, srcNode: GraphNode?): List<GraphNode> {
+    private fun filterByLexicalScope(
+        pool: List<GraphNode>,
+        srcNode: GraphNode?,
+        index: NodeLookupIndex
+    ): List<GraphNode> {
         if (pool.size <= 1 || srcNode == null) return pool
-        val srcScope = srcNode.qualifiedName.substringBeforeLast('.', "")
+        val srcScope = index.parentScopeOf(srcNode)
         if (srcScope.isEmpty()) return pool
 
-        val exactScope = pool.filter { it.qualifiedName.substringBeforeLast('.', "") == srcScope }
+        val exactScope = pool.filter { index.parentScopeOf(it) == srcScope }
         if (exactScope.isNotEmpty()) return exactScope
 
         val companionScope = pool.filter { cand ->
-            cand.qualifiedName.substringBeforeLast('.', "") == "$srcScope.Companion"
+            index.parentScopeOf(cand) == "$srcScope.Companion"
         }
         if (companionScope.isNotEmpty()) return companionScope
 
         val outerScope = pool.filter { cand ->
-            val candScope = cand.qualifiedName.substringBeforeLast('.', "")
+            val candScope = index.parentScopeOf(cand)
             candScope.isNotEmpty() && srcScope.startsWith("$candScope.")
         }
         if (outerScope.isNotEmpty()) {
-            val maxLen = outerScope.maxOf { it.qualifiedName.substringBeforeLast('.', "").length }
-            return outerScope.filter { it.qualifiedName.substringBeforeLast('.', "").length == maxLen }
+            val maxLen = outerScope.maxOf { index.parentScopeOf(it).length }
+            return outerScope.filter { index.parentScopeOf(it).length == maxLen }
         }
 
         val topLevel = pool.filter { it.isTopLevel }
@@ -237,9 +254,9 @@ internal object CrossFileEdgeResolver {
         ctx: DisambiguationContext
     ): List<GraphNode> {
         var pool = initialPool
-        val srcDir = ctx.srcFileId.substringBeforeLast('/', "")
+        val srcDir = ctx.index.dirOf(ctx.srcFileId)
         if (srcDir.isNotEmpty()) {
-            val sameDir = pool.filter { it.fileId.substringBeforeLast('/', "") == srcDir }
+            val sameDir = pool.filter { ctx.index.dirOf(it.fileId) == srcDir }
             if (sameDir.isNotEmpty()) pool = sameDir
         }
         if (ctx.srcModId.isNotEmpty()) {
@@ -261,20 +278,20 @@ internal object CrossFileEdgeResolver {
         ctx: DisambiguationContext
     ): List<GraphNode> {
         val sameFile = candidatePool.filter { it.fileId == ctx.srcFileId }
-        if (sameFile.isNotEmpty()) return filterByLexicalScope(sameFile, ctx.srcNode)
+        if (sameFile.isNotEmpty()) return filterByLexicalScope(sameFile, ctx.srcNode, ctx.index)
 
         val imported = candidatePool.filter { isSymbolImported(it.qualifiedName, ctx.fileImports) }
-        if (imported.isNotEmpty()) return filterByLexicalScope(imported, ctx.srcNode)
+        if (imported.isNotEmpty()) return filterByLexicalScope(imported, ctx.srcNode, ctx.index)
 
         if (receiverMatches.isNotEmpty()) {
-            return filterByLexicalScope(narrowCandidatePool(receiverMatches, ctx), ctx.srcNode)
+            return filterByLexicalScope(narrowCandidatePool(receiverMatches, ctx), ctx.srcNode, ctx.index)
         }
 
         val narrowed = narrowCandidatePool(candidatePool, ctx)
         if (narrowed.size < candidatePool.size) {
-            return filterByLexicalScope(narrowed, ctx.srcNode)
+            return filterByLexicalScope(narrowed, ctx.srcNode, ctx.index)
         }
-        return filterByLexicalScope(fallback, ctx.srcNode)
+        return filterByLexicalScope(fallback, ctx.srcNode, ctx.index)
     }
 
     private fun pickBestCandidate(pool: List<GraphNode>): GraphNode =
@@ -303,7 +320,7 @@ internal object CrossFileEdgeResolver {
         val srcFileId = srcNode?.fileId ?: edge.sourceNodeId.substringBefore("#")
         val srcModId = srcNode?.moduleId.orEmpty()
         val fileImports = importsByFile[srcFileId].orEmpty()
-        val ctx = DisambiguationContext(srcNode, srcFileId, srcModId, fileImports)
+        val ctx = DisambiguationContext(srcNode, srcFileId, srcModId, fileImports, index)
 
         val receiver = extractSymbolReceiver(sym)
         val receiverMatches = resolveReceiverMatches(candidates, receiver, srcFileId, index)
