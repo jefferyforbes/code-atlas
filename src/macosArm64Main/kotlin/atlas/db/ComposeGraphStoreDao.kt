@@ -284,12 +284,13 @@ internal class ComposeGraphStoreDao(private val db: NativeSqliteDatabase) {
     }
 
     fun getComposeNode(projectSlug: String, target: String): ComposeNodeRecord? {
+        val escapedTarget = NativeSqliteStatement.escapeSqlLike(target)
         val stmt = db.prepare(
             """
             SELECT $COMPOSE_NODES_SELECT_COLUMNS
             FROM compose_nodes
             WHERE project_slug = ?
-              AND (node_id = ? OR fqname = ? OR fqname LIKE ?)
+              AND (node_id = ? OR fqname = ? OR fqname LIKE ? ESCAPE '\')
             ORDER BY CASE WHEN node_id = ? THEN 0 WHEN fqname = ? THEN 1 ELSE 2 END
             LIMIT 1;
             """.trimIndent()
@@ -298,7 +299,7 @@ internal class ComposeGraphStoreDao(private val db: NativeSqliteDatabase) {
             stmt.bindString(1, projectSlug)
             stmt.bindString(2, target)
             stmt.bindString(3, target)
-            stmt.bindString(4, "%.$target")
+            stmt.bindString(4, "%.$escapedTarget")
             stmt.bindString(5, target)
             stmt.bindString(6, target)
             if (stmt.step()) {

@@ -270,4 +270,54 @@ class ComposeSqliteStoreTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testGetComposeNodeUnderscoreWildcardEscaping() {
+        val dbPath = "/tmp/atlas_compose_escape_test_${kotlin.random.Random.nextInt(100000, 999999)}.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val nodeWithUnderscore = ComposeNodeRecord(
+                nodeId = "proj:ui/My_Screen.kt#My_Screen",
+                projectSlug = "proj",
+                fqName = "com.example.ui.My_Screen",
+                filePath = "ui/My_Screen.kt",
+                startLine = 1,
+                endLine = 20,
+                sourceSet = "commonMain",
+                isRestartable = true,
+                isSkippable = true,
+                unstableParamCount = 0,
+                provenance = "STATIC_INFERRED",
+                violationMask = 0
+            )
+            val nodeWithX = ComposeNodeRecord(
+                nodeId = "proj:ui/MyXScreen.kt#MyXScreen",
+                projectSlug = "proj",
+                fqName = "com.example.ui.MyXScreen",
+                filePath = "ui/MyXScreen.kt",
+                startLine = 1,
+                endLine = 20,
+                sourceSet = "commonMain",
+                isRestartable = true,
+                isSkippable = true,
+                unstableParamCount = 0,
+                provenance = "STATIC_INFERRED",
+                violationMask = 0
+            )
+            store.upsertComposeNodesAndParams(listOf(nodeWithX, nodeWithUnderscore), emptyList())
+
+            // getComposeNode by short name containing underscore should match My_Screen, NOT MyXScreen
+            val resolvedNode = store.getComposeNode("proj", "My_Screen")
+            assertNotNull(resolvedNode)
+            assertEquals("com.example.ui.My_Screen", resolvedNode.fqName)
+            assertEquals("proj:ui/My_Screen.kt#My_Screen", resolvedNode.nodeId)
+
+            val resolvedX = store.getComposeNode("proj", "MyXScreen")
+            assertNotNull(resolvedX)
+            assertEquals("com.example.ui.MyXScreen", resolvedX.fqName)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
 }

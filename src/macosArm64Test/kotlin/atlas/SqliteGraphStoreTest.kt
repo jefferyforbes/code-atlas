@@ -423,6 +423,61 @@ class SqliteGraphStoreTest {
     }
 
     @Test
+    fun `test UrlResolutionDao queryByUrl and queryNodesAtLocation`() {
+        val store = SqliteGraphStore(":memory:")
+        try {
+            val projectId = "proj_url_test"
+            val fileRecord = SqliteGraphStore.FileRecordUpsert(
+                projectId = projectId,
+                relPath = "src/OrderController.kt",
+                language = "kotlin",
+                moduleId = "core",
+                sourceSet = "main",
+                semioticLayer = "pragmatic",
+                archLayer = "interface",
+                sha256 = "abc",
+                mtime = 1.0,
+                loc = 50,
+                topLevelDeclCount = 1
+            )
+            store.upsertFileRecord(fileRecord)
+
+            val node = GraphNode(
+                nodeId = "$projectId:src/OrderController.kt#placeOrder",
+                projectId = projectId,
+                fileId = "$projectId:src/OrderController.kt",
+                name = "placeOrder",
+                qualifiedName = "com.shop.OrderController.placeOrder",
+                kind = "function",
+                startLine = 10,
+                endLine = 25
+            )
+            store.upsertNodesAndEdges(projectId, listOf(node), emptyList())
+
+            // Test queryNodesAtLocation
+            val locNodes = store.queryNodesAtLocation(projectId, "src/OrderController.kt", 15)
+            assertEquals(1, locNodes.size)
+            assertEquals(node.nodeId, locNodes.first().nodeId)
+
+            // Test queryByUrl with line coordinate URL
+            val urlNode = store.queryByUrl(projectId, "src/OrderController.kt:18")
+            assertNotNull(urlNode)
+            assertEquals(node.nodeId, urlNode.nodeId)
+
+            val fragmentUrlNode = store.queryByUrl(projectId, "src/OrderController.kt#L18")
+            assertNotNull(fragmentUrlNode)
+            assertEquals(node.nodeId, fragmentUrlNode.nodeId)
+
+            // Test getNode delegation
+            val fetched = store.getNode(projectId, "$projectId:src/OrderController.kt#placeOrder")
+            assertNotNull(fetched)
+            assertEquals("placeOrder", fetched.name)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun `test unconditional nodes_fts purge by rowid even when oldNodes is empty`() {
         val store = SqliteGraphStore(":memory:")
         try {
