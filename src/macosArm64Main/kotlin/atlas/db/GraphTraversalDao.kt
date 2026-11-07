@@ -723,6 +723,7 @@ internal class GraphTraversalDao(
                complexity_score
             FROM nodes
             WHERE project_id = ? AND cognitive_complexity >= ? AND kind IN ('function', 'method', 'composable')
+               AND semiotic_layer != 'test' AND arch_layer != 'test' AND is_test_double = 0
             ORDER BY cognitive_complexity DESC, in_degree DESC
             LIMIT ?;
             """.trimIndent()

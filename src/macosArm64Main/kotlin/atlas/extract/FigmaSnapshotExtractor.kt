@@ -1,6 +1,5 @@
 package atlas.extract
 
-import atlas.db.SqliteGraphStore
 import atlas.model.FigmaDocument
 import atlas.model.FigmaEdge
 import atlas.model.FigmaExtractedSnapshot
@@ -64,10 +63,21 @@ class FigmaSnapshotExtractor {
     }
 
     /**
-     * Ingests Figma document AST JSON and optional DTCG tokens into SQLite graph store.
+     * Storage sink interface decoupling Figma extraction from concrete SQLite persistence.
+     */
+    interface StoreSink {
+        fun deleteFigmaDocument(fileKey: String)
+        fun insertFigmaDocument(document: FigmaDocument)
+        fun insertFigmaNodes(fileKey: String, nodes: List<FigmaNode>)
+        fun insertFigmaVariables(fileKey: String, variables: List<FigmaVariable>)
+        fun insertFigmaEdges(fileKey: String, edges: List<FigmaEdge>)
+    }
+
+    /**
+     * Ingests Figma document AST JSON and optional DTCG tokens into a storage sink.
      */
     fun ingest(
-        store: SqliteGraphStore,
+        store: StoreSink,
         fileKey: String,
         astJson: String,
         tokensJson: String? = null

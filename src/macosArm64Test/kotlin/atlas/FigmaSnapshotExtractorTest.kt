@@ -834,4 +834,50 @@ class FigmaSnapshotExtractorTest {
         assertEquals(1, blastRadius.boundNodes.size)
         assertEquals("node:card_bg", blastRadius.boundNodes[0].nodeId)
     }
+
+    @Test
+    fun `test StoreSink interface decouples extraction from concrete SQLite store`() {
+        class InMemoryStoreSink : FigmaSnapshotExtractor.StoreSink {
+            var deletedKey: String? = null
+            var insertedDoc: atlas.model.FigmaDocument? = null
+            val insertedNodes = mutableListOf<atlas.model.FigmaNode>()
+            val insertedVariables = mutableListOf<atlas.model.FigmaVariable>()
+            val insertedEdges = mutableListOf<atlas.model.FigmaEdge>()
+
+            override fun deleteFigmaDocument(fileKey: String) { deletedKey = fileKey }
+            override fun insertFigmaDocument(document: atlas.model.FigmaDocument) { insertedDoc = document }
+            override fun insertFigmaNodes(fileKey: String, nodes: List<atlas.model.FigmaNode>) { insertedNodes.addAll(nodes) }
+            override fun insertFigmaVariables(fileKey: String, variables: List<atlas.model.FigmaVariable>) { insertedVariables.addAll(variables) }
+            override fun insertFigmaEdges(fileKey: String, edges: List<atlas.model.FigmaEdge>) { insertedEdges.addAll(edges) }
+        }
+
+        val sink = InMemoryStoreSink()
+        val extractor = FigmaSnapshotExtractor()
+        val ast = """
+        {
+          "name": "Decoupled Test",
+          "document": {
+            "id": "0:0",
+            "type": "DOCUMENT",
+            "children": [
+              {
+                "id": "1:1",
+                "name": "Frame A",
+                "type": "FRAME"
+              }
+            ]
+          }
+        }
+        """.trimIndent()
+
+        val snap = extractor.ingest(sink, "decoupled_key", ast)
+        assertEquals("decoupled_key", sink.deletedKey)
+        assertNotNull(sink.insertedDoc)
+        assertEquals("Decoupled Test", sink.insertedDoc?.name)
+        assertEquals(2, sink.insertedNodes.size)
+        assertEquals("0:0", sink.insertedNodes[0].nodeId)
+        assertEquals("1:1", sink.insertedNodes[1].nodeId)
+        assertEquals("Frame A", sink.insertedNodes[1].name)
+        assertEquals(2, snap.nodes.size)
+    }
 }
