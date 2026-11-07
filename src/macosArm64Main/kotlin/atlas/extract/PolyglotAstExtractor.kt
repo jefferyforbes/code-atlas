@@ -20,7 +20,8 @@ class PolyglotAstExtractor {
         val lines: List<String>,
         val maskedLines: List<String>,
         val cleanLines: List<String>,
-        val imports: List<Pair<String, Int>>
+        val imports: List<Pair<String, Int>>,
+        val lineIndex: LineOffsetIndex = LineOffsetIndex.from(maskedText)
     )
 
     companion object {
@@ -326,7 +327,7 @@ class PolyglotAstExtractor {
         }
 
         internal fun lineNumberAtOffset(text: String, offset: Int): Int =
-            countNewlinesBefore(text, offset) + 1
+            LineOffsetIndex.from(text).lineNumberAt(offset)
 
         private fun skipQuotedInterpolation(line: String, startPos: Int, closeChar: Char): Int {
             val openChar = if (closeChar == ')') '(' else '{'

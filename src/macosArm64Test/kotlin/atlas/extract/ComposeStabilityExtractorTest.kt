@@ -372,4 +372,51 @@ class ComposeStabilityExtractorTest {
         assertEquals("EXPLICIT_STABLE_ANNOTATION", params["actions"]?.stabilityReason, "@Stable public interface must preserve EXPLICIT_STABLE_ANNOTATION")
         assertTrue(comp.isSkippable, "BannerCard with @Immutable/@Stable modified types must be skippable")
     }
+
+    @Test
+    fun testComposableWithNestedGenericsAndExpressionContinuation() {
+        val sample = """
+            package com.example.generics
+
+            import androidx.compose.runtime.Composable
+            import androidx.compose.ui.Modifier
+
+            @Composable
+            fun <T : Comparable<T>> BoundSelector(
+                items: List<T>,
+                selected: T,
+                onSelect: (T) -> Unit,
+                modifier: Modifier = Modifier
+            ) {
+                Text("Selector")
+            }
+
+            @Composable
+            fun ExpressionBadge(label: String, modifier: Modifier = Modifier): Unit =
+                Box(
+                    modifier = modifier
+                        .padding(8.dp)
+                ) {
+                    Text(text = label)
+                }
+        """.trimIndent()
+
+        val bundle = extractor.extractKotlinFile(
+            projectSlug = "proj",
+            relPath = "src/commonMain/kotlin/BoundSelector.kt",
+            sourceText = sample
+        )
+
+        assertEquals(2, bundle.nodes.size, "Should extract BoundSelector and ExpressionBadge")
+        val selector = bundle.nodes.firstOrNull { it.fqName.endsWith(".BoundSelector") }
+        assertTrue(selector != null, "BoundSelector composable with nested generic bound must be extracted")
+        val selectorParams = bundle.params.filter { it.nodeId == selector.nodeId }.map { it.paramName }
+        assertTrue("items" in selectorParams)
+        assertTrue("selected" in selectorParams)
+        assertTrue("onSelect" in selectorParams)
+
+        val exprBadge = bundle.nodes.firstOrNull { it.fqName.endsWith(".ExpressionBadge") }
+        assertTrue(exprBadge != null, "ExpressionBadge with multiline expression continuation must be extracted")
+        assertTrue(exprBadge.endLine >= exprBadge.startLine + 5, "Expression body bounds must include the multiline expression continuation")
+    }
 }

@@ -62,9 +62,12 @@ internal object NativeSystemsAstExtractor {
         val isTopLevel: Boolean
     )
 
-    private fun extractSwiftImports(maskedText: String): List<Pair<String, Int>> =
+    private fun extractSwiftImports(
+        maskedText: String,
+        lineIndex: LineOffsetIndex = LineOffsetIndex.from(maskedText)
+    ): List<Pair<String, Int>> =
         SWIFT_IMP_RE.findAll(maskedText).map { match ->
-            Pair(match.groupValues[1], PolyglotAstExtractor.lineNumberAtOffset(maskedText, match.range.first))
+            Pair(match.groupValues[1], lineIndex.lineNumberAt(match.range.first))
         }.toList()
 
     private fun parseSwiftCallEdge(
@@ -219,7 +222,7 @@ internal object NativeSystemsAstExtractor {
         edges: MutableList<GraphEdge>
     ): Boolean {
         val (indent, kw, name) = extractSwiftDeclHeader(match) ?: return false
-        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, match.range.first)
+        val startLine = ctx.lineIndex.lineNumberAt(match.range.first)
         val endLine = PolyglotAstExtractor.findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
 
         PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
@@ -255,10 +258,11 @@ internal object NativeSystemsAstExtractor {
         val edges = mutableListOf<GraphEdge>()
         val lines = sourceText.lines()
         val maskedText = precomputedMaskedText ?: PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "swift")
+        val lineIndex = LineOffsetIndex.from(maskedText)
         val maskedLines = maskedText.lines()
         val cleanLines = PolyglotAstExtractor.cleanLinesFrom(lines, 0)
         val scopeStack = mutableListOf<PolyglotAstExtractor.ScopeEntry>()
-        val imports = extractSwiftImports(maskedText)
+        val imports = extractSwiftImports(maskedText, lineIndex)
         val ctx = PolyglotAstExtractor.FileExtractionContext(
             projectId = projectId,
             relPath = relPath,
@@ -269,7 +273,8 @@ internal object NativeSystemsAstExtractor {
             lines = lines,
             maskedLines = maskedLines,
             cleanLines = cleanLines,
-            imports = imports
+            imports = imports,
+            lineIndex = lineIndex
         )
 
         var topLevelCount = 0
@@ -285,10 +290,13 @@ internal object NativeSystemsAstExtractor {
         return Triple(nodes, edges, topLevelCount)
     }
 
-    private fun extractRustImports(maskedText: String): List<Pair<String, Int>> =
+    private fun extractRustImports(
+        maskedText: String,
+        lineIndex: LineOffsetIndex = LineOffsetIndex.from(maskedText)
+    ): List<Pair<String, Int>> =
         RS_USE_RE.findAll(maskedText).map { match ->
             val sym = match.groupValues[1].substringAfterLast("::")
-            Pair(sym, PolyglotAstExtractor.lineNumberAtOffset(maskedText, match.range.first))
+            Pair(sym, lineIndex.lineNumberAt(match.range.first))
         }.toList()
 
     private fun resolveRustKind(kw: String): String = when (kw) {
@@ -371,7 +379,7 @@ internal object NativeSystemsAstExtractor {
     ): Boolean {
         val (indent, kw, name) = extractSwiftDeclHeader(match) ?: return false
         val kind = resolveRustKind(kw)
-        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, match.range.first)
+        val startLine = ctx.lineIndex.lineNumberAt(match.range.first)
         val endLine = PolyglotAstExtractor.findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
 
         PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
@@ -452,10 +460,11 @@ internal object NativeSystemsAstExtractor {
         val edges = mutableListOf<GraphEdge>()
         val lines = sourceText.lines()
         val maskedText = precomputedMaskedText ?: PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "rust")
+        val lineIndex = LineOffsetIndex.from(maskedText)
         val maskedLines = maskedText.lines()
         val cleanLines = PolyglotAstExtractor.cleanLinesFrom(lines, 0)
         val scopeStack = mutableListOf<PolyglotAstExtractor.ScopeEntry>()
-        val imports = extractRustImports(maskedText)
+        val imports = extractRustImports(maskedText, lineIndex)
         val ctx = PolyglotAstExtractor.FileExtractionContext(
             projectId = projectId,
             relPath = relPath,
@@ -466,7 +475,8 @@ internal object NativeSystemsAstExtractor {
             lines = lines,
             maskedLines = maskedLines,
             cleanLines = cleanLines,
-            imports = imports
+            imports = imports,
+            lineIndex = lineIndex
         )
 
         var topLevelCount = 0
@@ -578,7 +588,7 @@ internal object NativeSystemsAstExtractor {
         val header = extractSwiftDeclHeader(declMatch) ?: return false
         val (indent, kw, name) = header
         val kind = resolveCppDeclKind(kw)
-        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, declMatch.range.first)
+        val startLine = ctx.lineIndex.lineNumberAt(declMatch.range.first)
         val endLine = PolyglotAstExtractor.findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
 
         PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
@@ -692,7 +702,7 @@ internal object NativeSystemsAstExtractor {
         edges: MutableList<GraphEdge>
     ): Boolean {
         val rawName = declMatch.groups["name"]?.value ?: return false
-        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, declMatch.range.first)
+        val startLine = ctx.lineIndex.lineNumberAt(declMatch.range.first)
         if (isSkippedCppFunction(rawName, nodes, startLine)) return false
 
         val shortName = rawName.substringAfterLast("::")
@@ -816,6 +826,7 @@ internal object NativeSystemsAstExtractor {
         val edges = mutableListOf<GraphEdge>()
         val lines = sourceText.lines()
         val maskedText = precomputedMaskedText ?: PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "cpp")
+        val lineIndex = LineOffsetIndex.from(maskedText)
         val maskedLines = maskedText.lines()
         val cleanLines = PolyglotAstExtractor.cleanLinesFrom(lines, 0)
         val imports = extractCppImports(sourceText, maskedLines)
@@ -830,7 +841,8 @@ internal object NativeSystemsAstExtractor {
             lines = lines,
             maskedLines = maskedLines,
             cleanLines = cleanLines,
-            imports = imports
+            imports = imports,
+            lineIndex = lineIndex
         )
 
         val typeTopLevelCount = collectCppTypeDeclarations(ctx, seenNodeIds, nodes, edges)
