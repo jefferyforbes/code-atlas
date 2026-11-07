@@ -53,7 +53,7 @@ object ComplexityExtractor {
     }
 
     fun computeScore(vector: ComplexityVector): Double {
-        val raw = 100.0 - (vector.cognitive * 3.0) - (maxOf(0, vector.cyclomatic - 1) * 2.0)
+        val raw = 100.0 - (vector.cognitive * 2.0) - (maxOf(0, vector.cyclomatic - 1) * 0.7)
         return raw.coerceIn(0.0, 100.0)
     }
 

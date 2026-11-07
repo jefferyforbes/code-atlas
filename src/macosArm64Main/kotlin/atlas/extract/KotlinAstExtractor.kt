@@ -25,7 +25,7 @@ internal object KotlinAstExtractor {
     private val KT_DECL_RE = Regex(
         """^(?<indent>[ \t]*)(?<annotations>(?:@[A-Za-z0-9_]+(?:\((?:[^()]|\([^()]*\))*\))?\s*)*)""" +
             """(?<modifiers>(?:(?:public|internal|private|protected|open|abstract|sealed|data|value|inline|suspend|expect|actual|override|companion|fun|final|inner|enum|annotation|operator|infix|tailrec|external)\s+)*)""" +
-            """(?<kw>class|interface|object|fun|typealias)(?:\s+(?:[A-Za-z0-9_<>?,.\t ]+\.)?(?<name>[A-Za-z0-9_]+))?""",
+            """(?<kw>class|interface|object|fun|typealias)(?:\s*<(?:[^<>]|<[^<>]*>)+>)?(?:\s+(?:[A-Za-z0-9_<>?,.\t ]+\.)?(?<name>[A-Za-z0-9_]+))?""",
         RegexOption.MULTILINE
     )
 
@@ -57,7 +57,7 @@ internal object KotlinAstExtractor {
     }
 
     private val LOCAL_VAL_COLON_RE = Regex("""(?:val|var)\s+([A-Za-z0-9_$]+)\s*:\s*([A-Z][A-Za-z0-9_$.]*)""")
-    private val LOCAL_VAL_ASSIGN_RE = Regex("""(?:val|var)\s+([A-Za-z0-9_$]+)\s*=\s*([A-Z][A-Za-z0-9_$.]*)\s*(?:<[^>]+>)?\s*\(""")
+    private val LOCAL_VAL_ASSIGN_RE = Regex("""(?:val|var)\s+([A-Za-z0-9_$]+)\s*=\s*([A-Z][A-Za-z0-9_$.]*)\s*(?:<(?:[^<>]|<[^<>]*>)+>)?\s*\(""")
     private val WHITESPACE_RE = Regex("""\s+""")
     private val ANNOTATION_NAME_RE = Regex("""@([A-Za-z0-9_]+)""")
     private val KOTLIN_PRIMITIVE_TYPES = setOf(
@@ -464,7 +464,7 @@ internal object KotlinAstExtractor {
     }
 
     private fun isPublicTopLevel(isTopLevel: Boolean, modTokens: Set<String>, kw: String): Boolean =
-        isTopLevel && "private" !in modTokens && "companion" !in modTokens && kw != "typealias"
+        isTopLevel && "private" !in modTokens && "internal" !in modTokens && "companion" !in modTokens && kw != "typealias"
 
     private fun buildKotlinNode(
         ctx: PolyglotAstExtractor.FileExtractionContext,
@@ -621,6 +621,7 @@ internal object KotlinAstExtractor {
         val edges = mutableListOf<GraphEdge>()
         val lines = sourceText.lines()
         val maskedText = precomputedMaskedText ?: PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "kotlin")
+        val lineIndex = LineOffsetIndex.from(maskedText)
         val maskedLines = maskedText.lines()
         val cleanLines = PolyglotAstExtractor.cleanLinesFrom(lines, 0)
 
@@ -637,7 +638,8 @@ internal object KotlinAstExtractor {
             lines = lines,
             maskedLines = maskedLines,
             cleanLines = cleanLines,
-            imports = imports
+            imports = imports,
+            lineIndex = lineIndex
         )
 
         val (nodes, topLevelCount) = parseKotlinDeclarations(ctx, pkgName, edges)

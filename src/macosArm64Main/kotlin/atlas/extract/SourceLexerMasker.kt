@@ -14,6 +14,7 @@ internal object SourceLexerMasker {
         val isTsJs: Boolean,
         val isKotlin: Boolean,
         val isSwift: Boolean,
+        val isCpp: Boolean,
         var i: Int = 0
     ) {
         fun writeSpaceOrNewline(idx: Int) {
@@ -30,7 +31,8 @@ internal object SourceLexerMasker {
             isRust = language == "rust",
             isTsJs = language == "typescript" || language == "javascript",
             isKotlin = language == "kotlin",
-            isSwift = language == "swift"
+            isSwift = language == "swift",
+            isCpp = language == "cpp" || language == "c"
         )
 
         while (state.i < state.n) {
@@ -131,6 +133,12 @@ internal object SourceLexerMasker {
         state.i += 3
 
         while (state.i < state.n) {
+            if ((state.isPy || !state.isKotlin) && state.source[state.i] == '\\' && state.i + 1 < state.n) {
+                state.writeSpaceOrNewline(state.i)
+                state.writeSpaceOrNewline(state.i + 1)
+                state.i += 2
+                continue
+            }
             if (isTripleQuoteEnd(state, delim)) {
                 state.out[state.i] = ' '
                 state.out[state.i + 1] = ' '
@@ -192,8 +200,19 @@ internal object SourceLexerMasker {
         return false
     }
 
+    private fun isCppDigitChar(c: Char): Boolean =
+        c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F'
+
+    private fun isCppDigitSeparator(state: MaskState): Boolean {
+        if (state.i == 0 || state.i + 1 >= state.n) return false
+        val prev = state.source[state.i - 1]
+        val next = state.source[state.i + 1]
+        return isCppDigitChar(prev) && isCppDigitChar(next)
+    }
+
     private fun maskSingleQuotedString(state: MaskState): Boolean {
         if (state.source[state.i] != '\'') return false
+        if (state.isCpp && isCppDigitSeparator(state)) return false
         if (state.isRust) {
             return maskRustCharOrLifetime(state)
         }

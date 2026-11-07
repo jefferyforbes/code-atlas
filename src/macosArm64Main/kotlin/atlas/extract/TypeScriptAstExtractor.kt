@@ -28,7 +28,7 @@ internal object TypeScriptAstExtractor {
         RegexOption.MULTILINE
     )
     private val TS_METHOD_DECL_RE = Regex(
-        """^(?<indent>[ \t]+)(?:(?:public|private|protected|static|async|override|readonly|abstract)\s+)*(?:(?<getter>get|set)\s+)?(?<name>[A-Za-z0-9_$]+)\s*(?:<[^>]+>)?\s*\(""",
+        """^(?<indent>[ \t]+)(?:(?:public|private|protected|static|async|override|readonly|abstract)\s+)*(?:(?<getter>get|set)\s+)?(?<name>[A-Za-z0-9_$]+)\s*(?:<(?:[^<>]|<[^<>]*>)+>)?\s*\(""",
         RegexOption.MULTILINE
     )
     private val TS_ARROW_OR_FN_RE = Regex("""=\s*(?:async\s*)?(?:function\b|(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]+)?=>)""")
@@ -57,13 +57,17 @@ internal object TypeScriptAstExtractor {
         val isTopLevel: Boolean
     )
 
-    private fun extractTypeScriptImports(maskedText: String, sourceText: String): List<Pair<String, Int>> {
+    private fun extractTypeScriptImports(
+        maskedText: String,
+        sourceText: String,
+        lineIndex: LineOffsetIndex = LineOffsetIndex.from(maskedText)
+    ): List<Pair<String, Int>> {
         val imports = mutableListOf<Pair<String, Int>>()
         for (m in TS_IMP_RE.findAll(maskedText)) {
             val origMatch = sourceText.substring(m.range)
             val parsed = TS_IMP_RE.find(origMatch) ?: m
             val named = parsed.groupValues[1].ifEmpty { parsed.groupValues[2] }
-            val lineNo = PolyglotAstExtractor.lineNumberAtOffset(maskedText, m.range.first)
+            val lineNo = lineIndex.lineNumberAt(m.range.first)
             for (sym in named.split(",").filter { it.isNotBlank() }) {
                 val clean = sym.trim().substringBefore(" as ").trim()
                 if (clean.isNotEmpty()) imports.add(Pair(clean, lineNo))
@@ -226,7 +230,7 @@ internal object TypeScriptAstExtractor {
         nodes: MutableList<GraphNode>,
         edges: MutableList<GraphEdge>
     ): Boolean {
-        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, candidate.rangeStart)
+        val startLine = ctx.lineIndex.lineNumberAt(candidate.rangeStart)
         PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
 
         if (candidate.isMethod && scopeStack.isEmpty()) {
@@ -315,10 +319,11 @@ internal object TypeScriptAstExtractor {
         val edges = mutableListOf<GraphEdge>()
         val lines = sourceText.lines()
         val maskedText = precomputedMaskedText ?: PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "typescript")
+        val lineIndex = LineOffsetIndex.from(maskedText)
         val maskedLines = maskedText.lines()
         val cleanLines = PolyglotAstExtractor.cleanLinesFrom(lines, 0)
         val scopeStack = mutableListOf<PolyglotAstExtractor.ScopeEntry>()
-        val imports = extractTypeScriptImports(maskedText, sourceText)
+        val imports = extractTypeScriptImports(maskedText, sourceText, lineIndex)
         val declCandidates = collectTsDeclCandidates(maskedText)
         val ctx = PolyglotAstExtractor.FileExtractionContext(
             projectId = projectId,
@@ -330,7 +335,8 @@ internal object TypeScriptAstExtractor {
             lines = lines,
             maskedLines = maskedLines,
             cleanLines = cleanLines,
-            imports = imports
+            imports = imports,
+            lineIndex = lineIndex
         )
 
         var topLevelCount = 0

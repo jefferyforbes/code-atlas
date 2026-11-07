@@ -100,10 +100,30 @@ internal object PythonAstExtractor {
             return true
         }
 
-        fun handleInTripleQuote(raw: String): Boolean {
+        private fun isEscaped(s: String, pos: Int): Boolean {
+            var slashCount = 0
+            var k = pos - 1
+            while (k >= 0 && s[k] == '\\') {
+                slashCount++
+                k--
+            }
+            return slashCount % 2 != 0
+        }
+
+        private fun findUnescapedTripleQuote(s: String, quote: String, startIndex: Int = 0): Int {
+            var pos = s.indexOf(quote, startIndex)
+            while (pos >= 0) {
+                if (!isEscaped(s, pos)) return pos
+                pos = s.indexOf(quote, pos + 1)
+            }
+            return -1
+        }
+
+        fun handleInTripleQuote(raw: String, masked: String): Boolean {
             val quote = inTripleQuote ?: return false
-            val closePos = raw.indexOf(quote)
-            if (closePos >= 0) {
+            val delim = quote[0]
+            val closed = masked.contains(delim) && findUnescapedTripleQuote(raw, quote) >= 0
+            if (closed) {
                 inTripleQuote = null
             }
             return true
@@ -122,26 +142,28 @@ internal object PythonAstExtractor {
         }
 
         fun scanLine(raw: String, masked: String) {
-            scanTripleQuotes(raw.substringBefore("#"))
+            scanTripleQuotes(raw, masked)
             updateDepths(masked)
             if (isBalanced() && masked.trim().endsWith(":")) {
                 headerEnded = true
             }
         }
 
-        private fun scanTripleQuotes(stripped: String) {
+        private fun scanTripleQuotes(raw: String, masked: String) {
             var j = 0
-            while (j < stripped.length) {
-                j = stepTripleQuote(stripped, j)
+            while (j < raw.length) {
+                j = stepTripleQuote(raw, masked, j)
                 if (inTripleQuote != null) break
             }
         }
 
-        private fun stepTripleQuote(stripped: String, j: Int): Int {
-            if (j + 2 >= stripped.length) return j + 1
-            val sub3 = stripped.substring(j, j + 3)
+        private fun stepTripleQuote(raw: String, masked: String, j: Int): Int {
+            if (j + 2 >= raw.length) return j + 1
+            val sub3 = raw.substring(j, j + 3)
             if (sub3 !in TRIPLE_QUOTE_TOKENS) return j + 1
-            val closeOnSameLine = stripped.indexOf(sub3, j + 3)
+            if (j >= masked.length || masked[j] != raw[j]) return j + 1
+            if (isEscaped(raw, j)) return j + 1
+            val closeOnSameLine = findUnescapedTripleQuote(raw, sub3, j + 3)
             if (closeOnSameLine >= 0) return closeOnSameLine + 3
             inTripleQuote = sub3
             return j + 3
@@ -186,11 +208,11 @@ internal object PythonAstExtractor {
         }
 
         private fun processLine(idx: Int, raw: String): Boolean {
-            if (state.handleInTripleQuote(raw)) {
+            val masked = resolveMaskedLine(idx, raw)
+            if (state.handleInTripleQuote(raw, masked)) {
                 lastContentLine = idx + 1
                 return false
             }
-            val masked = resolveMaskedLine(idx, raw)
             val trimmed = masked.trim()
             if (trimmed.isEmpty()) return false
 
@@ -419,10 +441,13 @@ internal object PythonAstExtractor {
         return isDunder && name in ALLOWED_PYTHON_DUNDERS
     }
 
-    private fun extractPythonImports(maskedText: String): List<Pair<String, Int>> {
+    private fun extractPythonImports(
+        maskedText: String,
+        lineIndex: LineOffsetIndex = LineOffsetIndex.from(maskedText)
+    ): List<Pair<String, Int>> {
         return PY_IMP_RE.findAll(maskedText).map { match ->
             val mod = match.groupValues[1].ifEmpty { match.groupValues[2] }
-            Pair(mod, PolyglotAstExtractor.lineNumberAtOffset(maskedText, match.range.first))
+            Pair(mod, lineIndex.lineNumberAt(match.range.first))
         }.toList()
     }
 
@@ -545,7 +570,7 @@ internal object PythonAstExtractor {
         edges: MutableList<GraphEdge>
     ): Boolean {
         val (indent, kw, name) = extractDeclHeader(match) ?: return false
-        val startLine = PolyglotAstExtractor.lineNumberAtOffset(ctx.maskedText, match.range.first)
+        val startLine = ctx.lineIndex.lineNumberAt(match.range.first)
         val endLine = findPythonBlockEndLine(ctx.lines, ctx.maskedLines, startLine)
 
         PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
@@ -625,9 +650,10 @@ internal object PythonAstExtractor {
         val edges = mutableListOf<GraphEdge>()
         val lines = sourceText.lines()
         val maskedText = precomputedMaskedText ?: PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "python")
+        val lineIndex = LineOffsetIndex.from(maskedText)
         val maskedLines = maskedText.lines()
         val scopeStack = mutableListOf<PolyglotAstExtractor.ScopeEntry>()
-        val imports = extractPythonImports(maskedText)
+        val imports = extractPythonImports(maskedText, lineIndex)
         val ctx = PolyglotAstExtractor.FileExtractionContext(
             projectId = projectId,
             relPath = relPath,
@@ -638,7 +664,8 @@ internal object PythonAstExtractor {
             lines = lines,
             maskedLines = maskedLines,
             cleanLines = emptyList(),
-            imports = imports
+            imports = imports,
+            lineIndex = lineIndex
         )
 
         var topLevelCount = 0

@@ -68,7 +68,7 @@ class ComposeStabilityExtractor {
         private val ACTUAL_MOD_RE = Regex("""\bactual\b""")
         private val FUN_KEYWORD_RE = Regex("""\bfun\b""")
         private val PREVIEW_ANNOTATION_RE = Regex("""@Preview[A-Za-z0-9_]*""")
-        private val COMPOSABLE_FUN_RE = Regex("""@Composable\b[\s\S]*?\bfun\s+(?:<[^>]+>\s*)?(?:([A-Za-z0-9_.<>?]+)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(""")
+        private val COMPOSABLE_FUN_RE = Regex("""@Composable\b[\s\S]*?\bfun\s+(?:<(?:[^<>]|<[^<>]*>)+>\s*)?(?:([A-Za-z0-9_.<>?]+)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(""")
         private val WHITESPACE_RE = Regex("""\s+""")
         private val EFFECT_CALL_RE = Regex("""\b(remember|rememberSaveable|LaunchedEffect|DisposableEffect)\b""")
         private val CONDITIONAL_PAREN_RE = Regex("""\b(if|when|for|while)\s*\(""")
@@ -92,28 +92,11 @@ class ComposeStabilityExtractor {
             return false
         }
 
-        fun buildLineOffsets(text: String): IntArray {
-            val offsets = mutableListOf(0)
-            for (i in text.indices) {
-                if (text[i] == '\n') offsets.add(i + 1)
-            }
-            return offsets.toIntArray()
-        }
+        fun buildLineOffsets(text: String): IntArray =
+            LineOffsetIndex.from(text).offsets
 
-        fun lineForOffset(lineOffsets: IntArray, offset: Int): Int {
-            var low = 0
-            var high = lineOffsets.size - 1
-            while (low <= high) {
-                val mid = (low + high) ushr 1
-                val midVal = lineOffsets[mid]
-                if (midVal <= offset) {
-                    low = mid + 1
-                } else {
-                    high = mid - 1
-                }
-            }
-            return high + 1
-        }
+        fun lineForOffset(lineOffsets: IntArray, offset: Int): Int =
+            LineOffsetIndex(lineOffsets).lineNumberAt(offset)
 
         fun detectKmpSourceSet(relPath: String): String {
             val norm = relPath.replace('\\', '/')
@@ -971,8 +954,16 @@ class ComposeStabilityExtractor {
         "+", "-", "*", "/", "%", "&&", "||", "?:", ".", "?.", "::", ",", "->", "="
     )
 
-    private fun hasTrailingContinuation(prevTrimmed: String): Boolean =
-        exprContinuationSuffixes.any { prevTrimmed.endsWith(it) }
+    private fun hasTrailingContinuation(masked: String, exprStart: Int, newlineIdx: Int): Boolean {
+        var p = newlineIdx - 1
+        while (p > exprStart && (masked[p] == ' ' || masked[p] == '\t' || masked[p] == '\r')) {
+            p--
+        }
+        if (p <= exprStart) return false
+        return exprContinuationSuffixes.any { s ->
+            p - s.length + 1 > exprStart && masked.startsWith(s, p - s.length + 1)
+        }
+    }
 
     private fun hasLeadingContinuation(masked: String, startK: Int): Boolean {
         var k = startK
@@ -984,8 +975,7 @@ class ComposeStabilityExtractor {
     }
 
     private fun isExpressionLineContinuation(masked: String, exprStart: Int, newlineIdx: Int): Boolean {
-        val prevTrimmed = masked.substring(exprStart + 1, newlineIdx).trimEnd()
-        if (hasTrailingContinuation(prevTrimmed)) return true
+        if (hasTrailingContinuation(masked, exprStart, newlineIdx)) return true
         return hasLeadingContinuation(masked, newlineIdx + 1)
     }
 
