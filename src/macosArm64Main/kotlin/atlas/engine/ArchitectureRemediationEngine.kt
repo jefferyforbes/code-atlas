@@ -23,7 +23,7 @@ class ArchitectureRemediationEngine(
     private val store: SqliteGraphStore,
     private val verifier: AutonomousRemediationVerifier = AutonomousRemediationVerifier(workspaceRoot, store)
 ) {
-    private val auditor = ArchitectureAuditor(store)
+    private val auditor = ArchitectureAuditor(store, workspaceRoot)
 
     companion object {
         private val TRIPLE_NEWLINE_RE = Regex("""\n{3,}""")
@@ -738,34 +738,6 @@ class ArchitectureRemediationEngine(
         )
     }
 
-    private fun isPresentationConstruct(checkPath: String, symLow: String, normSrcPath: String): Boolean {
-        val presentationPathSegments = listOf(
-            "/ui/", "/presentation/", "/screen/", "/screens/", "/components/", "/views/", "/view/", "/cli/", "/mcp/",
-            "/web/", "/gui/", "/activity/", "/activities/", "/demo/", "/launcher/"
-        )
-        if (presentationPathSegments.any { it in checkPath }) return true
-
-        val presentationSuffixes = listOf(
-            "screen", "viewmodel", "composable", "dialog", "sheet", "cli", "mcpserver",
-            "activity", "launcher", "gui", "component", "components"
-        )
-        if (presentationSuffixes.any { symLow.endsWith(it) }) return true
-
-        return normSrcPath.endsWith("cli.py") || normSrcPath.endsWith("cli.kt") || normSrcPath.endsWith("mcpserver.kt") ||
-            normSrcPath.endsWith("gui.py") || normSrcPath.endsWith("_gui.py") || normSrcPath.endsWith("_runner.py") ||
-            normSrcPath.endsWith("_tool.py") || normSrcPath.endsWith("mb_tool.py") ||
-            normSrcPath.endsWith("/main.kt") || normSrcPath == "main.kt"
-    }
-
-    private fun isInfraConstruct(checkPath: String): Boolean {
-        val infraPathSegments = listOf(
-            "/extract/", "/bridge/", "/config/", "/util/", "/tools/", "/scripts/", "/orchestrator/",
-            "/tools & scripts/"
-        )
-        return infraPathSegments.any { it in checkPath } ||
-            checkPath.contains("/tools") || checkPath.contains("/scripts") || checkPath.contains("/orchestrator")
-    }
-
     private fun buildClassificationCorrection(
         projectId: String,
         violation: LayerInversionViolation,
@@ -810,12 +782,12 @@ class ArchitectureRemediationEngine(
         val tgtNode = store.getNode(projectId, violation.target)
         val srcRelPath = srcNode?.fileId?.substringAfter(':') ?: violation.source.substringBefore(':')
 
-        val normSrcPath = srcRelPath.replace('\\', '/').lowercase()
-        val checkPath = if (normSrcPath.startsWith("/")) normSrcPath else "/$normSrcPath"
-        val symLow = srcNode?.name?.lowercase() ?: ""
-
-        val isPresentation = isPresentationConstruct(checkPath, symLow, normSrcPath)
-        val isInfra = isInfraConstruct(checkPath)
+        val (_, classifiedArch, _) = SemioticLayerClassifier.classify(
+            relPath = srcRelPath,
+            symbolName = srcNode?.name ?: ""
+        )
+        val isPresentation = classifiedArch == "presentation"
+        val isInfra = classifiedArch == "infrastructure"
 
         if (isPresentation || isInfra) {
             return buildClassificationCorrection(projectId, violation, srcRelPath, isPresentation, dryRun)

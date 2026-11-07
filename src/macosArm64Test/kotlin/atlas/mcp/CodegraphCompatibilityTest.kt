@@ -15,6 +15,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlin.random.Random
 import platform.posix.getpid
 
 /**
@@ -64,10 +65,10 @@ class CodegraphCompatibilityTest {
         }
     }
 
-    @Test
-    fun testCodegraphToolsExecutionAndFormatting() {
+    private fun withShopWorkspace(block: (AtlasMcpServer) -> Unit) {
         val pid = getpid()
-        val tmpDir = "/tmp/atlas_cg_exec_test_$pid"
+        val rnd = Random.nextInt(100000, 999999)
+        val tmpDir = "/tmp/atlas_cg_exec_test_${pid}_$rnd"
         val srcDir = "$tmpDir/features/basket"
         PlatformFiles.mkdirs(srcDir)
         val dbPath = "$tmpDir/atlas.db"
@@ -98,99 +99,123 @@ class CodegraphCompatibilityTest {
         try {
             val indexer = WorkspaceIndexer(tmpDir, server.store)
             indexer.indexWorkspace("shop")
-
-            // 1. Test codegraph_explore
-            val exploreRes = server.callTool("codegraph_explore", buildJsonObject {
-                put("query", "calculateBasketTotal BasketViewModel")
-                put("project", "shop")
-            })
-            val exploreText = exploreRes["text"]?.jsonPrimitive?.content ?: ""
-            assertTrue(exploreText.contains("BasketScreen.kt"), "Explore must include file header")
-            assertTrue(exploreText.contains("calculateBasketTotal"), "Explore must include symbol source")
-            assertTrue(exploreText.contains("Call Relationships") || exploreText.contains("calls"), "Explore should identify relationships")
-
-            // 2. Test codegraph_node - symbol mode
-            val nodeSymRes = server.callTool("codegraph_node", buildJsonObject {
-                put("symbol", "calculateBasketTotal")
-                put("includeCode", true)
-                put("project", "shop")
-            })
-            val nodeSymText = nodeSymRes["text"]?.jsonPrimitive?.content ?: ""
-            assertTrue(nodeSymText.contains("calculateBasketTotal"), "Node symbol must show symbol name")
-            assertTrue(nodeSymText.contains("features/basket/BasketScreen.kt"), "Node symbol must show location")
-
-            // 3. Test codegraph_node - file reading mode (Read tool replacement)
-            val nodeFileRes = server.callTool("codegraph_node", buildJsonObject {
-                put("file", "BasketScreen.kt")
-                put("offset", 1)
-                put("limit", 15)
-                put("project", "shop")
-            })
-            val nodeFileText = nodeFileRes["text"]?.jsonPrimitive?.content ?: ""
-            assertTrue(nodeFileText.contains("BasketPriceCalculator"), "Node file mode must read file source")
-            assertTrue(nodeFileText.contains("\t"), "Node file mode must include tab separated line numbers")
-
-            // 4. Test codegraph_search
-            val searchRes = server.callTool("codegraph_search", buildJsonObject {
-                put("query", "Basket")
-                put("project", "shop")
-            })
-            val searchText = searchRes["text"]?.jsonPrimitive?.content ?: ""
-            assertTrue(searchText.contains("BasketPriceCalculator"), "Search must return matching symbols")
-
-            // 5. Test codegraph_callers
-            val callersRes = server.callTool("codegraph_callers", buildJsonObject {
-                put("symbol", "calculateBasketTotal")
-                put("project", "shop")
-            })
-            val callersText = callersRes["text"]?.jsonPrimitive?.content ?: ""
-            assertTrue(callersText.contains("Callers of `calculateBasketTotal`"), "Callers must have header")
-
-            // 6. Test codegraph_callees
-            val calleesRes = server.callTool("codegraph_callees", buildJsonObject {
-                put("symbol", "calculateBasketTotal")
-                put("project", "shop")
-            })
-            val calleesText = calleesRes["text"]?.jsonPrimitive?.content ?: ""
-            assertTrue(calleesText.contains("Callees of `calculateBasketTotal`"), "Callees must have header")
-
-            // 7. Test codegraph_impact
-            val impactRes = server.callTool("codegraph_impact", buildJsonObject {
-                put("symbol", "calculateBasketTotal")
-                put("project", "shop")
-            })
-            val impactText = impactRes["text"]?.jsonPrimitive?.content ?: ""
-            assertTrue(impactText.contains("Impact Blast Radius"), "Impact must have blast radius header")
-
-            // 8. Test codegraph_status
-            val statusRes = server.callTool("codegraph_status", buildJsonObject {
-                put("project", "shop")
-            })
-            val statusText = statusRes["text"]?.jsonPrimitive?.content ?: ""
-            assertTrue(statusText.contains("Atlas Index Status"), "Status must report status")
-            assertTrue(statusText.contains("Indexed Files:") && !statusText.contains("Indexed Files: 0"), "Status must report indexed files")
-
-            // 9. Test codegraph_files
-            val filesRes = server.callTool("codegraph_files", buildJsonObject {
-                put("project", "shop")
-            })
-            val filesText = filesRes["text"]?.jsonPrimitive?.content ?: ""
-            assertTrue(filesText.contains("BasketScreen.kt"), "Files must report BasketScreen.kt")
-
-            // 10. Test JSON-RPC 2.0 stdio handling returns clean text content
-            val rpcReq = """{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"codegraph_explore","arguments":{"query":"calculateBasketTotal","project":"shop"}}}"""
-            val rpcResp = server.processJsonRpcMessage(rpcReq)
-            assertNotNull(rpcResp)
-            val parsedResp = json.parseToJsonElement(rpcResp).jsonObject
-            val contentArr = parsedResp["result"]!!.jsonObject["content"]!!.jsonArray
-            assertEquals(1, contentArr.size)
-            val firstItem = contentArr[0].jsonObject
-            assertEquals("text", firstItem["type"]!!.jsonPrimitive.content)
-            val textContent = firstItem["text"]!!.jsonPrimitive.content
-            assertTrue(textContent.startsWith("### CodeGraph Explore Context"), "JSON-RPC response text must be clean Markdown")
+            block(server)
         } finally {
             server.close()
             PlatformFiles.delete(dbPath)
+            PlatformFiles.delete("$srcDir/BasketScreen.kt")
         }
+    }
+
+    @Test
+    fun testCodegraphExploreExecution() = withShopWorkspace { server ->
+        val exploreRes = server.callTool("codegraph_explore", buildJsonObject {
+            put("query", "calculateBasketTotal BasketViewModel")
+            put("project", "shop")
+        })
+        val exploreText = exploreRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(exploreText.contains("BasketScreen.kt"), "Explore must include file header")
+        assertTrue(exploreText.contains("calculateBasketTotal"), "Explore must include symbol source")
+        val hasRel = exploreText.contains("Call Relationships") || exploreText.contains("calls")
+        assertTrue(hasRel, "Explore should identify relationships")
+    }
+
+    @Test
+    fun testCodegraphNodeSymbolMode() = withShopWorkspace { server ->
+        val nodeSymRes = server.callTool("codegraph_node", buildJsonObject {
+            put("symbol", "calculateBasketTotal")
+            put("includeCode", true)
+            put("project", "shop")
+        })
+        val nodeSymText = nodeSymRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(nodeSymText.contains("calculateBasketTotal"), "Node symbol must show symbol name")
+        assertTrue(nodeSymText.contains("features/basket/BasketScreen.kt"), "Node symbol must show location")
+    }
+
+    @Test
+    fun testCodegraphNodeFileReadingMode() = withShopWorkspace { server ->
+        val nodeFileRes = server.callTool("codegraph_node", buildJsonObject {
+            put("file", "BasketScreen.kt")
+            put("offset", 1)
+            put("limit", 15)
+            put("project", "shop")
+        })
+        val nodeFileText = nodeFileRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(nodeFileText.contains("BasketPriceCalculator"), "Node file mode must read file source")
+        assertTrue(nodeFileText.contains("\t"), "Node file mode must include tab separated line numbers")
+    }
+
+    @Test
+    fun testCodegraphSearchExecution() = withShopWorkspace { server ->
+        val searchRes = server.callTool("codegraph_search", buildJsonObject {
+            put("query", "Basket")
+            put("project", "shop")
+        })
+        val searchText = searchRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(searchText.contains("BasketPriceCalculator"), "Search must return matching symbols")
+    }
+
+    @Test
+    fun testCodegraphCallersExecution() = withShopWorkspace { server ->
+        val callersRes = server.callTool("codegraph_callers", buildJsonObject {
+            put("symbol", "calculateBasketTotal")
+            put("project", "shop")
+        })
+        val callersText = callersRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(callersText.contains("Callers of `calculateBasketTotal`"), "Callers must have header")
+    }
+
+    @Test
+    fun testCodegraphCalleesExecution() = withShopWorkspace { server ->
+        val calleesRes = server.callTool("codegraph_callees", buildJsonObject {
+            put("symbol", "calculateBasketTotal")
+            put("project", "shop")
+        })
+        val calleesText = calleesRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(calleesText.contains("Callees of `calculateBasketTotal`"), "Callees must have header")
+    }
+
+    @Test
+    fun testCodegraphImpactExecution() = withShopWorkspace { server ->
+        val impactRes = server.callTool("codegraph_impact", buildJsonObject {
+            put("symbol", "calculateBasketTotal")
+            put("project", "shop")
+        })
+        val impactText = impactRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(impactText.contains("Impact Blast Radius"), "Impact must have blast radius header")
+    }
+
+    @Test
+    fun testCodegraphStatusExecution() = withShopWorkspace { server ->
+        val statusRes = server.callTool("codegraph_status", buildJsonObject {
+            put("project", "shop")
+        })
+        val statusText = statusRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(statusText.contains("Atlas Index Status"), "Status must report status")
+        assertTrue(statusText.contains("Indexed Files:"), "Status must report indexed files")
+        assertTrue(!statusText.contains("Indexed Files: 0"), "Status must report non-zero indexed files")
+    }
+
+    @Test
+    fun testCodegraphFilesExecution() = withShopWorkspace { server ->
+        val filesRes = server.callTool("codegraph_files", buildJsonObject {
+            put("project", "shop")
+        })
+        val filesText = filesRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(filesText.contains("BasketScreen.kt"), "Files must report BasketScreen.kt")
+    }
+
+    @Test
+    fun testCodegraphExploreJsonRpcReturnsCleanMarkdown() = withShopWorkspace { server ->
+        val rpcReq = """{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"codegraph_explore","arguments":{"query":"calculateBasketTotal","project":"shop"}}}"""
+        val rpcResp = server.processJsonRpcMessage(rpcReq)
+        assertNotNull(rpcResp)
+        val parsedResp = json.parseToJsonElement(rpcResp).jsonObject
+        val contentArr = parsedResp["result"]!!.jsonObject["content"]!!.jsonArray
+        assertEquals(1, contentArr.size)
+        val firstItem = contentArr[0].jsonObject
+        assertEquals("text", firstItem["type"]!!.jsonPrimitive.content)
+        val textContent = firstItem["text"]!!.jsonPrimitive.content
+        assertTrue(textContent.startsWith("### CodeGraph Explore Context"), "JSON-RPC response text must be clean Markdown")
     }
 }

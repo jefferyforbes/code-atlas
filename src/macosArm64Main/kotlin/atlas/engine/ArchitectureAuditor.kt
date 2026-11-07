@@ -41,12 +41,14 @@ class ArchitectureAuditor(
         val layerInversions = checkLayerInversions(projectId, normalizedPrefixes, allNodes)
         val planCollisions = checkPlan3dCollisions(projectId, normalizedPrefixes, allNodes)
         val descriptionSuggestions = checkTopLevelDescriptions(projectId, normalizedPrefixes, descriptionMode, allNodes)
-        val complexityViolations = checkComplexityViolations(
+        val rawComplexityViolations = checkComplexityViolations(
             projectId,
             normalizedPrefixes,
             ComplexityThresholds(),
             allNodes
         )
+        val complexityViolations = rawComplexityViolations.filter { it.ruleId == "COMPLEXITY-001" }
+        val parameterAdvisories = rawComplexityViolations.filter { it.ruleId != "COMPLEXITY-001" }
         val skillViolations = checkSkillViolations(projectId, normalizedPrefixes, allNodes)
 
         val passed = singleDeclViolations.isEmpty() &&
@@ -61,6 +63,7 @@ class ArchitectureAuditor(
             plan3dCollisions = planCollisions,
             descriptionSuggestions = descriptionSuggestions,
             complexityViolations = complexityViolations,
+            parameterAdvisories = parameterAdvisories,
             skillViolations = skillViolations
         )
     }

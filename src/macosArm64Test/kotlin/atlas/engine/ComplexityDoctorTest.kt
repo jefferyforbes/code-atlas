@@ -8,8 +8,10 @@ import atlas.util.PlatformFiles
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import platform.posix.getpid
 import platform.posix.rmdir
@@ -707,5 +709,190 @@ class ComplexityDoctorTest {
             PlatformFiles.delete(dbPath)
             cleanDir(tmpDir)
         }
+    }
+
+    @Test
+    fun testResolveSourceTextRejectsPathOutsideWorkspaceRoot() {
+        val tmpDir = makeTempDir()
+        try {
+            val engine = ComplexityDoctorEngine(workspaceRoot = tmpDir)
+            assertFailsWith<IllegalArgumentException> {
+                engine.resolveSourceText("../../etc/passwd")
+            }
+            assertFailsWith<IllegalArgumentException> {
+                engine.resolveSourceText("/etc/shadow")
+            }
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun testFindMultiLineElseEndAbortsOnPrecedingStatements() {
+        val engine = ComplexityDoctorEngine()
+        val retRegex = Regex("""^\s*return(?:\s+([^;}\n]+))?;?\s*$""")
+
+        // Case A: Side effect statement before return -> must abort and return null
+        val linesWithPrecedingStatement = listOf(
+            "} else {",
+            "    logger.info(\"side effect\")",
+            "    return 0",
+            "}"
+        )
+        val resA = engine.findMultiLineElseEnd(
+            lines = linesWithPrecedingStatement,
+            closeIfIdx = 0,
+            endIdx = 3,
+            lang = "kotlin",
+            retRegex = retRegex
+        )
+        assertNull(resA, "Multi-line else with preceding statements must abort and return null")
+
+        // Case B: Comments and whitespace only before return -> returns valid resolution
+        val linesWithCommentsOnly = listOf(
+            "} else {",
+            "    // important comment",
+            "    /* block comment */",
+            "    return 42",
+            "}"
+        )
+        val resB = engine.findMultiLineElseEnd(
+            lines = linesWithCommentsOnly,
+            closeIfIdx = 0,
+            endIdx = 4,
+            lang = "kotlin",
+            retRegex = retRegex
+        )
+        assertNotNull(resB)
+        assertEquals(4, resB.spanEndIdx)
+        assertEquals("return 42", resB.defaultReturn)
+
+        // Case C: Side effect statement following return -> must abort and return null
+        val linesWithTrailingStatement = listOf(
+            "} else {",
+            "    return 0",
+            "    logger.info(\"unreachable\")",
+            "}"
+        )
+        val resC = engine.findMultiLineElseEnd(
+            lines = linesWithTrailingStatement,
+            closeIfIdx = 0,
+            endIdx = 3,
+            lang = "kotlin",
+            retRegex = retRegex
+        )
+        assertNull(resC, "Multi-line else with trailing statements must abort and return null")
+    }
+
+    @Test
+    fun testDoctorPreservesMultiStatementElseWithoutDeletingSideEffects() {
+        val source = """
+            package atlas.sample
+
+            class SafeProcessor {
+                fun process(flag: Boolean, items: List<String>?): Int {
+                    if (flag && items != null) {
+                        var total = 0
+                        for (item in items) {
+                            if (item.isNotEmpty()) {
+                                total += item.length
+                            }
+                        }
+                        return total
+                    } else {
+                        auditLog("side effect log statement")
+                        return 0
+                    }
+                }
+
+                fun auditLog(msg: String) {}
+            }
+        """.trimIndent()
+
+        val engine = ComplexityDoctorEngine()
+        val prescriptions = engine.analyzeSource("src/SafeProcessor.kt", source)
+
+        // The guard inversion must NOT be synthesized because the else block has side effects
+        val invertRx = prescriptions.firstOrNull { it.fixStrategy == "GUARD_INVERSION" }
+        assertNull(invertRx, "Must not synthesize guard inversion when else contains side effects")
+    }
+
+    @Test
+    fun testQueryComplexNodesExcludesTestNodes() {
+        val dbPath = makeTempDb()
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val prodComplex = GraphNode(
+                nodeId = "proj:src/Prod.kt#process",
+                projectId = "proj",
+                fileId = "proj:src/Prod.kt",
+                name = "process",
+                qualifiedName = "atlas.sample.Prod.process",
+                kind = "function",
+                startLine = 5,
+                endLine = 30,
+                cognitiveComplexity = 16,
+                cyclomaticComplexity = 6,
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                isTestDouble = false
+            )
+            val testNode = GraphNode(
+                nodeId = "proj:src/Test.kt#testProcess",
+                projectId = "proj",
+                fileId = "proj:src/Test.kt",
+                name = "testProcess",
+                qualifiedName = "atlas.sample.Test.testProcess",
+                kind = "function",
+                startLine = 10,
+                endLine = 40,
+                cognitiveComplexity = 20,
+                cyclomaticComplexity = 8,
+                semioticLayer = "test",
+                archLayer = "test",
+                isTestDouble = false
+            )
+            val fakeDouble = GraphNode(
+                nodeId = "proj:src/FakeRepo.kt#fakeCall",
+                projectId = "proj",
+                fileId = "proj:src/FakeRepo.kt",
+                name = "fakeCall",
+                qualifiedName = "atlas.sample.FakeRepo.fakeCall",
+                kind = "function",
+                startLine = 1,
+                endLine = 20,
+                cognitiveComplexity = 18,
+                cyclomaticComplexity = 7,
+                semioticLayer = "semantic",
+                archLayer = "domain",
+                isTestDouble = true
+            )
+            store.upsertNodesAndEdges("proj", listOf(prodComplex, testNode, fakeDouble), emptyList())
+
+            val complexNodes = store.queryComplexNodes("proj", minCognitive = 10)
+            assertEquals(1, complexNodes.size, "queryComplexNodes must filter out test nodes and test doubles")
+            assertEquals("proj:src/Prod.kt#process", complexNodes.first().nodeId)
+        } finally {
+            store.close()
+            PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testComplexityGradeThresholdCalibration() {
+        val boundaryVector = atlas.model.ComplexityVector(
+            cyclomatic = 15,
+            cognitive = 10,
+            maxNesting = 3,
+            sloc = 25
+        )
+        val score = atlas.extract.ComplexityExtractor.computeScore(boundaryVector)
+        assertTrue(score >= 70.0, "Cognitive 10, Cyclomatic 15 score must be >= 70.0 (got $score)")
+        val grade = atlas.extract.ComplexityExtractor.computeGrade(score)
+        assertTrue(grade in setOf("A", "B", "C"), "Compliant function (cog <= 10) must grade A-C (got $grade)")
+
+        val lowVector = atlas.model.ComplexityVector(cyclomatic = 5, cognitive = 2, maxNesting = 1, sloc = 10)
+        val lowScore = atlas.extract.ComplexityExtractor.computeScore(lowVector)
+        assertEquals("A", atlas.extract.ComplexityExtractor.computeGrade(lowScore))
     }
 }

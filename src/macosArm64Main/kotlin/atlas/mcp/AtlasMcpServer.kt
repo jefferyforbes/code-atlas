@@ -59,6 +59,7 @@ class AtlasMcpServer(
     companion object {
         const val VERSION = "0.8.0"
         const val SPILLOVER_THRESHOLD_BYTES = 32768
+        const val MAX_CACHED_PROJECT_SERVERS = 16
         private val COMPOSE_QUERY_ACTIONS = setOf("summary", "compose_summary", "cascade", "compose_cascade", "blame", "compose_blame")
     }
 
@@ -83,7 +84,7 @@ class AtlasMcpServer(
         encodeDefaults = true
     }
 
-    private val transport = McpJsonRpcTransport(this, json)
+    internal val transport = McpJsonRpcTransport(this, json)
 
     init {
         val (resolvedDb, artifacts) = CacheProfileResolver.resolvePaths(
@@ -109,7 +110,20 @@ class AtlasMcpServer(
 
     fun toolDefinitions(): List<JsonObject> = McpToolSchemas.toolDefinitions(enableCodegraphTools)
 
-    private val projectServers = mutableMapOf<String, AtlasMcpServer>()
+    internal val projectServers = mutableMapOf<String, AtlasMcpServer>()
+    private val projectAccessOrder = mutableListOf<String>()
+
+    private fun recordAccess(path: String) {
+        projectAccessOrder.remove(path)
+        projectAccessOrder.add(path)
+    }
+
+    private fun evictLeastRecentlyUsed() {
+        if (projectAccessOrder.isEmpty()) return
+        val lruKey = projectAccessOrder.removeAt(0)
+        val evicted = projectServers.remove(lruKey)
+        evicted?.close()
+    }
 
     fun indexWorkspace(
         projectId: String,
@@ -151,19 +165,31 @@ class AtlasMcpServer(
         val canonCandidate = normalizeWorkspacePath(resolveCandidateWorkspacePath(projectId, explicitWorkspace))
         if (canonCandidate == canonCurrent) return this
 
-        return projectServers.getOrPut(canonCandidate) {
-            AtlasMcpServer(
-                workspaceRoot = canonCandidate,
-                customDbPath = null,
-                cacheProfile = cacheProfile,
-                enableCodegraphTools = enableCodegraphTools
-            )
+        val existing = projectServers[canonCandidate]
+        if (existing != null) {
+            recordAccess(canonCandidate)
+            return existing
         }
+
+        while (projectServers.size >= MAX_CACHED_PROJECT_SERVERS) {
+            evictLeastRecentlyUsed()
+        }
+
+        val newServer = AtlasMcpServer(
+            workspaceRoot = canonCandidate,
+            customDbPath = null,
+            cacheProfile = cacheProfile,
+            enableCodegraphTools = enableCodegraphTools
+        )
+        projectServers[canonCandidate] = newServer
+        recordAccess(canonCandidate)
+        return newServer
     }
 
     fun close() {
-        projectServers.values.forEach { it.store.close() }
+        projectServers.values.forEach { it.close() }
         projectServers.clear()
+        projectAccessOrder.clear()
         store.close()
     }
 
@@ -188,7 +214,7 @@ class AtlasMcpServer(
 
     private fun callToolDirect(name: String, arguments: JsonObject): JsonObject {
         val project = resolveProjectFromArgs(arguments)
-        val payload = when (name) {
+        val rawPayload = when (name) {
             "atlas_query" -> handleQuery(arguments)
             "atlas_audit" -> handleAudit(arguments)
             "figma_audit" -> handleFigmaAudit(arguments)
@@ -203,6 +229,12 @@ class AtlasMcpServer(
             "codegraph_files" -> handleCodegraphFiles(arguments)
             else -> throw IllegalArgumentException("Unknown MCP tool: $name")
         }
+        val payload = if (name.startsWith("codegraph_") && rawPayload.containsKey("text")) {
+            buildJsonObject {
+                rawPayload.forEach { (k, v) -> put(k, v) }
+                put("_mcp_raw_text", true)
+            }
+        } else rawPayload
         return enforceSpillover(project, payload)
     }
 
@@ -225,20 +257,30 @@ class AtlasMcpServer(
         }
         return when (action) {
             "status" -> json.encodeToJsonElement(store.getStats(project)).jsonObject
-            "god_nodes" -> buildJsonObject {
-                put("project", project)
-                put("god_nodes", json.encodeToJsonElement(store.getGodNodes(project, topN = 10)))
+            "god_nodes" -> {
+                val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 10
+                buildJsonObject {
+                    put("project", project)
+                    put("god_nodes", json.encodeToJsonElement(store.getGodNodes(project, topN = limit)))
+                }
             }
-            "search" -> buildJsonObject {
-                put("project", project)
-                put("query", target)
-                put("results", json.encodeToJsonElement(store.searchNodes(project, target, limit = 15)))
+            "search" -> {
+                val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 15
+                buildJsonObject {
+                    put("project", project)
+                    put("query", target)
+                    put("results", json.encodeToJsonElement(store.searchNodes(project, target, limit = limit)))
+                }
             }
             "url" -> store.searchByUrl(project, target)
             "complexity" -> handleQueryComplexity(project, target, args)
             "explore" -> {
                 val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 12
-                codegraphEngine.explore(project, target, maxFiles = limit)
+                val res = codegraphEngine.explore(project, target, maxFiles = limit)
+                buildJsonObject {
+                    res.forEach { (k, v) -> put(k, v) }
+                    put("_mcp_raw_text", true)
+                }
             }
             else -> handleQueryNodeAction(action, project, target, args, depth, includeSource)
         }
@@ -455,6 +497,7 @@ class AtlasMcpServer(
                 val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 10
                 handleAuditComposeDoctor(args, project, targets, limit)
             }
+            "compose_scope" -> handleAuditSynthesizeComposeScope(project, targets)
             else -> throw IllegalArgumentException("Unsupported compose action: $action")
         }
     }
@@ -489,7 +532,7 @@ class AtlasMcpServer(
                 handleAuditSyncIndex(project, targets, stabilityConfigPath, compilerReportsDir, traceLogPath)
             }
             "synthesize_3d_scope" -> handleAuditSynthesize3dScope(project, targets)
-            "synthesize_compose_scope" -> handleAuditSynthesizeComposeScope(project, targets)
+            "synthesize_compose_scope", "compose_scope" -> handleAuditSynthesizeComposeScope(project, targets)
             "architect_context" -> handleAuditArchitectContext(args, project, targets)
             "verify_architecture" -> handleAuditVerifyArchitecture(args, project, targets)
             "check_descriptions" -> handleAuditCheckDescriptions(args, project, targets)
@@ -571,8 +614,12 @@ class AtlasMcpServer(
             descriptionMode = descMode
         )
         val totalComp = report.complexityViolations.size
-        val cappedReport = if (totalComp > limit) {
-            report.copy(complexityViolations = prioritizeAndCapViolations(report.complexityViolations, limit))
+        val totalAdvisories = report.parameterAdvisories.size
+        val cappedReport = if (report.complexityViolations.size > limit || report.parameterAdvisories.size > limit) {
+            report.copy(
+                complexityViolations = if (report.complexityViolations.size > limit) prioritizeAndCapViolations(report.complexityViolations, limit) else report.complexityViolations,
+                parameterAdvisories = if (report.parameterAdvisories.size > limit) prioritizeAndCapViolations(report.parameterAdvisories, limit) else report.parameterAdvisories
+            )
         } else {
             report
         }
@@ -580,6 +627,7 @@ class AtlasMcpServer(
         return buildJsonObject {
             baseObj.forEach { (k, v) -> put(k, v) }
             put("total_complexity_violations", totalComp)
+            put("total_parameter_advisories", totalAdvisories)
         }
     }
 

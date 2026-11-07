@@ -26,9 +26,8 @@ class ComplexityDoctorEngine(
         }
     }
 
-    private fun resolveSourceText(filePath: String): String? {
-        val root = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
-        val fullPath = if (filePath.startsWith("/")) filePath else "$root/$filePath"
+    internal fun resolveSourceText(filePath: String): String? {
+        val fullPath = PlatformFiles.requirePathInsideRoot(workspaceRoot, filePath)
         if (!PlatformFiles.exists(fullPath)) return null
         return try {
             PlatformFiles.readText(fullPath)
@@ -213,7 +212,7 @@ class ComplexityDoctorEngine(
 
     private class OuterIfInfo(val lineIdx: Int, val indent: String, val rawCondition: String)
 
-    private class ElseResolution(val spanEndIdx: Int, val defaultReturn: String)
+    internal class ElseResolution(val spanEndIdx: Int, val defaultReturn: String)
 
     private fun findFunctionBodyStart(lines: List<String>, startIdx: Int, endIdx: Int): Int? {
         if (startIdx >= endIdx || startIdx >= lines.size) return null
@@ -249,8 +248,13 @@ class ComplexityDoctorEngine(
         var depth = 0
         for (i in ifLineIdx..endIdx) {
             val masked = PolyglotAstExtractor.maskCommentsAndStrings(lines[i], lang)
-            depth += masked.count { it == '{' } - masked.count { it == '}' }
-            if (depth == 0) return i
+            for (ch in masked) {
+                if (ch == '{') depth++
+                else if (ch == '}') {
+                    depth--
+                    if (depth == 0) return i
+                }
+            }
         }
         return null
     }
@@ -260,7 +264,17 @@ class ComplexityDoctorEngine(
         return if (retExpr.isNotEmpty()) "return $retExpr" else "return"
     }
 
-    private fun findMultiLineElseEnd(
+    private fun isCommentLine(trimmed: String): Boolean {
+        val stripped = trimmed.replace(INLINE_BLOCK_COMMENT_RE, "").trim()
+        if (stripped.isEmpty()) return true
+        return stripped.startsWith("//") ||
+            stripped.startsWith("/*") ||
+            stripped.startsWith("*") ||
+            stripped.startsWith("*/") ||
+            stripped.startsWith("#")
+    }
+
+    internal fun findMultiLineElseEnd(
         lines: List<String>,
         closeIfIdx: Int,
         endIdx: Int,
@@ -268,13 +282,26 @@ class ComplexityDoctorEngine(
         retRegex: Regex
     ): ElseResolution? {
         var elseDepth = 1
-        var defaultReturn = "return"
+        var defaultReturn: String? = null
         for (i in (closeIfIdx + 1)..endIdx) {
-            val rMatch = retRegex.find(lines[i])
-            if (rMatch != null) {
-                defaultReturn = extractReturnExpr(rMatch)
+            val line = lines[i]
+            val trimmed = line.trim()
+            if (trimmed.isEmpty() || isCommentLine(trimmed)) {
+                continue
             }
-            val masked = PolyglotAstExtractor.maskCommentsAndStrings(lines[i], lang)
+            if (defaultReturn == null) {
+                val rMatch = retRegex.find(line)
+                if (rMatch != null) {
+                    defaultReturn = extractReturnExpr(rMatch)
+                } else {
+                    // Non-empty, non-comment statement precedes the return line inside the else block
+                    return null
+                }
+            } else if (!trimmed.contains('}')) {
+                // Non-empty, non-comment statement follows return before closing the else block
+                return null
+            }
+            val masked = PolyglotAstExtractor.maskCommentsAndStrings(line, lang)
             elseDepth += masked.count { it == '{' } - masked.count { it == '}' }
             if (elseDepth == 0) {
                 return ElseResolution(i, defaultReturn)
@@ -330,8 +357,10 @@ class ComplexityDoctorEngine(
         endIdx: Int,
         lang: String
     ): ElseResolution? {
-        val elseRes = resolveElseBlock(lines, closeIfIdx, endIdx, lang)
-        if (elseRes != null) return elseRes
+        val closeIfLine = lines[closeIfIdx]
+        if (SINGLE_LINE_ELSE_RE.find(closeIfLine) != null || ELSE_START_RE.find(closeIfLine) != null) {
+            return resolveElseBlock(lines, closeIfIdx, endIdx, lang)
+        }
         return resolveTrailingReturn(lines, closeIfIdx, endIdx)
     }
 
@@ -687,6 +716,7 @@ class ComplexityDoctorEngine(
     }
 
     companion object {
+        private val INLINE_BLOCK_COMMENT_RE = Regex("""/\*.*?\*/""")
         private val OUTER_IF_RE = Regex("""^(\s*)if\s*\((.+)\)\s*\{(?:\s*//.*)?$""")
         private val SINGLE_LINE_ELSE_RE = Regex("""^\s*\}\s*else\s*\{(?:\s*return(?:\s+([^;}\n]+))?;?\s*\})?\s*$""")
         private val ELSE_START_RE = Regex("""^\s*\}\s*else\s*\{""")

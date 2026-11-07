@@ -14,5 +14,6 @@ data class AuditReport(
     val plan3dCollisions: List<PlanCollision>,
     val descriptionSuggestions: List<DescriptionSuggestion> = emptyList(),
     val complexityViolations: List<ComplexityViolation> = emptyList(),
+    val parameterAdvisories: List<ComplexityViolation> = emptyList(),
     val skillViolations: List<SkillAuditViolation> = emptyList()
 )

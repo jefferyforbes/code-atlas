@@ -122,7 +122,15 @@ class WorkspaceInitEngine(val workspaceRoot: String) {
         }
 
         // 0755 permissions: S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH = 493u
-        PlatformFiles.chmod(hookPath, 493u)
+        val chmodOk = PlatformFiles.chmod(hookPath, 493u)
+        if (!chmodOk) {
+            return InitResult(
+                success = false,
+                hookPath = hookPath,
+                hookType = hookType,
+                message = "Failed to set executable permissions on '$hookPath'."
+            )
+        }
 
         return InitResult(
             success = true,
@@ -136,6 +144,8 @@ class WorkspaceInitEngine(val workspaceRoot: String) {
     }
 
     fun generateHookScript(project: String, hookType: String, threshold: Int): String {
+        require(threshold > 0) { "Threshold must be positive: $threshold" }
+        val quotedProject = "'${escapeSingleQuotes(project)}'"
         val triggerCondition = if (hookType == "pre-push") {
             """
             |# In pre-push, verify all modified tracked files in the repo against origin
@@ -190,14 +200,14 @@ class WorkspaceInitEngine(val workspaceRoot: String) {
             |echo "[Atlas Hook] Verifying architectural invariants & complexity on changed files..."
             |
             |# 3. Incrementally index workspace
-            |"${'$'}ATLAS_BIN" index --workspace . --project $project >/dev/null 2>&1
+            |"${'$'}ATLAS_BIN" index --workspace . --project $quotedProject >/dev/null 2>&1
             |
             |# 4. Run architectural & complexity audit
             |set +e
-            |AUDIT_OUTPUT=${'$'}("${'$'}ATLAS_BIN" audit --workspace . --project $project 2>&1)
+            |AUDIT_OUTPUT=${'$'}("${'$'}ATLAS_BIN" audit --workspace . --project $quotedProject 2>&1)
             |AUDIT_EXIT=${'$'}?
             |if [ ${'$'}AUDIT_EXIT -eq 0 ]; then
-            |    COMPLEXITY_OUTPUT=${'$'}("${'$'}ATLAS_BIN" audit --workspace . --project $project --complexity --threshold $threshold 2>&1)
+            |    COMPLEXITY_OUTPUT=${'$'}("${'$'}ATLAS_BIN" audit --workspace . --project $quotedProject --complexity --threshold $threshold 2>&1)
             |    AUDIT_EXIT=${'$'}?
             |    if [ ${'$'}AUDIT_EXIT -ne 0 ]; then
             |        AUDIT_OUTPUT="${'$'}COMPLEXITY_OUTPUT"
@@ -212,7 +222,7 @@ class WorkspaceInitEngine(val workspaceRoot: String) {
             |    echo "================================================================================"
             |    echo "${'$'}AUDIT_OUTPUT"
             |    echo ""
-            |    echo "Run '${'$'}ATLAS_BIN audit --project $project' for detailed diagnostics."
+            |    echo "Run '${'$'}ATLAS_BIN audit --project $quotedProject' for detailed diagnostics."
             |    echo "Run '${'$'}ATLAS_BIN fix' to remediate BOOST-003 or layer inversions."
             |    echo "Run '${'$'}ATLAS_BIN doctor --complexity' to synthesize complexity reduction guards."
             |    echo "================================================================================"
@@ -222,5 +232,9 @@ class WorkspaceInitEngine(val workspaceRoot: String) {
             |echo "[Atlas Hook] Invariants verified. Check passed."
             |exit 0
         """.trimMargin("|") + "\n"
+    }
+
+    companion object {
+        fun escapeSingleQuotes(value: String): String = value.replace("'", "'\\''")
     }
 }

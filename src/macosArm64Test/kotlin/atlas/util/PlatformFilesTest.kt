@@ -1,7 +1,7 @@
 package atlas.util
 
 import atlas.mcp.AtlasMcpServer
-import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.*
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -90,6 +90,81 @@ class PlatformFilesTest {
             server.close()
             PlatformFiles.deleteRecursively(wsRoot)
             PlatformFiles.delete(dbPath)
+        }
+    }
+
+    @Test
+    fun testRequirePathInsideRootAcceptsValidDescendants() {
+        val pid = getpid()
+        val wsRoot = "/tmp/test_atlas_require_valid_$pid"
+        PlatformFiles.mkdirs("$wsRoot/src/main")
+        try {
+            val canonWs = PlatformFiles.canonicalPath(wsRoot)
+            val res1 = PlatformFiles.requirePathInsideRoot(wsRoot, "src/main/App.kt")
+            assertEquals("$canonWs/src/main/App.kt", res1)
+
+            val res2 = PlatformFiles.requirePathInsideRoot(wsRoot, "$canonWs/src/main/App.kt")
+            assertEquals("$canonWs/src/main/App.kt", res2)
+
+            val res3 = PlatformFiles.requirePathInsideRoot(wsRoot, "src/../src/main/App.kt")
+            assertEquals("$canonWs/src/main/App.kt", res3)
+        } finally {
+            PlatformFiles.deleteRecursively(wsRoot)
+        }
+    }
+
+    @Test
+    fun testRequirePathInsideRootRejectsTraversalAndAbsoluteEscapes() {
+        val pid = getpid()
+        val wsRoot = "/tmp/test_atlas_require_escape_$pid"
+        PlatformFiles.mkdirs(wsRoot)
+        try {
+            kotlin.test.assertFailsWith<IllegalArgumentException> {
+                PlatformFiles.requirePathInsideRoot(wsRoot, "../outside.txt")
+            }
+            kotlin.test.assertFailsWith<IllegalArgumentException> {
+                PlatformFiles.requirePathInsideRoot(wsRoot, "../../../../etc/passwd")
+            }
+            kotlin.test.assertFailsWith<IllegalArgumentException> {
+                PlatformFiles.requirePathInsideRoot(wsRoot, "/etc/passwd")
+            }
+            kotlin.test.assertFailsWith<IllegalArgumentException> {
+                PlatformFiles.requirePathInsideRoot(wsRoot, "/tmp")
+            }
+        } finally {
+            PlatformFiles.deleteRecursively(wsRoot)
+        }
+    }
+
+    @Test
+    fun testRequirePathInsideRootResolvesAncestorSymlinksSafely() {
+        val pid = getpid()
+        val wsRoot = "/tmp/test_atlas_symlink_ws_$pid"
+        val outsideDir = "/tmp/test_atlas_outside_$pid"
+        PlatformFiles.mkdirs("$wsRoot/sub")
+        PlatformFiles.mkdirs(outsideDir)
+        try {
+            // Create symlink pointing outside workspace
+            platform.posix.symlink(outsideDir, "$wsRoot/link_outside")
+            // Create symlink pointing inside workspace
+            platform.posix.symlink("$wsRoot/sub", "$wsRoot/link_inside")
+
+            // 1. Symlink pointing outside must be rejected even when leaf does not exist on disk
+            kotlin.test.assertFailsWith<IllegalArgumentException> {
+                PlatformFiles.requirePathInsideRoot(wsRoot, "link_outside/nonexistent_leaf.txt")
+            }
+
+            // 2. Symlink pointing inside workspace must succeed
+            val canonWs = PlatformFiles.canonicalPath(wsRoot)
+            val canonSub = PlatformFiles.canonicalPath("$wsRoot/sub")
+            val insideRes = PlatformFiles.requirePathInsideRoot(wsRoot, "link_inside/nonexistent_leaf.txt")
+            assertEquals("$canonSub/nonexistent_leaf.txt", insideRes)
+            assertTrue(PlatformFiles.isPathInsideRoot(canonWs, insideRes))
+        } finally {
+            platform.posix.unlink("$wsRoot/link_outside")
+            platform.posix.unlink("$wsRoot/link_inside")
+            PlatformFiles.deleteRecursively(wsRoot)
+            PlatformFiles.deleteRecursively(outsideDir)
         }
     }
 }

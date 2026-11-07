@@ -54,11 +54,35 @@ object PlatformFiles {
             mkdirs(parent)
             chmod(parent, 0b111000000u)
         }
-        val ok = writeText(path, content)
-        if (ok) {
-            chmod(path, mode)
+        val fd = open(path, O_CREAT or O_WRONLY or O_TRUNC, mode.toUShort())
+        if (fd < 0) return false
+        var success = false
+        try {
+            if (fchmod(fd, mode.toUShort()) == 0) {
+                val bytes = content.encodeToByteArray()
+                val writeOk = if (bytes.isEmpty()) {
+                    true
+                } else {
+                    bytes.usePinned { pinned ->
+                        var totalWritten = 0
+                        while (totalWritten < bytes.size) {
+                            val toWrite = (bytes.size - totalWritten).toULong()
+                            val written = write(fd, pinned.addressOf(totalWritten), toWrite)
+                            if (written <= 0) return@usePinned false
+                            totalWritten += written.toInt()
+                        }
+                        true
+                    }
+                }
+                success = writeOk
+            }
+        } finally {
+            val closeRes = close(fd)
+            if (closeRes != 0) {
+                success = false
+            }
         }
-        return ok
+        return success
     }
 
     fun sanitizeFileName(name: String): String {
@@ -93,10 +117,25 @@ object PlatformFiles {
         return result
     }
 
-    private fun isPathInsideRoot(rootCanon: String, canonPath: String): Boolean {
-        if (rootCanon.isEmpty()) return true
-        if (canonPath == rootCanon) return true
-        return canonPath.startsWith("$rootCanon/")
+    fun isPathInsideRoot(rootCanon: String, canonPath: String): Boolean {
+        val root = rootCanon.trimEnd('/')
+        val path = canonPath.trimEnd('/')
+        if (root.isEmpty() || root == "/") return true
+        if (path == root) return true
+        return path.startsWith("$root/")
+    }
+
+    fun requirePathInsideRoot(root: String, targetPath: String): String {
+        val fullPath = if (targetPath.startsWith("/")) targetPath else {
+            val trimmedRoot = root.trimEnd('/')
+            "$trimmedRoot/$targetPath"
+        }
+        val canonicalRoot = canonicalPath(root).trimEnd('/')
+        val canonicalTarget = canonicalPath(fullPath).trimEnd('/')
+        require(isPathInsideRoot(canonicalRoot, canonicalTarget)) {
+            "Path escapes workspace root: $targetPath"
+        }
+        return canonicalTarget.ifEmpty { "/" }
     }
 
     private fun scanDirectoryRecursively(
@@ -158,6 +197,8 @@ object PlatformFiles {
         if (parent.isNotEmpty() && parent != normalized) {
             val canonParent = canonicalPath(parent)
             val name = fileName(normalized)
+            if (name == "." || name.isEmpty()) return canonParent
+            if (name == "..") return parentOf(canonParent).ifEmpty { "/" }
             return if (canonParent == "/") "/$name" else "$canonParent/$name"
         }
         return normalized
