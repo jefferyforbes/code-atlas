@@ -275,6 +275,7 @@ internal object KotlinAstExtractor {
     private fun addKotlinEdges(
         nodeId: String,
         decl: KotlinDeclSpec,
+        supertypes: List<Pair<String, String>>,
         ctx: PolyglotAstExtractor.FileExtractionContext,
         edges: MutableList<GraphEdge>
     ) {
@@ -292,19 +293,17 @@ internal object KotlinAstExtractor {
                 )
             }
         }
-        if (decl.kw in listOf("class", "interface", "object")) {
-            for ((superName, edgeType) in extractKotlinSupertypes(ctx.lines, decl.startLine, decl.endLine)) {
-                edges.add(
-                    GraphEdge(
-                        edgeId = "$nodeId:sup:$superName:${decl.startLine}",
-                        projectId = ctx.projectId,
-                        sourceNodeId = nodeId,
-                        targetNodeId = "sym:$superName",
-                        edgeType = edgeType,
-                        lineNumber = decl.startLine
-                    )
+        for ((superName, edgeType) in supertypes) {
+            edges.add(
+                GraphEdge(
+                    edgeId = "$nodeId:sup:$superName:${decl.startLine}",
+                    projectId = ctx.projectId,
+                    sourceNodeId = nodeId,
+                    targetNodeId = "sym:$superName",
+                    edgeType = edgeType,
+                    lineNumber = decl.startLine
                 )
-            }
+            )
         }
     }
 
@@ -543,10 +542,19 @@ internal object KotlinAstExtractor {
         val edges: MutableList<GraphEdge>
     )
 
+    private data class ParsedKotlinDecl(
+        val node: GraphNode,
+        val isPublicTop: Boolean,
+        val isTopLevel: Boolean,
+        val kw: String,
+        val modTokens: Set<String>,
+        val superNames: List<String>
+    )
+
     private fun processSingleKotlinDeclaration(
         match: MatchResult,
         state: KotlinDeclParseState
-    ): Pair<GraphNode, Boolean>? {
+    ): ParsedKotlinDecl? {
         val (kw, name, modTokens) = extractKotlinDeclHeader(match) ?: return null
         val annotations = match.groups["annotations"]?.value ?: ""
         val (matchStartLine, startLine, endLine) = resolveKotlinDeclLines(match, state.cursor, state.ctx.lines, state.ctx.cleanLines)
@@ -566,10 +574,22 @@ internal object KotlinAstExtractor {
             matchStartLine = matchStartLine,
             isTopLevel = isTopLevel
         )
+        val supertypes = if (decl.kw in listOf("class", "interface", "object")) {
+            extractKotlinSupertypes(state.ctx.lines, decl.startLine, decl.endLine)
+        } else {
+            emptyList()
+        }
         val node = buildKotlinNode(ctx = state.ctx, pkgName = state.pkgName, decl = decl)
-        addKotlinEdges(node.nodeId, decl, state.ctx, state.edges)
+        addKotlinEdges(node.nodeId, decl, supertypes, state.ctx, state.edges)
         pushScopeEntryIfContainer(kw, name, startLine, endLine, state.scopeStack)
-        return Pair(node, isPublicTop)
+        return ParsedKotlinDecl(
+            node = node,
+            isPublicTop = isPublicTop,
+            isTopLevel = isTopLevel,
+            kw = kw,
+            modTokens = modTokens,
+            superNames = supertypes.map { it.first }
+        )
     }
 
     private fun parseKotlinDeclarations(
@@ -585,13 +605,27 @@ internal object KotlinAstExtractor {
             scopeStack = mutableListOf(),
             edges = edges
         )
-        var topLevelCount = 0
+        val parsedList = mutableListOf<ParsedKotlinDecl>()
+        val localSealedTypes = mutableSetOf<String>()
 
         for (match in KT_DECL_RE.findAll(ctx.maskedText)) {
-            val (node, isPublicTop) = processSingleKotlinDeclaration(match, state) ?: continue
-            nodes.add(node)
-            if (isPublicTop) topLevelCount++
+            val parsed = processSingleKotlinDeclaration(match, state) ?: continue
+            nodes.add(parsed.node)
+            parsedList.add(parsed)
+            if (parsed.isTopLevel && "sealed" in parsed.modTokens && (parsed.kw == "class" || parsed.kw == "interface")) {
+                localSealedTypes.add(parsed.node.name)
+            }
         }
+
+        var topLevelCount = 0
+        for (parsed in parsedList) {
+            if (!parsed.isPublicTop) continue
+            val isSealedVariant = parsed.isTopLevel && parsed.superNames.any { it in localSealedTypes }
+            if (!isSealedVariant) {
+                topLevelCount++
+            }
+        }
+
         return Pair(nodes, topLevelCount)
     }
 

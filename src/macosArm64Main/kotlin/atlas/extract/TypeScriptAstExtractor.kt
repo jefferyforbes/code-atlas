@@ -24,7 +24,7 @@ internal object TypeScriptAstExtractor {
 
     private val TS_IMP_RE = Regex("""import\s+(?:type\s+)?(?:(?:\{([^}]+)\})|([A-Za-z0-9_]+))\s+from\s+['"]([^'"]+)['"]""")
     private val TS_DECL_RE = Regex(
-        """^(?<indent>[ \t]*)(?:export\s+)?(?:default\s+)?(?:async\s+)?(?<kw>class|interface|type|function|const\s+enum|enum|const|let|var)\s+(?<name>[A-Za-z0-9_]+)""",
+        """^(?<indent>[ \t]*)(?<export>export\s+)?(?:(?:default|async|abstract|declare)\s+)*(?<kw>class|interface|type|function|const\s+enum|enum|const|let|var)\s+(?<name>[A-Za-z0-9_]+)""",
         RegexOption.MULTILINE
     )
     private val TS_METHOD_DECL_RE = Regex(
@@ -44,7 +44,8 @@ internal object TypeScriptAstExtractor {
         val indent: String,
         val kw: String,
         val name: String,
-        val isMethod: Boolean
+        val isMethod: Boolean,
+        val isExported: Boolean = false
     )
 
     private data class TsResolvedDecl(
@@ -81,7 +82,8 @@ internal object TypeScriptAstExtractor {
         val name = groups["name"]?.value ?: return null
         val indent = groups["indent"]?.value.orEmpty()
         val kw = groups["kw"]?.value ?: "class"
-        return TsDeclCandidate(match.range.first, indent, kw, name, isMethod = false)
+        val isExported = groups["export"] != null
+        return TsDeclCandidate(match.range.first, indent, kw, name, isMethod = false, isExported = isExported)
     }
 
     private fun getTsMethodName(match: MatchResult): String? {
@@ -262,7 +264,7 @@ internal object TypeScriptAstExtractor {
         recordTsNodeAndEdges(node, ctx, nodes, edges)
         recordTsScopeEntry(decl, scopeStack)
 
-        return isTopLevel && kind !in TS_NON_COUNTABLE_TOP_LEVEL
+        return isTopLevel && candidate.isExported && kind !in TS_NON_COUNTABLE_TOP_LEVEL
     }
 
     private fun parseTsCallEdge(

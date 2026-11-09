@@ -29,10 +29,15 @@ internal object NativeSystemsAstExtractor {
         RegexOption.MULTILINE
     )
     private val SWIFT_SCOPE_KEYWORDS = setOf("class", "struct", "protocol", "actor", "enum", "func", "extension")
+    private val SWIFT_PRIVATE_RE = Regex("""\b(?:private|fileprivate)\b""")
 
     private val RS_USE_RE = Regex("""^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([a-zA-Z0-9_:*]+)""", RegexOption.MULTILINE)
     private val RS_DECL_RE = Regex(
-        """^(?<indent>[ \t]*)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?<kw>struct|enum|trait|fn|type|mod)\s+(?<name>[A-Za-z0-9_]+)""",
+        """^(?<indent>[ \t]*)(?:#\[[^\]]*\]\s*)*(?<pub>pub(?:\([^)]*\))?\s+)?(?:(?:const|async|unsafe|extern(?:\s+"[^"]+")?)\s+)*(?<kw>struct|enum|trait|fn|type|mod)\s+(?<name>[A-Za-z0-9_]+)""",
+        RegexOption.MULTILINE
+    )
+    private val RS_IMPL_RE = Regex(
+        """^(?<indent>[ \t]*)(?:#\[[^\]]*\]\s*)*(?:unsafe\s+)?impl\b""",
         RegexOption.MULTILINE
     )
     private val RUST_DOC_KINDS = setOf("class", "interface", "enum", "function")
@@ -242,7 +247,8 @@ internal object NativeSystemsAstExtractor {
         recordNodeAndImports(node, ctx, nodes, edges)
         recordSwiftScopeEntry(decl, scopeStack)
 
-        return isTopLevel && kw != "extension"
+        val isPrivate = SWIFT_PRIVATE_RE.containsMatchIn(match.value)
+        return isTopLevel && !isPrivate && kw != "extension"
     }
 
     fun extractSwift(
@@ -370,6 +376,117 @@ internal object NativeSystemsAstExtractor {
         }
     }
 
+    private fun findRustBlockOpenBrace(maskedText: String, startIndex: Int): Int {
+        var idx = startIndex
+        while (idx < maskedText.length) {
+            val ch = maskedText[idx]
+            if (ch == '{') return idx
+            if (ch == ';') return -1
+            idx++
+        }
+        return -1
+    }
+
+    private fun extractRustImplTarget(headerText: String): String? {
+        var text = headerText.trim()
+        if (text.startsWith("unsafe")) {
+            text = text.removePrefix("unsafe").trim()
+        }
+        if (!text.startsWith("impl")) return null
+        text = text.removePrefix("impl").trim()
+
+        if (text.startsWith("<")) {
+            var depth = 0
+            var closeIdx = -1
+            for (i in text.indices) {
+                if (text[i] == '<') depth++
+                else if (text[i] == '>') {
+                    depth--
+                    if (depth == 0) {
+                        closeIdx = i
+                        break
+                    }
+                }
+            }
+            if (closeIdx != -1) {
+                text = text.substring(closeIdx + 1).trim()
+            }
+        }
+
+        var forIdx = -1
+        var depth = 0
+        var i = 0
+        while (i < text.length) {
+            val ch = text[i]
+            if (ch == '<') depth++
+            else if (ch == '>') { if (depth > 0) depth-- }
+            else if (depth == 0 && text.startsWith("for", i)) {
+                val beforeOk = i == 0 || text[i - 1].isWhitespace()
+                val afterIdx = i + 3
+                val afterOk = afterIdx >= text.length || text[afterIdx].isWhitespace()
+                if (beforeOk && afterOk) {
+                    forIdx = i
+                }
+            }
+            i++
+        }
+
+        val targetPart = if (forIdx != -1) {
+            text.substring(forIdx + 3).trim()
+        } else {
+            text.trim()
+        }
+
+        var cleaned = targetPart
+        while (cleaned.startsWith("&") || cleaned.startsWith("*")) {
+            cleaned = cleaned.substring(1).trim()
+        }
+        if (cleaned.startsWith("'")) {
+            cleaned = cleaned.replaceFirst(Regex("""^'[A-Za-z0-9_]+\s*"""), "").trim()
+        }
+        if (cleaned.startsWith("mut ")) {
+            cleaned = cleaned.removePrefix("mut").trim()
+        } else if (cleaned.startsWith("const ")) {
+            cleaned = cleaned.removePrefix("const").trim()
+        }
+
+        val typeBeforeGenerics = cleaned
+            .substringBefore('<')
+            .substringBefore("where")
+            .trim()
+        val structName = typeBeforeGenerics
+            .substringAfterLast("::")
+            .trim()
+
+        return if (structName.isNotEmpty() && structName.all { it.isLetterOrDigit() || it == '_' }) {
+            structName
+        } else {
+            null
+        }
+    }
+
+    private fun processRustImpl(
+        match: MatchResult,
+        ctx: PolyglotAstExtractor.FileExtractionContext,
+        scopeStack: MutableList<PolyglotAstExtractor.ScopeEntry>
+    ) {
+        val openBraceIdx = findRustBlockOpenBrace(ctx.maskedText, match.range.last + 1)
+        if (openBraceIdx == -1) return
+        val headerText = ctx.maskedText.substring(match.range.first, openBraceIdx)
+        val structName = extractRustImplTarget(headerText) ?: return
+
+        val startLine = ctx.lineIndex.lineNumberAt(match.range.first)
+        val endLine = PolyglotAstExtractor.findBlockEndLine(ctx.lines, startLine, ctx.cleanLines)
+
+        PolyglotAstExtractor.pruneScopeStack(scopeStack, startLine)
+        scopeStack.add(PolyglotAstExtractor.ScopeEntry(structName, startLine, endLine))
+    }
+
+    private sealed class RustScanItem(val offset: Int) {
+        class Decl(val match: MatchResult) : RustScanItem(match.range.first)
+        class Impl(val match: MatchResult) : RustScanItem(match.range.first)
+    }
+
     private fun processRustDeclaration(
         match: MatchResult,
         ctx: PolyglotAstExtractor.FileExtractionContext,
@@ -399,7 +516,9 @@ internal object NativeSystemsAstExtractor {
         recordNodeAndImports(node, ctx, nodes, edges)
         recordRustScopeEntry(kw, decl, scopeStack)
 
-        return isTopLevel && kind !in RUST_NON_COUNTABLE_TOP_LEVEL
+        val pubGroup = match.groups["pub"]?.value?.trim()
+        val isPub = pubGroup != null && !pubGroup.contains("(")
+        return isTopLevel && isPub && kind !in RUST_NON_COUNTABLE_TOP_LEVEL
     }
 
     private fun parseRustCallEdge(
@@ -479,10 +598,22 @@ internal object NativeSystemsAstExtractor {
             lineIndex = lineIndex
         )
 
+        val items = mutableListOf<RustScanItem>()
+        for (m in RS_DECL_RE.findAll(maskedText)) items.add(RustScanItem.Decl(m))
+        for (m in RS_IMPL_RE.findAll(maskedText)) items.add(RustScanItem.Impl(m))
+        items.sortBy { it.offset }
+
         var topLevelCount = 0
-        for (match in RS_DECL_RE.findAll(maskedText)) {
-            if (processRustDeclaration(match, ctx, scopeStack, nodes, edges)) {
-                topLevelCount++
+        for (item in items) {
+            when (item) {
+                is RustScanItem.Decl -> {
+                    if (processRustDeclaration(item.match, ctx, scopeStack, nodes, edges)) {
+                        topLevelCount++
+                    }
+                }
+                is RustScanItem.Impl -> {
+                    processRustImpl(item.match, ctx, scopeStack)
+                }
             }
         }
 
@@ -577,6 +708,17 @@ internal object NativeSystemsAstExtractor {
         )
     }
 
+    private fun isCppForwardDeclaration(maskedText: String, startIndex: Int): Boolean {
+        var idx = startIndex
+        while (idx < maskedText.length) {
+            val ch = maskedText[idx]
+            if (ch == ';') return true
+            if (ch == '{') return false
+            idx++
+        }
+        return false
+    }
+
     private fun processCppTypeDeclaration(
         declMatch: MatchResult,
         ctx: PolyglotAstExtractor.FileExtractionContext,
@@ -585,6 +727,9 @@ internal object NativeSystemsAstExtractor {
         nodes: MutableList<GraphNode>,
         edges: MutableList<GraphEdge>
     ): Boolean {
+        if (isCppForwardDeclaration(ctx.maskedText, declMatch.range.last + 1)) {
+            return false
+        }
         val header = extractSwiftDeclHeader(declMatch) ?: return false
         val (indent, kw, name) = header
         val kind = resolveCppDeclKind(kw)
@@ -639,12 +784,15 @@ internal object NativeSystemsAstExtractor {
     }
 
     private fun findEnclosingCppClass(nodes: List<GraphNode>, startLine: Int): GraphNode? {
+        var best: GraphNode? = null
         for (node in nodes) {
             if ((node.kind == "class" || node.kind == "struct") && startLine > node.startLine && startLine < node.endLine) {
-                return node
+                if (best == null || node.startLine > best.startLine) {
+                    best = node
+                }
             }
         }
-        return null
+        return best
     }
 
     private fun isTopLevelCppFunction(indent: String, enclosingClass: GraphNode?, rawName: String): Boolean {

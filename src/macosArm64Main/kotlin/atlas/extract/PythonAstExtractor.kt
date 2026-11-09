@@ -436,9 +436,10 @@ internal object PythonAstExtractor {
     }
 
     private fun isAllowedPythonDeclaration(name: String): Boolean {
-        if (!name.startsWith("_")) return true
-        val isDunder = name.startsWith("__") && name.endsWith("__")
-        return isDunder && name in ALLOWED_PYTHON_DUNDERS
+        if (name.startsWith("__") && name.endsWith("__")) {
+            return name in ALLOWED_PYTHON_DUNDERS
+        }
+        return true
     }
 
     private fun extractPythonImports(
@@ -525,7 +526,11 @@ internal object PythonAstExtractor {
 
     private fun isAllowedPythonCallee(callee: String, nodeName: String, receiver: String?): Boolean {
         val isSelfCall = callee == nodeName && (receiver.isNullOrEmpty() || receiver == "self")
-        return !isSelfCall && callee !in PolyglotAstExtractor.CALL_STOPWORDS && !callee.startsWith("_")
+        if (isSelfCall || callee in PolyglotAstExtractor.CALL_STOPWORDS) return false
+        if (callee.startsWith("__") && callee.endsWith("__")) {
+            return callee in ALLOWED_PYTHON_DUNDERS
+        }
+        return true
     }
 
     private fun getGroupName(match: MatchResult): String? {
