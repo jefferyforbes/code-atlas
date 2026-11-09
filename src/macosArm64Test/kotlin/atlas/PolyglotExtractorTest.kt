@@ -5,6 +5,7 @@ import atlas.extract.PolyglotAstExtractor
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class PolyglotExtractorTest {
@@ -266,5 +267,254 @@ class PolyglotExtractorTest {
         assertTrue(nodes.any { it.name == "InternalHelper" })
         assertTrue(nodes.any { it.name == "internalUtility" })
         assertTrue(nodes.any { it.name == "privateHelper" })
+    }
+
+    @Test
+    fun `NativeSystemsAstExtractor extracts full Cpp class definition and methods when preceded by forward declaration`() {
+        val cppSource = """
+            #include "engine.h"
+
+            class BufferManager;
+            struct CacheEntry;
+
+            class BufferManager {
+            public:
+                void allocateBuffer(int size) {
+                    resetPointer();
+                }
+                void resetPointer() {}
+            };
+
+            struct CacheEntry {
+                int id;
+                void clear() {}
+            };
+        """.trimIndent()
+
+        val (nodes, edges, topCount) = PolyglotAstExtractor.extractFile("proj", "src/BufferManager.cpp", cppSource)
+        assertEquals(2, topCount, "Both BufferManager and CacheEntry must be counted once as top-level types")
+
+        val bufferClass = nodes.firstOrNull { it.name == "BufferManager" && it.kind == "class" }
+        assertNotNull(bufferClass, "BufferManager class node must be extracted")
+        assertTrue(bufferClass.startLine >= 6, "BufferManager class node must match definition, not forward declaration")
+
+        val allocateMethod = nodes.firstOrNull { it.name == "allocateBuffer" }
+        assertNotNull(allocateMethod, "BufferManager::allocateBuffer method must be extracted")
+        assertEquals("proj:src/BufferManager.cpp#BufferManager::allocateBuffer", allocateMethod.nodeId)
+
+        val resetMethod = nodes.firstOrNull { it.name == "resetPointer" }
+        assertNotNull(resetMethod, "BufferManager::resetPointer method must be extracted")
+        assertEquals("proj:src/BufferManager.cpp#BufferManager::resetPointer", resetMethod.nodeId)
+
+        val cacheStruct = nodes.firstOrNull { it.name == "CacheEntry" && it.kind == "struct" }
+        assertNotNull(cacheStruct, "CacheEntry struct node must be extracted")
+        val clearMethod = nodes.firstOrNull { it.name == "clear" }
+        assertNotNull(clearMethod, "CacheEntry::clear method must be extracted")
+
+        assertTrue(edges.any { it.edgeType == "CALLS" && it.targetNodeId == "sym:resetPointer" })
+    }
+
+    @Test
+    fun `NativeSystemsAstExtractor qualifies Rust methods under impl blocks preventing primary key collisions across structs`() {
+        val rustSource = """
+            pub struct Engine {
+                pub state: u32,
+            }
+
+            pub struct Pipeline {
+                pub id: u64,
+            }
+
+            impl Engine {
+                pub const fn new() -> Self {
+                    Engine { state: 0 }
+                }
+
+                pub unsafe fn reset(&mut self) {
+                    self.state = 0;
+                }
+
+                #[inline]
+                pub fn is_active(&self) -> bool {
+                    self.state > 0
+                }
+            }
+
+            impl Pipeline {
+                pub fn new() -> Self {
+                    Pipeline { id: 1 }
+                }
+
+                pub fn execute(&self) {}
+            }
+
+            impl<'a> std::fmt::Display for &'a Pipeline {
+                pub fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    Ok(())
+                }
+            }
+        """.trimIndent()
+
+        val (nodes, _, topCount) = PolyglotAstExtractor.extractFile("proj", "src/engine.rs", rustSource)
+        assertEquals(2, topCount, "Only Engine and Pipeline top-level structs should be counted for BOOST-003")
+
+        val nodeIds = nodes.map { it.nodeId }.toSet()
+        assertTrue("proj:src/engine.rs#Engine::new" in nodeIds, "Engine::new (const fn) must have qualified nodeId")
+        assertTrue("proj:src/engine.rs#Pipeline::new" in nodeIds, "Pipeline::new must have qualified nodeId")
+        assertTrue("proj:src/engine.rs#Engine::reset" in nodeIds, "Engine::reset (unsafe fn) must have qualified nodeId")
+        assertTrue("proj:src/engine.rs#Engine::is_active" in nodeIds, "Engine::is_active (#[inline] fn) must have qualified nodeId")
+        assertTrue("proj:src/engine.rs#Pipeline::execute" in nodeIds, "Pipeline::execute must have qualified nodeId")
+        assertTrue("proj:src/engine.rs#Pipeline::fmt" in nodeIds, "Pipeline::fmt trait method on &'a Pipeline must have qualified nodeId")
+
+        val newMethods = nodes.filter { it.name == "new" }
+        assertEquals(2, newMethods.size, "Both new() methods must be preserved in the node graph without overwrite")
+    }
+
+    @Test
+    fun `PythonAstExtractor extracts single-underscore private functions and methods while preserving complexity metrics`() {
+        val pySource = """
+            def _helper_util(val: int) -> int:
+                if val > 10:
+                    return val * 2
+                return val
+
+            class ConnectionManager:
+                def __init__(self, host: str):
+                    self.host = host
+
+                def _connect(self, retries: int) -> bool:
+                    for i in range(retries):
+                        if self._try_socket():
+                            return True
+                    return False
+
+                def _try_socket(self) -> bool:
+                    return True
+
+                def __unsupported_custom_dunder__(self):
+                    pass
+        """.trimIndent()
+
+        val (nodes, edges, _) = PolyglotAstExtractor.extractFile("proj", "src/conn.py", pySource)
+
+        val helperNode = nodes.firstOrNull { it.name == "_helper_util" }
+        assertNotNull(helperNode, "Private top-level function _helper_util must be extracted")
+        assertEquals("function", helperNode.kind)
+        assertTrue(helperNode.cyclomaticComplexity >= 2, "Cognitive and cyclomatic complexity must be calculated for private function")
+
+        val connectNode = nodes.firstOrNull { it.name == "_connect" }
+        assertNotNull(connectNode, "Private method _connect must be extracted")
+        assertEquals("proj:src/conn.py#ConnectionManager._connect", connectNode.nodeId)
+        assertTrue(connectNode.cyclomaticComplexity >= 2, "Branching inside _connect must reflect in complexity metrics")
+
+        val trySocketNode = nodes.firstOrNull { it.name == "_try_socket" }
+        assertNotNull(trySocketNode, "Private method _try_socket must be extracted")
+
+        val initNode = nodes.firstOrNull { it.name == "__init__" }
+        assertNotNull(initNode, "Whitelisted dunder __init__ must be extracted")
+
+        val unsupportedDunder = nodes.firstOrNull { it.name == "__unsupported_custom_dunder__" }
+        assertTrue(unsupportedDunder == null, "Non-whitelisted dunders must continue to be filtered out")
+
+        assertTrue(edges.any { it.sourceNodeId == connectNode.nodeId && it.targetNodeId == "sym:self._try_socket" }, "Call to private method self._connect -> self._try_socket must be extracted")
+    }
+
+    @Test
+    fun `extractFile passes BOOST-003 validation for single public declaration with sealed variants and file-private helpers`() {
+        val ktSource = """
+            package sample.result
+
+            sealed interface ActionResult
+
+            data class Success(val message: String) : ActionResult
+            data class Failure(val cause: Throwable) : ActionResult
+            data object Pending : ActionResult
+
+            private fun formatErrorMessage(cause: Throwable): String = cause.message ?: "Unknown"
+        """.trimIndent()
+        val (_, _, ktTopCount) = PolyglotAstExtractor.extractFile("proj", "src/ActionResult.kt", ktSource)
+        assertEquals(1, ktTopCount, "Kotlin sealed interface with top-level variants and private helper must report topLevelCount == 1")
+
+        val tsSource = """
+            export abstract class CheckoutService {
+                abstract process(id: string): boolean;
+            }
+
+            abstract class InternalValidationHelper {
+                abstract check(): void;
+            }
+
+            function validate(id: string): boolean {
+                return id.length > 0;
+            }
+        """.trimIndent()
+        val (_, _, tsTopCount) = PolyglotAstExtractor.extractFile("proj", "src/CheckoutService.ts", tsSource)
+        assertEquals(1, tsTopCount, "TypeScript abstract class with unexported helper abstract class and function must report topLevelCount == 1")
+
+        val swiftSource = """
+            import Foundation
+
+            public struct PaymentProcessor {
+                public func pay() {}
+            }
+
+            private class CardValidator {
+                func isValid() -> Bool { true }
+            }
+
+            fileprivate func sanitize(input: String) -> String {
+                return input
+            }
+        """.trimIndent()
+        val (_, _, swiftTopCount) = PolyglotAstExtractor.extractFile("proj", "src/PaymentProcessor.swift", swiftSource)
+        assertEquals(1, swiftTopCount, "Swift public struct with private and fileprivate helpers must report topLevelCount == 1")
+
+        val rustSource = """
+            pub struct ClusterClient {
+                pub endpoint: String,
+            }
+
+            pub(crate) struct ClusterMetrics {
+                pub latency_ms: u64,
+            }
+
+            fn internal_ping(endpoint: &str) -> bool {
+                true
+            }
+
+            pub(super) fn internal_super_ping() -> bool {
+                true
+            }
+
+            impl ClusterClient {
+                pub fn connect(endpoint: String) -> Self {
+                    ClusterClient { endpoint }
+                }
+            }
+        """.trimIndent()
+        val (_, _, rustTopCount) = PolyglotAstExtractor.extractFile("proj", "src/cluster.rs", rustSource)
+        assertEquals(1, rustTopCount, "Rust pub struct with non-pub and pub(crate)/pub(super) helpers must report topLevelCount == 1")
+    }
+
+    @Test
+    fun `NativeSystemsAstExtractor correctly attributes methods to innermost Cpp class when classes are nested`() {
+        val cppSource = """
+            class OuterEngine {
+            public:
+                class InnerWorker {
+                public:
+                    void doWork() {}
+                };
+                void runEngine() {}
+            };
+        """.trimIndent()
+        val (nodes, _, topCount) = PolyglotAstExtractor.extractFile("proj", "src/nested.cpp", cppSource)
+        assertEquals(1, topCount, "Only OuterEngine is top-level class")
+        val doWorkMethod = nodes.firstOrNull { it.name == "doWork" }
+        assertNotNull(doWorkMethod, "InnerWorker::doWork method must be extracted")
+        assertEquals("proj:src/nested.cpp#InnerWorker::doWork", doWorkMethod.nodeId, "Innermost class InnerWorker must enclose doWork")
+        val runEngineMethod = nodes.firstOrNull { it.name == "runEngine" }
+        assertNotNull(runEngineMethod, "OuterEngine::runEngine method must be extracted")
+        assertEquals("proj:src/nested.cpp#OuterEngine::runEngine", runEngineMethod.nodeId)
     }
 }
