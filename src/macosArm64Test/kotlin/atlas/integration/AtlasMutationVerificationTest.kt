@@ -1,24 +1,35 @@
 package atlas.integration
 
+import atlas.db.NativeSqliteDatabase
 import atlas.db.SqliteGraphStore
 import atlas.engine.ArchitectContextEngine
 import atlas.engine.ScopeSynthesizer
+import atlas.engine.SpikeAnalysisEngine
+import atlas.extract.PolyglotAstExtractor
+import atlas.model.FileRecordUpsert
+import atlas.model.GraphEdge
+import atlas.model.GraphNode
 import atlas.model.SemioticSizing
+import atlas.model.SpikeRequest
+import atlas.testdoubles.FakeGraphStore
 import atlas.util.PlatformFiles
 import platform.posix.getpid
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
  * Mutation Testing Verification Suite simulating Pitest mutant injections:
- * 1. CONDITIONALS_BOUNDARY (< vs <=, > vs >=) across 3-band velocity gates.
+ * 1. CONDITIONALS_BOUNDARY (< vs <=, > vs >=) across 3-band velocity gates and graph traversals.
  * 2. MATH & INCREMENTS (+ vs -, * vs /) across unified ACI score computation.
  * 3. VOID_METHOD_CALLS (removal of side-effect mutations & rollback counters).
- * 4. RETURNS (null/empty replacement detection via deep equality).
+ * 4. RETURNS (null/empty replacement detection via deep equality and scoping).
+ * 5. INVERT_NEGS & BOUNDARY conditions across polyglot AST extractors.
  */
 class AtlasMutationVerificationTest {
 
@@ -184,5 +195,236 @@ class AtlasMutationVerificationTest {
                 "Case '${case.label}' unified ACI mismatch"
             )
         }
+    }
+
+    // Pattern 4: Polyglot Extraction Boundaries & Negations (Kills INVERT_NEGS & BOUNDARY Mutants)
+    @Test
+    fun testPolyglotConditionalsAndBoundaryMutantKillers() {
+        // Boundary 1: Kotlin backticks with spaces, symbols, and operators
+        val ktSource = """
+            package sample.test
+            
+            class `Boundary Verification Service <T>` {
+                fun `given boundary A <= B when processed then assert 100% passed`(): Boolean = true
+            }
+        """.trimIndent()
+        val (ktNodes, _, ktCount) = PolyglotAstExtractor.extractFile("p", "src/Test.kt", ktSource)
+        assertEquals(1, ktCount, "Top-level declaration count")
+        assertTrue(ktNodes.any { it.name == "Boundary Verification Service <T>" && it.kind == "class" }, "Backtick class")
+        assertTrue(ktNodes.any { it.name == "given boundary A <= B when processed then assert 100% passed" && it.kind == "function" }, "Backtick function")
+
+        // Boundary 2: Trailing lambda with and without argument lists
+        val ktLambdaSource = """
+            fun executeWork() {
+                task.run {
+                    perform()
+                }
+                items.filter(condition) { item ->
+                    item.isActive
+                }
+            }
+        """.trimIndent()
+        val (_, ktEdges, _) = PolyglotAstExtractor.extractFile("p", "src/Lambda.kt", ktLambdaSource)
+        assertTrue(ktEdges.any { it.edgeType == "CALLS" && (it.targetNodeId == "sym:run" || it.targetNodeId == "sym:task.run") })
+        assertTrue(ktEdges.any { it.edgeType == "CALLS" && (it.targetNodeId == "sym:filter" || it.targetNodeId == "sym:items.filter") })
+
+        // Boundary 3: TypeScript complex import boundaries
+        val tsSource = """
+            import DefaultView, { ItemList, type DetailProps, config as cfg } from './components';
+            import * as Logger from './logger';
+
+            export function renderView() {
+                ItemList();
+            }
+        """.trimIndent()
+        val (_, tsEdges, _) = PolyglotAstExtractor.extractFile("p", "src/View.ts", tsSource)
+        val tsImports = tsEdges.filter { it.edgeType == "IMPORTS" }.map { it.targetNodeId }.toSet()
+        assertTrue("sym:DefaultView" in tsImports)
+        assertTrue("sym:ItemList" in tsImports)
+        assertTrue("sym:DetailProps" in tsImports)
+        assertTrue("sym:config" in tsImports)
+        assertTrue("sym:Logger" in tsImports)
+
+        // Boundary 4: Python multi-import and relative import boundaries
+        val pySource = """
+            from os.path import exists, join as pjoin, isdir
+            from .submodule import LocalHelper
+            import sys, os
+
+            def verify_paths():
+                return exists(sys.argv[0])
+        """.trimIndent()
+        val (_, pyEdges, _) = PolyglotAstExtractor.extractFile("p", "src/mod.py", pySource)
+        val pyImports = pyEdges.filter { it.edgeType == "IMPORTS" }.map { it.targetNodeId }.toSet()
+        assertTrue("sym:exists" in pyImports)
+        assertTrue("sym:join" in pyImports)
+        assertTrue("sym:isdir" in pyImports)
+        assertTrue("sym:LocalHelper" in pyImports)
+        assertTrue("sym:sys" in pyImports)
+        assertTrue("sym:os" in pyImports)
+
+        // Boundary 5: C++ constructor initializer list boundary
+        val cppSource = """
+            class DeviceChannel {
+            public:
+                DeviceChannel(int id, void* handle) : m_id(id), m_handle(handle) {
+                    connectDevice();
+                }
+                void connectDevice() {}
+            };
+        """.trimIndent()
+        val (cppNodes, cppEdges, _) = PolyglotAstExtractor.extractFile("p", "src/device.cpp", cppSource)
+        assertTrue(cppNodes.any { it.name == "DeviceChannel" && it.kind == "function" })
+        assertTrue(cppEdges.any { it.edgeType == "CALLS" && it.targetNodeId == "sym:connectDevice" })
+        // Mutant kill: member inits m_id(id) must NOT be mis-extracted as function declarations
+        assertFalse(cppNodes.any { it.name == "m_id" })
+        assertFalse(cppNodes.any { it.name == "m_handle" })
+    }
+
+    // Pattern 5: Transaction Rollback on Abort (Kills VOID_METHOD_CALLS Mutants in Transaction Scopes)
+    @Test
+    fun testFakeGraphStoreRollbackMutantKillersOnAbortedTransactions() {
+        val store = FakeGraphStore()
+        val node1 = GraphNode(nodeId = "p:1", projectId = "p", fileId = "f1", name = "N1", qualifiedName = "N1", kind = "class")
+        val node2 = GraphNode(nodeId = "p:2", projectId = "p", fileId = "f2", name = "N2", qualifiedName = "N2", kind = "class")
+        val edge1 = GraphEdge(edgeId = "e1", projectId = "p", sourceNodeId = "p:1", targetNodeId = "p:2", edgeType = "CALLS")
+        store.upsertNodesAndEdges("p", listOf(node1, node2), listOf(edge1))
+
+        assertEquals(2, store.nodes.size)
+        assertEquals(1, store.edges.size)
+
+        // Sad path: Aborted transaction must restore state to exact pre-transaction snapshot
+        assertFailsWith<IllegalStateException> {
+            store.withImmediateTransaction {
+                val node3 = GraphNode(nodeId = "p:3", projectId = "p", fileId = "f3", name = "N3", qualifiedName = "N3", kind = "class")
+                val edge2 = GraphEdge(edgeId = "e2", projectId = "p", sourceNodeId = "p:1", targetNodeId = "p:3", edgeType = "CALLS")
+                store.upsertNodesAndEdges("p", listOf(node3), listOf(edge2))
+                store.upsertFileRecord(FileRecordUpsert(projectId = "p", relPath = "f3", language = "kotlin", sha256 = "h3", loc = 10))
+                throw IllegalStateException("Simulated transaction abort")
+            }
+        }
+
+        // Assert Rollback: Kills VOID_METHOD_CALLS mutants that drop rollback logic
+        assertEquals(2, store.nodes.size, "Aborted transaction must not leak newly inserted nodes")
+        assertEquals(1, store.edges.size, "Aborted transaction must not leak newly inserted edges")
+        assertEquals(0, store.files.size, "Aborted transaction must not leak file records")
+
+        // Happy path: Successful transaction persists modifications
+        store.withImmediateTransaction {
+            val node3 = GraphNode(nodeId = "p:3", projectId = "p", fileId = "f3", name = "N3", qualifiedName = "N3", kind = "class")
+            val edge2 = GraphEdge(edgeId = "e2", projectId = "p", sourceNodeId = "p:1", targetNodeId = "p:3", edgeType = "CALLS")
+            store.upsertNodesAndEdges("p", listOf(node3), listOf(edge2))
+        }
+
+        assertEquals(3, store.nodes.size, "Committed transaction must retain nodes")
+        assertEquals(2, store.edges.size, "Committed transaction must retain edges")
+    }
+
+    // Pattern 6: Closed Database Guard (Kills VOID_METHOD_CALLS Mutants in Lifecycle Gates)
+    @Test
+    fun testClosedDatabaseGuardVoidCallMutants() {
+        val db = NativeSqliteDatabase(":memory:")
+        db.close()
+        assertTrue(db.isClosed, "Database must be marked closed")
+
+        assertFailsWith<IllegalStateException> {
+            db.exec("CREATE TABLE test (id INT)")
+        }
+        assertFailsWith<IllegalStateException> {
+            db.prepare("SELECT 1")
+        }
+        assertFailsWith<IllegalStateException> {
+            db.withImmediateTransaction { /* no-op */ }
+        }
+    }
+
+    // Pattern 7: Spike Hypothesis Shortest Path Boundary (Kills CONDITIONALS_BOUNDARY Mutants hops <= maxHops)
+    @Test
+    fun testSpikeHypothesisCalculationBoundaryMutants() {
+        val store = FakeGraphStore()
+        val projectId = "spike-mut"
+        val engine = SpikeAnalysisEngine(store)
+
+        // Graph chain: A -> B -> C -> D (3 hops)
+        val nodeA = GraphNode(nodeId = "$projectId:A", projectId = projectId, fileId = "A.kt", name = "SubsystemA", qualifiedName = "SubsystemA", kind = "class")
+        val nodeB = GraphNode(nodeId = "$projectId:B", projectId = projectId, fileId = "B.kt", name = "SubsystemB", qualifiedName = "SubsystemB", kind = "class")
+        val nodeC = GraphNode(nodeId = "$projectId:C", projectId = projectId, fileId = "C.kt", name = "SubsystemC", qualifiedName = "SubsystemC", kind = "class")
+        val nodeD = GraphNode(nodeId = "$projectId:D", projectId = projectId, fileId = "D.kt", name = "SubsystemD", qualifiedName = "SubsystemD", kind = "class")
+
+        val edgeAB = GraphEdge(edgeId = "e1", projectId = projectId, sourceNodeId = nodeA.nodeId, targetNodeId = nodeB.nodeId, edgeType = "CALLS")
+        val edgeBC = GraphEdge(edgeId = "e2", projectId = projectId, sourceNodeId = nodeB.nodeId, targetNodeId = nodeC.nodeId, edgeType = "CALLS")
+        val edgeCD = GraphEdge(edgeId = "e3", projectId = projectId, sourceNodeId = nodeC.nodeId, targetNodeId = nodeD.nodeId, edgeType = "CALLS")
+
+        store.upsertNodesAndEdges(projectId, listOf(nodeA, nodeB, nodeC, nodeD), listOf(edgeAB, edgeBC, edgeCD))
+
+        // Boundary Test 1: maxHops = 2. Path has 3 hops. Since 3 > 2, decoupling is CONFIRMED.
+        val resHops2 = engine.runSpike(
+            SpikeRequest(
+                projectId = projectId,
+                hypothesis = "decoupling",
+                from = "SubsystemA",
+                to = "SubsystemD",
+                maxHops = 2
+            )
+        )
+        assertTrue(resHops2.passed, "Decoupling must be CONFIRMED when path length (3) > maxHops (2)")
+        assertEquals("CONFIRMED", resHops2.status)
+
+        // Boundary Test 2: maxHops = 3. Path has 3 hops. Since 3 <= 3, decoupling is FALSIFIED.
+        // Kills mutant changing `hops <= maxHops` to `hops < maxHops`.
+        val resHops3 = engine.runSpike(
+            SpikeRequest(
+                projectId = projectId,
+                hypothesis = "decoupling",
+                from = "SubsystemA",
+                to = "SubsystemD",
+                maxHops = 3
+            )
+        )
+        assertFalse(resHops3.passed, "Decoupling must be FALSIFIED when path length (3) <= maxHops (3)")
+        assertEquals("FALSIFIED", resHops3.status)
+        assertEquals(2, resHops3.path.size, "Path must contain symbolChain and edgeChain")
+        assertTrue(resHops3.path[0].contains("SubsystemA -> SubsystemB"))
+
+        // Boundary Test 3: maxHops = 4. Path has 3 hops. Since 3 <= 4, decoupling is FALSIFIED.
+        val resHops4 = engine.runSpike(
+            SpikeRequest(
+                projectId = projectId,
+                hypothesis = "decoupling",
+                from = "SubsystemA",
+                to = "SubsystemD",
+                maxHops = 4
+            )
+        )
+        assertFalse(resHops4.passed, "Decoupling must be FALSIFIED when path length (3) <= maxHops (4)")
+    }
+
+    // Pattern 8: Project Scoping and Query Returns (Kills RETURNS & EMPTY_RETURNS Mutants)
+    @Test
+    fun testProjectIsolationAndReturnsMutantKillers() {
+        val store = FakeGraphStore()
+        val nodeA = GraphNode(nodeId = "alpha:A", projectId = "proj-alpha", fileId = "fA", name = "ServiceA", qualifiedName = "ServiceA", kind = "class")
+        val nodeB = GraphNode(nodeId = "beta:B", projectId = "proj-beta", fileId = "fB", name = "ServiceB", qualifiedName = "ServiceB", kind = "class")
+        store.upsertNodesAndEdges("proj-alpha", listOf(nodeA), emptyList())
+        store.upsertNodesAndEdges("proj-beta", listOf(nodeB), emptyList())
+
+        val alphaNodes = store.listNodes("proj-alpha")
+        assertEquals(1, alphaNodes.size, "proj-alpha must contain exactly 1 node")
+        assertEquals("alpha:A", alphaNodes[0].nodeId)
+
+        val betaNodes = store.listNodes("proj-beta")
+        assertEquals(1, betaNodes.size, "proj-beta must contain exactly 1 node")
+        assertEquals("beta:B", betaNodes[0].nodeId)
+
+        val alphaStats = store.getStats("proj-alpha")
+        assertEquals(1, alphaStats.nodes)
+        assertEquals(0, alphaStats.edges)
+
+        val betaStats = store.getStats("proj-beta")
+        assertEquals(1, betaStats.nodes)
+
+        // Returns mutator kill: nonexistent node lookup must return null
+        assertNull(store.getNode("proj-alpha", "nonexistent"), "Must return null for unknown node")
+        assertNull(store.getNode("proj-alpha", "ServiceB"), "Must return null for node belonging to another project")
     }
 }

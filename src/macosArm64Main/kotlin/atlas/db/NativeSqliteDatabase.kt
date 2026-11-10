@@ -42,6 +42,7 @@ class NativeSqliteDatabase(val path: String) {
     private var transactionDepth = 0
 
     val currentTransactionDepth: Int get() = transactionDepth
+    val isClosed: Boolean get() = (dbPointer == null)
 
     private fun requireDb(): CPointer<sqlite3> =
         checkNotNull(dbPointer) { "NativeSqliteDatabase connection is closed" }

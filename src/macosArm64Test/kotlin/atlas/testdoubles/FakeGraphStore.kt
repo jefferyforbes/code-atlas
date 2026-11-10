@@ -481,7 +481,76 @@ class FakeGraphStore : GraphStore {
         )
     }
 
-    override fun <T> withImmediateTransaction(block: () -> T): T = block()
-    override fun <T> withSavepoint(name: String, block: () -> T): T = block()
+    private data class StoreSnapshot(
+        val files: Map<String, FileRecord>,
+        val nodes: Map<String, GraphNode>,
+        val edges: List<GraphEdge>,
+        val metadata: Map<Pair<String, String>, String>,
+        val annotations: List<NodeAnnotation>,
+        val rawEdges: Map<String, List<GraphEdge>>,
+        val composeNodes: Map<String, List<ComposeNodeRecord>>,
+        val composeParams: Map<String, List<ComposeParamRecord>>,
+        val composeTraceMetrics: Map<String, Triple<Int, Int, String>>,
+        val complexityScores: Map<String, ComplexityScoreRecord>,
+        val figmaDocuments: Map<String, FigmaDocument>,
+        val figmaNodes: Map<String, List<FigmaNode>>,
+        val figmaVariables: Map<String, List<FigmaVariable>>,
+        val figmaEdges: Map<String, List<FigmaEdge>>
+    )
+
+    private fun captureSnapshot(): StoreSnapshot = StoreSnapshot(
+        files = HashMap(files),
+        nodes = HashMap(nodes),
+        edges = ArrayList(edges),
+        metadata = HashMap(metadata),
+        annotations = ArrayList(annotations),
+        rawEdges = rawEdges.mapValues { ArrayList(it.value) },
+        composeNodes = composeNodes.mapValues { ArrayList(it.value) },
+        composeParams = composeParams.mapValues { ArrayList(it.value) },
+        composeTraceMetrics = HashMap(composeTraceMetrics),
+        complexityScores = HashMap(complexityScores),
+        figmaDocuments = HashMap(figmaDocuments),
+        figmaNodes = figmaNodes.mapValues { ArrayList(it.value) },
+        figmaVariables = figmaVariables.mapValues { ArrayList(it.value) },
+        figmaEdges = figmaEdges.mapValues { ArrayList(it.value) }
+    )
+
+    private fun restoreSnapshot(s: StoreSnapshot) {
+        files.clear(); files.putAll(s.files)
+        nodes.clear(); nodes.putAll(s.nodes)
+        edges.clear(); edges.addAll(s.edges)
+        metadata.clear(); metadata.putAll(s.metadata)
+        annotations.clear(); annotations.addAll(s.annotations)
+        rawEdges.clear(); s.rawEdges.forEach { (k, v) -> rawEdges[k] = ArrayList(v) }
+        composeNodes.clear(); s.composeNodes.forEach { (k, v) -> composeNodes[k] = ArrayList(v) }
+        composeParams.clear(); s.composeParams.forEach { (k, v) -> composeParams[k] = ArrayList(v) }
+        composeTraceMetrics.clear(); composeTraceMetrics.putAll(s.composeTraceMetrics)
+        complexityScores.clear(); complexityScores.putAll(s.complexityScores)
+        figmaDocuments.clear(); figmaDocuments.putAll(s.figmaDocuments)
+        figmaNodes.clear(); s.figmaNodes.forEach { (k, v) -> figmaNodes[k] = ArrayList(v) }
+        figmaVariables.clear(); s.figmaVariables.forEach { (k, v) -> figmaVariables[k] = ArrayList(v) }
+        figmaEdges.clear(); s.figmaEdges.forEach { (k, v) -> figmaEdges[k] = ArrayList(v) }
+    }
+
+    override fun <T> withImmediateTransaction(block: () -> T): T {
+        val snapshot = captureSnapshot()
+        return try {
+            block()
+        } catch (t: Throwable) {
+            restoreSnapshot(snapshot)
+            throw t
+        }
+    }
+
+    override fun <T> withSavepoint(name: String, block: () -> T): T {
+        val snapshot = captureSnapshot()
+        return try {
+            block()
+        } catch (t: Throwable) {
+            restoreSnapshot(snapshot)
+            throw t
+        }
+    }
+
     override fun close() {}
 }
