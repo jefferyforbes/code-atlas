@@ -600,4 +600,30 @@ class PolyglotExtractorTest {
         assertTrue("sym:json" in imports, "Imported module json must be captured")
         assertTrue("sym:sys" in imports, "Imported module sys must be captured")
     }
+
+    @Test
+    fun `extractFile handles trailing commas and blank components in TypeScript and Python import clauses`() {
+        val tsSource = """
+            import { Alpha, , Beta, } from './services';
+            export function run() { Alpha(); }
+        """.trimIndent()
+        val (_, tsEdges, _) = PolyglotAstExtractor.extractFile("proj", "src/run.ts", tsSource)
+        val tsImports = tsEdges.filter { it.edgeType == "IMPORTS" }.map { it.targetNodeId }.toSet()
+        assertTrue("sym:Alpha" in tsImports)
+        assertTrue("sym:Beta" in tsImports)
+
+        val pySource = """
+            from os.path import exists, , isdir,
+            import sys, , os,
+
+            def check():
+                return exists(".")
+        """.trimIndent()
+        val (_, pyEdges, _) = PolyglotAstExtractor.extractFile("proj", "src/run.py", pySource)
+        val pyImports = pyEdges.filter { it.edgeType == "IMPORTS" }.map { it.targetNodeId }.toSet()
+        assertTrue("sym:exists" in pyImports)
+        assertTrue("sym:isdir" in pyImports)
+        assertTrue("sym:sys" in pyImports)
+        assertTrue("sym:os" in pyImports)
+    }
 }

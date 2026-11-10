@@ -453,7 +453,7 @@ internal object PythonAstExtractor {
             imports.add(Pair(mod, lineNo))
         }
         val cleanClause = clause.removePrefix("(").removeSuffix(")")
-        for (part in cleanClause.split(',')) {
+        for (part in cleanClause.split(',').filter { it.isNotBlank() }) {
             val sym = part.trim().substringBefore(" as ").trim()
             if (sym.isNotEmpty() && sym != "*") {
                 imports.add(Pair(sym, lineNo))
@@ -469,7 +469,7 @@ internal object PythonAstExtractor {
         lineNo: Int,
         imports: MutableList<Pair<String, Int>>
     ) {
-        for (part in clause.split(',')) {
+        for (part in clause.split(',').filter { it.isNotBlank() }) {
             val mod = part.trim().substringBefore(" as ").trim()
             if (mod.isNotEmpty()) {
                 imports.add(Pair(mod, lineNo))

@@ -40,6 +40,7 @@ scope:
     - src/macosArm64Main/kotlin/atlas/extract/PythonAstExtractor.kt
     - src/macosArm64Main/kotlin/atlas/db/SearchAndVocabDao.kt
     - src/macosArm64Main/kotlin/atlas/extract/ComposeTelemetryParser.kt
+    - src/macosArm64Test/kotlin/atlas/PolyglotExtractorTest.kt
   modules:
     - :macosArm64Main
     - :macosArm64Test

@@ -62,7 +62,7 @@ internal object TypeScriptAstExtractor {
         if (!clause.contains('{') || !clause.contains('}')) return Pair(emptyList(), clause)
         val namedPart = clause.substringAfter('{').substringBefore('}')
         val list = mutableListOf<String>()
-        for (sym in namedPart.split(',')) {
+        for (sym in namedPart.split(',').filter { it.isNotBlank() }) {
             val clean = sym.trim().removePrefix("type ").trim().substringBefore(" as ").trim()
             if (clean.isNotEmpty()) list.add(clean)
         }
