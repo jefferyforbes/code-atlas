@@ -10,7 +10,8 @@ status: completed
 
 size:
   complexity: medium
-  expected_files: 8
+  expected_files: 20
+  expected_loc: 1500
   expected_modules: 1
   expected_tests: 4
 
@@ -33,15 +34,25 @@ parallelizable: false
 scope:
   files:
     - plans/code-atlas/pr-20-complexity-ratchet-and-params.md
-    - src/macosArm64Main/kotlin/atlas/extract/NativeSystemsAstExtractor.kt
+    - complexity-baseline.json
+    - src/macosArm64Main/kotlin/atlas/cli/AtlasCli.kt
+    - src/macosArm64Main/kotlin/atlas/db/GraphSchemaMigrator.kt
+    - src/macosArm64Main/kotlin/atlas/db/NativeSqliteDatabase.kt
+    - src/macosArm64Main/kotlin/atlas/db/SqliteGraphStore.kt
+    - src/macosArm64Main/kotlin/atlas/engine/ArchitectureRemediationEngine.kt
     - src/macosArm64Main/kotlin/atlas/engine/AutonomousRemediationVerifier.kt
+    - src/macosArm64Main/kotlin/atlas/engine/CodegraphCompatibilityEngine.kt
+    - src/macosArm64Main/kotlin/atlas/engine/ComplexityDoctorEngine.kt
     - src/macosArm64Main/kotlin/atlas/engine/RfcGroundEngine.kt
     - src/macosArm64Main/kotlin/atlas/engine/SpikeAnalysisEngine.kt
-    - src/macosArm64Main/kotlin/atlas/engine/ArchitectureRemediationEngine.kt
     - src/macosArm64Main/kotlin/atlas/engine/WorkspaceIndexer.kt
-    - src/macosArm64Main/kotlin/atlas/engine/CodegraphCompatibilityEngine.kt
-    - src/macosArm64Main/kotlin/atlas/db/GraphSchemaMigrator.kt
-    - complexity-baseline.json
+    - src/macosArm64Main/kotlin/atlas/extract/NativeSystemsAstExtractor.kt
+    - src/macosArm64Main/kotlin/atlas/mcp/AtlasMcpServer.kt
+    - src/macosArm64Main/kotlin/atlas/mcp/McpJsonRpcTransport.kt
+    - src/macosArm64Main/kotlin/atlas/model/SpikeRequest.kt
+    - src/macosArm64Main/kotlin/atlas/util/PlatformFiles.kt
+    - src/macosArm64Test/kotlin/atlas/engine/SpikeAnalysisEngineTest.kt
+    - src/macosArm64Test/kotlin/atlas/integration/AtlasEndToEndIntegrationTest.kt
   modules:
     - :macosArm64Main
     - :macosArm64Test
