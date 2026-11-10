@@ -5,6 +5,7 @@ import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.model.LayerInversionViolation
 import atlas.model.SpikeAnalysisResult
+import atlas.model.SpikeRequest
 
 /**
  * Engine executing topological hypothesis tests across decoupling and Clean Architecture boundaries.
@@ -13,30 +14,37 @@ class SpikeAnalysisEngine(
     private val store: SqliteGraphStore
 ) {
 
+    fun runSpike(request: SpikeRequest): SpikeAnalysisResult {
+        val normHypothesis = request.hypothesis.trim().lowercase()
+        return when (normHypothesis) {
+            "decoupling" -> runDecouplingSpike(request.projectId, request.from ?: request.target, request.to, request.maxHops)
+            "clean-arch", "clean_arch", "clean-architecture" -> runCleanArchSpike(request.projectId, request.target ?: request.from, request.forbiddenLayer, request.maxHops)
+            "blast-ceiling", "blast_ceiling" -> runBlastCeilingSpike(request.projectId, request.target ?: request.from, request.maxFiles ?: 20)
+            else -> SpikeAnalysisResult(
+                hypothesis = request.hypothesis,
+                projectId = request.projectId,
+                status = "FALSIFIED",
+                passed = false,
+                message = "FALSIFIED (unknown hypothesis '${request.hypothesis}'; supported: decoupling, clean-arch, blast-ceiling)"
+            )
+        }
+    }
+
     fun runSpike(
         projectId: String,
         hypothesis: String,
         from: String? = null,
         to: String? = null,
-        target: String? = null,
-        forbiddenLayer: String? = null,
-        maxFiles: Int? = null,
-        maxHops: Int = 10
-    ): SpikeAnalysisResult {
-        val normHypothesis = hypothesis.trim().lowercase()
-        return when (normHypothesis) {
-            "decoupling" -> runDecouplingSpike(projectId, from ?: target, to, maxHops)
-            "clean-arch", "clean_arch", "clean-architecture" -> runCleanArchSpike(projectId, target ?: from, forbiddenLayer, maxHops)
-            "blast-ceiling", "blast_ceiling" -> runBlastCeilingSpike(projectId, target ?: from, maxFiles ?: 20)
-            else -> SpikeAnalysisResult(
-                hypothesis = hypothesis,
-                projectId = projectId,
-                status = "FALSIFIED",
-                passed = false,
-                message = "FALSIFIED (unknown hypothesis '$hypothesis'; supported: decoupling, clean-arch, blast-ceiling)"
-            )
-        }
-    }
+        target: String? = null
+    ): SpikeAnalysisResult = runSpike(
+        SpikeRequest(
+            projectId = projectId,
+            hypothesis = hypothesis,
+            from = from,
+            to = to,
+            target = target
+        )
+    )
 
     private fun runDecouplingSpike(
         projectId: String,
@@ -125,6 +133,27 @@ class SpikeAnalysisEngine(
         )
     }
 
+    private fun stepOutgoingEdges(
+        currId: String,
+        currentPath: List<EdgeHop>,
+        targetIds: Set<String>,
+        outgoingMap: Map<String, List<GraphEdge>>,
+        visited: MutableSet<String>,
+        queue: MutableList<Pair<String, List<EdgeHop>>>
+    ): List<EdgeHop>? {
+        val edges = outgoingMap[currId] ?: return null
+        val sortedEdges = edges.sortedWith(compareBy({ it.targetNodeId }, { it.lineNumber }, { it.edgeType }))
+        for (edge in sortedEdges) {
+            if (edge.edgeType in EXCLUDED_EDGE_TYPES) continue
+            val hop = EdgeHop(edge.sourceNodeId, edge.targetNodeId, edge.edgeType, edge.lineNumber)
+            if (edge.targetNodeId in targetIds) return currentPath + hop
+            if (visited.add(edge.targetNodeId)) {
+                queue.add(Pair(edge.targetNodeId, currentPath + hop))
+            }
+        }
+        return null
+    }
+
     private fun findShortestCouplingPath(
         sourceIds: Set<String>,
         targetIds: Set<String>,
@@ -134,8 +163,7 @@ class SpikeAnalysisEngine(
         val queue = mutableListOf<Pair<String, List<EdgeHop>>>()
         val visited = mutableSetOf<String>()
 
-        val sortedSources = sourceIds.sorted()
-        for (src in sortedSources) {
+        for (src in sourceIds.sorted()) {
             queue.add(Pair(src, emptyList()))
             visited.add(src)
         }
@@ -144,21 +172,8 @@ class SpikeAnalysisEngine(
         while (head < queue.size) {
             val (currId, currentPath) = queue[head++]
             if (currentPath.size >= maxHops) continue
-
-            val edges = outgoingMap[currId] ?: emptyList()
-            val sortedEdges = edges.sortedWith(compareBy({ it.targetNodeId }, { it.lineNumber }, { it.edgeType }))
-            for (edge in sortedEdges) {
-                if (edge.edgeType in EXCLUDED_EDGE_TYPES) continue
-                val hop = EdgeHop(edge.sourceNodeId, edge.targetNodeId, edge.edgeType, edge.lineNumber)
-
-                if (edge.targetNodeId in targetIds) {
-                    return currentPath + hop
-                }
-
-                if (visited.add(edge.targetNodeId)) {
-                    queue.add(Pair(edge.targetNodeId, currentPath + hop))
-                }
-            }
+            val found = stepOutgoingEdges(currId, currentPath, targetIds, outgoingMap, visited, queue)
+            if (found != null) return found
         }
 
         return null
@@ -185,6 +200,38 @@ class SpikeAnalysisEngine(
         val node = allNodes[nodeId]
         if (node != null && node.name.isNotEmpty()) return node.name
         return if (nodeId.contains('#')) nodeId.substringAfter('#') else nodeId
+    }
+
+    private data class CleanArchBfsContext(
+        val outgoingEdges: Map<String, List<GraphEdge>>,
+        val allNodes: Map<String, GraphNode>,
+        val forbiddenLayer: String?,
+        val visited: MutableSet<String>,
+        val queue: MutableList<Pair<String, Int>>,
+        val violations: MutableList<LayerInversionViolation>
+    )
+
+    private fun stepCleanArchEdges(
+        currId: String,
+        depth: Int,
+        ctx: CleanArchBfsContext
+    ) {
+        val srcNode = ctx.allNodes[currId] ?: return
+        val edges = ctx.outgoingEdges[currId] ?: return
+
+        for (edge in edges) {
+            if (edge.edgeType in EXCLUDED_EDGE_TYPES) continue
+            val tgtNode = ctx.allNodes[edge.targetNodeId] ?: continue
+
+            val violation = checkLayerInversion(srcNode, tgtNode, edge, ctx.forbiddenLayer)
+            if (violation != null) {
+                ctx.violations.add(violation)
+            }
+
+            if (ctx.visited.add(edge.targetNodeId)) {
+                ctx.queue.add(Pair(edge.targetNodeId, depth + 1))
+            }
+        }
     }
 
     private fun runCleanArchSpike(
@@ -234,27 +281,20 @@ class SpikeAnalysisEngine(
             visited.add(src)
         }
 
+        val bfsCtx = CleanArchBfsContext(
+            outgoingEdges = outgoingEdges,
+            allNodes = allNodes,
+            forbiddenLayer = forbiddenLayer,
+            visited = visited,
+            queue = queue,
+            violations = violations
+        )
+
         var head = 0
         while (head < queue.size) {
             val (currId, depth) = queue[head++]
             if (depth >= maxHops) continue
-
-            val srcNode = allNodes[currId] ?: continue
-            val edges = outgoingEdges[currId] ?: emptyList()
-
-            for (edge in edges) {
-                if (edge.edgeType in EXCLUDED_EDGE_TYPES) continue
-                val tgtNode = allNodes[edge.targetNodeId] ?: continue
-
-                val violation = checkLayerInversion(srcNode, tgtNode, edge, forbiddenLayer)
-                if (violation != null) {
-                    violations.add(violation)
-                }
-
-                if (visited.add(edge.targetNodeId)) {
-                    queue.add(Pair(edge.targetNodeId, depth + 1))
-                }
-            }
+            stepCleanArchEdges(currId, depth, bfsCtx)
         }
 
         if (violations.isNotEmpty()) {
@@ -282,6 +322,64 @@ class SpikeAnalysisEngine(
         )
     }
 
+    private fun checkForbiddenLayerInversion(
+        src: GraphNode,
+        tgt: GraphNode,
+        edge: GraphEdge,
+        forbiddenLayer: String?
+    ): LayerInversionViolation? {
+        if (forbiddenLayer.isNullOrBlank()) return null
+        val normForbidden = forbiddenLayer.lowercase().trim()
+        val tgtArch = tgt.archLayer.lowercase()
+        val tgtSemiotic = tgt.semioticLayer.lowercase()
+        val combined = "$tgtSemiotic:$tgtArch"
+
+        if (tgtArch != normForbidden && tgtSemiotic != normForbidden && combined != normForbidden) {
+            return null
+        }
+        return LayerInversionViolation(
+            rule = "ARCH-LAYER-INVERSION",
+            source = src.qualifiedName.ifEmpty { src.name },
+            target = tgt.qualifiedName.ifEmpty { tgt.name },
+            edgeType = edge.edgeType,
+            lineNumber = edge.lineNumber,
+            message = "Symbol '${src.name}' illegally references forbidden layer '$forbiddenLayer' symbol '${tgt.name}' (${tgt.semioticLayer}:${tgt.archLayer}) via ${edge.edgeType} at line ${edge.lineNumber}."
+        )
+    }
+
+    private fun checkDomainInversion(
+        src: GraphNode,
+        tgt: GraphNode,
+        edge: GraphEdge
+    ): LayerInversionViolation? {
+        if (src.archLayer != "domain" || tgt.archLayer !in LOWER_TIER_LAYERS) return null
+        val layerDesc = if (tgt.archLayer == "presentation") "Presentation/Pragmatic" else "Data/Infrastructure"
+        return LayerInversionViolation(
+            rule = "ARCH-LAYER-INVERSION",
+            source = src.qualifiedName.ifEmpty { src.name },
+            target = tgt.qualifiedName.ifEmpty { tgt.name },
+            edgeType = edge.edgeType,
+            lineNumber = edge.lineNumber,
+            message = "Domain symbol '${src.name}' (${src.archLayer}) illegally references $layerDesc symbol '${tgt.name}' (${tgt.archLayer}) via ${edge.edgeType} at line ${edge.lineNumber}."
+        )
+    }
+
+    private fun checkPresentationInversion(
+        src: GraphNode,
+        tgt: GraphNode,
+        edge: GraphEdge
+    ): LayerInversionViolation? {
+        if (src.archLayer !in NON_PRESENTATION_LAYERS || tgt.archLayer != "presentation") return null
+        return LayerInversionViolation(
+            rule = "ARCH-LAYER-INVERSION",
+            source = src.qualifiedName.ifEmpty { src.name },
+            target = tgt.qualifiedName.ifEmpty { tgt.name },
+            edgeType = edge.edgeType,
+            lineNumber = edge.lineNumber,
+            message = "Symbol '${src.name}' (${src.archLayer}) illegally references Presentation/Pragmatic symbol '${tgt.name}' (${tgt.archLayer}) via ${edge.edgeType} at line ${edge.lineNumber}."
+        )
+    }
+
     private fun checkLayerInversion(
         src: GraphNode,
         tgt: GraphNode,
@@ -289,49 +387,29 @@ class SpikeAnalysisEngine(
         forbiddenLayer: String?
     ): LayerInversionViolation? {
         if (src.semioticLayer == "test" || tgt.semioticLayer == "test") return null
+        return checkForbiddenLayerInversion(src, tgt, edge, forbiddenLayer)
+            ?: checkDomainInversion(src, tgt, edge)
+            ?: checkPresentationInversion(src, tgt, edge)
+    }
 
-        if (forbiddenLayer != null && forbiddenLayer.isNotBlank()) {
-            val normForbidden = forbiddenLayer.lowercase().trim()
-            val tgtArch = tgt.archLayer.lowercase()
-            val tgtSemiotic = tgt.semioticLayer.lowercase()
-            val combined = "$tgtSemiotic:$tgtArch"
+    private fun stepBlastCeilingEdges(
+        currId: String,
+        allEdges: Map<String, List<GraphEdge>>,
+        allNodes: Map<String, GraphNode>,
+        visited: MutableSet<String>,
+        queue: MutableList<String>,
+        reachedFiles: MutableSet<String>
+    ) {
+        val edges = allEdges[currId] ?: return
+        for (edge in edges) {
+            val tgtNode = allNodes[edge.targetNodeId] ?: continue
+            val f = tgtNode.fileId.substringAfter(':')
+            if (f.isNotEmpty()) reachedFiles.add(f)
 
-            if (tgtArch == normForbidden || tgtSemiotic == normForbidden || combined == normForbidden) {
-                return LayerInversionViolation(
-                    rule = "ARCH-LAYER-INVERSION",
-                    source = src.qualifiedName.ifEmpty { src.name },
-                    target = tgt.qualifiedName.ifEmpty { tgt.name },
-                    edgeType = edge.edgeType,
-                    lineNumber = edge.lineNumber,
-                    message = "Symbol '${src.name}' illegally references forbidden layer '$forbiddenLayer' symbol '${tgt.name}' (${tgt.semioticLayer}:${tgt.archLayer}) via ${edge.edgeType} at line ${edge.lineNumber}."
-                )
+            if (visited.add(edge.targetNodeId)) {
+                queue.add(edge.targetNodeId)
             }
         }
-
-        if (src.archLayer == "domain" && tgt.archLayer in LOWER_TIER_LAYERS) {
-            val layerDesc = if (tgt.archLayer == "presentation") "Presentation/Pragmatic" else "Data/Infrastructure"
-            return LayerInversionViolation(
-                rule = "ARCH-LAYER-INVERSION",
-                source = src.qualifiedName.ifEmpty { src.name },
-                target = tgt.qualifiedName.ifEmpty { tgt.name },
-                edgeType = edge.edgeType,
-                lineNumber = edge.lineNumber,
-                message = "Domain symbol '${src.name}' (${src.archLayer}) illegally references $layerDesc symbol '${tgt.name}' (${tgt.archLayer}) via ${edge.edgeType} at line ${edge.lineNumber}."
-            )
-        }
-
-        if (src.archLayer in NON_PRESENTATION_LAYERS && tgt.archLayer == "presentation") {
-            return LayerInversionViolation(
-                rule = "ARCH-LAYER-INVERSION",
-                source = src.qualifiedName.ifEmpty { src.name },
-                target = tgt.qualifiedName.ifEmpty { tgt.name },
-                edgeType = edge.edgeType,
-                lineNumber = edge.lineNumber,
-                message = "Symbol '${src.name}' (${src.archLayer}) illegally references Presentation/Pragmatic symbol '${tgt.name}' (${tgt.archLayer}) via ${edge.edgeType} at line ${edge.lineNumber}."
-            )
-        }
-
-        return null
     }
 
     private fun runBlastCeilingSpike(
@@ -368,16 +446,7 @@ class SpikeAnalysisEngine(
         var head = 0
         while (head < queue.size) {
             val currId = queue[head++]
-            val edges = allEdges[currId] ?: emptyList()
-            for (edge in edges) {
-                val tgtNode = allNodes[edge.targetNodeId] ?: continue
-                val f = tgtNode.fileId.substringAfter(':')
-                if (f.isNotEmpty()) reachedFiles.add(f)
-
-                if (visited.add(edge.targetNodeId)) {
-                    queue.add(edge.targetNodeId)
-                }
-            }
+            stepBlastCeilingEdges(currId, allEdges, allNodes, visited, queue, reachedFiles)
         }
 
         if (reachedFiles.size > maxFiles) {
@@ -403,6 +472,26 @@ class SpikeAnalysisEngine(
         )
     }
 
+    private fun isExactNodeMatch(node: GraphNode, target: String): Boolean =
+        node.name.equals(target, ignoreCase = true) ||
+            node.qualifiedName.equals(target, ignoreCase = true) ||
+            node.qualifiedName.endsWith(".$target", ignoreCase = true) ||
+            node.moduleId.trimStart(':').equals(target.trimStart(':'), ignoreCase = true) ||
+            node.fileId.endsWith(":$target") ||
+            node.fileId.endsWith("/$target")
+
+    private fun isStructuralNodeMatch(node: GraphNode, target: String, normTarget: String): Boolean {
+        val relPath = if (node.fileId.contains(':')) node.fileId.substringAfter(':') else node.fileId
+        val normName = node.name.filter { it.isLetterOrDigit() }.lowercase()
+        val normQName = node.qualifiedName.filter { it.isLetterOrDigit() }.lowercase()
+
+        return node.qualifiedName.startsWith("$target.", ignoreCase = true) ||
+            relPath.equals(target, ignoreCase = true) ||
+            relPath.contains("/$target/") ||
+            relPath.startsWith("$target/") ||
+            (normTarget.length >= 3 && (normName == normTarget || normQName.endsWith(normTarget)))
+    }
+
     private fun resolveNodes(
         projectId: String,
         target: String,
@@ -413,32 +502,13 @@ class SpikeAnalysisEngine(
 
         allNodes[target]?.let { if (includeDocs || it.kind !in EXCLUDED_KINDS) return listOf(it) }
 
-        val exactMatches = candidateNodes.filter { node ->
-            node.name.equals(target, ignoreCase = true) ||
-                node.qualifiedName.equals(target, ignoreCase = true) ||
-                node.qualifiedName.endsWith(".$target", ignoreCase = true) ||
-                node.moduleId.trimStart(':').equals(target.trimStart(':'), ignoreCase = true) ||
-                node.fileId.endsWith(":$target") ||
-                node.fileId.endsWith("/$target")
-        }
+        val exactMatches = candidateNodes.filter { isExactNodeMatch(it, target) }
         if (exactMatches.isNotEmpty()) {
             return exactMatches.distinctBy { it.nodeId }
         }
 
         val normTarget = target.filter { it.isLetterOrDigit() }.lowercase()
-        val structuralMatches = candidateNodes.filter { node ->
-            val relPath = if (node.fileId.contains(':')) node.fileId.substringAfter(':') else node.fileId
-            val normName = node.name.filter { it.isLetterOrDigit() }.lowercase()
-            val normQName = node.qualifiedName.filter { it.isLetterOrDigit() }.lowercase()
-
-            node.qualifiedName.startsWith("$target.", ignoreCase = true) ||
-                relPath.equals(target, ignoreCase = true) ||
-                relPath.contains("/$target/") ||
-                relPath.startsWith("$target/") ||
-                (normTarget.length >= 3 && (normName == normTarget || normQName.endsWith(normTarget)))
-        }
-
-        return structuralMatches.distinctBy { it.nodeId }
+        return candidateNodes.filter { isStructuralNodeMatch(it, target, normTarget) }.distinctBy { it.nodeId }
     }
 
     private fun renderMarkdownBlock(

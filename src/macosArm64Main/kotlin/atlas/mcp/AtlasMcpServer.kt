@@ -19,9 +19,11 @@ import atlas.engine.SpikeAnalysisEngine
 import atlas.extract.ComplexityExtractor
 import atlas.extract.UrlTargetResolver
 import atlas.model.ArchitectContextResult
+import atlas.model.AuditReport
 import atlas.model.ComplexityScoreRecord
 import atlas.model.ComplexityViolation
 import atlas.model.GraphNode
+import atlas.model.SpikeRequest
 import atlas.util.PlatformFiles
 import kotlin.math.roundToInt
 import kotlinx.serialization.encodeToString
@@ -576,14 +578,16 @@ class AtlasMcpServer(
         val maxFiles = args["max_files"]?.jsonPrimitive?.intOrNull
         val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 10
         val result = spikeAnalysisEngine.runSpike(
-            projectId = project,
-            hypothesis = hypothesis,
-            from = fromArg,
-            to = toArg,
-            target = fromArg,
-            forbiddenLayer = forbiddenLayer,
-            maxFiles = maxFiles,
-            maxHops = depth
+            SpikeRequest(
+                projectId = project,
+                hypothesis = hypothesis,
+                from = fromArg,
+                to = toArg,
+                target = fromArg,
+                forbiddenLayer = forbiddenLayer,
+                maxFiles = maxFiles,
+                maxHops = depth
+            )
         )
         return json.encodeToJsonElement(result).jsonObject
     }
@@ -653,6 +657,19 @@ class AtlasMcpServer(
         }
     }
 
+    private fun capAuditReport(report: AuditReport, limit: Int): AuditReport {
+        if (report.complexityViolations.size <= limit && report.parameterAdvisories.size <= limit) {
+            return report
+        }
+        val cappedComp = if (report.complexityViolations.size > limit) {
+            prioritizeAndCapViolations(report.complexityViolations, limit)
+        } else report.complexityViolations
+        val cappedAdv = if (report.parameterAdvisories.size > limit) {
+            prioritizeAndCapViolations(report.parameterAdvisories, limit)
+        } else report.parameterAdvisories
+        return report.copy(complexityViolations = cappedComp, parameterAdvisories = cappedAdv)
+    }
+
     private fun handleAuditVerifyArchitecture(args: JsonObject, project: String, targets: List<String>): JsonObject {
         val descMode = args["description_mode"]?.jsonPrimitive?.contentOrNull ?: "domain-only"
         val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
@@ -663,14 +680,7 @@ class AtlasMcpServer(
         )
         val totalComp = report.complexityViolations.size
         val totalAdvisories = report.parameterAdvisories.size
-        val cappedReport = if (report.complexityViolations.size > limit || report.parameterAdvisories.size > limit) {
-            report.copy(
-                complexityViolations = if (report.complexityViolations.size > limit) prioritizeAndCapViolations(report.complexityViolations, limit) else report.complexityViolations,
-                parameterAdvisories = if (report.parameterAdvisories.size > limit) prioritizeAndCapViolations(report.parameterAdvisories, limit) else report.parameterAdvisories
-            )
-        } else {
-            report
-        }
+        val cappedReport = capAuditReport(report, limit)
         val baseObj = json.encodeToJsonElement(cappedReport).jsonObject
         return buildJsonObject {
             baseObj.forEach { (k, v) -> put(k, v) }

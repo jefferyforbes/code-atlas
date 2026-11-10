@@ -10,6 +10,7 @@ import atlas.engine.SpikeAnalysisEngine
 import atlas.engine.WorkspaceIndexer
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
+import atlas.model.SpikeRequest
 import atlas.util.PlatformFiles
 import kotlinx.serialization.json.jsonPrimitive
 import platform.posix.getpid
@@ -196,11 +197,13 @@ class AtlasEndToEndIntegrationTest {
 
             // Act 5: Topological Spike Hypothesis Testing
             val spikeResult = SpikeAnalysisEngine(store).runSpike(
-                projectId = projectId,
-                hypothesis = "decoupling",
-                from = "OrderService",
-                to = "OrderValidator",
-                maxHops = 5
+                SpikeRequest(
+                    projectId = projectId,
+                    hypothesis = "decoupling",
+                    from = "OrderService",
+                    to = "OrderValidator",
+                    maxHops = 5
+                )
             )
             assertEquals("CONFIRMED", spikeResult.status, "OrderService and OrderValidator must be cleanly decoupled")
 
