@@ -592,39 +592,55 @@ class CodegraphCompatibilityEngine(
     }
 
     private fun generateInterviewContext(projectId: String, target: String): String {
-        val allNodes = store.listNodes(projectId).filter {
+        val nonTestNodes = store.listNodes(projectId).filter {
             it.semioticLayer != "test" && it.archLayer != "test" && !it.isTestDouble
         }
-        val candidates = if (target.isNotEmpty()) {
-            val matching = allNodes.filter { n ->
-                n.name.contains(target, ignoreCase = true) ||
-                    n.qualifiedName.contains(target, ignoreCase = true) ||
-                    n.moduleId.contains(target, ignoreCase = true) ||
-                    n.fileId.contains(target, ignoreCase = true)
-            }
-            if (matching.isNotEmpty()) matching else allNodes
-        } else {
-            allNodes
-        }
+        val candidates = resolveInterviewCandidates(nonTestNodes, target)
+        val domainModels = extractDomainModels(candidates)
+        val sealedHierarchies = extractSealedHierarchies(candidates)
+        val errorConventions = extractErrorConventions(candidates)
 
-        val domainModels = candidates
+        return fitInterviewMarkdown(target, domainModels, sealedHierarchies, errorConventions)
+    }
+
+    private fun resolveInterviewCandidates(nodes: List<GraphNode>, target: String): List<GraphNode> {
+        if (target.isEmpty()) return nodes
+        val matching = nodes.filter { n ->
+            n.name.contains(target, ignoreCase = true) ||
+                n.qualifiedName.contains(target, ignoreCase = true) ||
+                n.moduleId.contains(target, ignoreCase = true) ||
+                n.fileId.contains(target, ignoreCase = true)
+        }
+        return if (matching.isNotEmpty()) matching else nodes
+    }
+
+    private fun extractDomainModels(candidates: List<GraphNode>): List<String> =
+        candidates
             .filter { (it.archLayer == "domain" || it.kind in DOMAIN_MODEL_KINDS) && it.kind !in SEALED_KINDS && !isErrorSymbol(it.name) }
             .sortedWith(compareByDescending<GraphNode> { it.inDegree }.thenBy { it.name })
             .map { it.name }
             .distinct()
 
-        val sealedHierarchies = candidates
+    private fun extractSealedHierarchies(candidates: List<GraphNode>): List<String> =
+        candidates
             .filter { it.kind in SEALED_KINDS || it.name.endsWith("State") || it.name.endsWith("Event") || it.name.endsWith("Intent") }
             .sortedWith(compareByDescending<GraphNode> { it.inDegree }.thenBy { it.name })
             .map { it.name }
             .distinct()
 
-        val errorConventions = candidates
+    private fun extractErrorConventions(candidates: List<GraphNode>): List<String> =
+        candidates
             .filter { isErrorSymbol(it.name) }
             .sortedWith(compareByDescending<GraphNode> { it.inDegree }.thenBy { it.name })
             .map { it.name }
             .distinct()
 
+    private fun fitInterviewMarkdown(
+        target: String,
+        domainModels: List<String>,
+        sealedHierarchies: List<String>,
+        errorConventions: List<String>
+    ): String {
         var maxItems = 4
         var result = renderInterviewMarkdown(target, domainModels, sealedHierarchies, errorConventions, maxItems)
         while (result.encodeToByteArray().size > 400 && maxItems > 1) {

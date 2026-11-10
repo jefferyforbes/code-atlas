@@ -5,6 +5,7 @@ import atlas.db.SqliteGraphStore
 import atlas.mcp.AtlasMcpServer
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
+import atlas.model.SpikeRequest
 import atlas.util.PlatformFiles
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -349,10 +350,12 @@ class SpikeAnalysisEngineTest {
 
             val engine = SpikeAnalysisEngine(store)
             val result = engine.runSpike(
-                projectId = projectId,
-                hypothesis = "clean-arch",
-                target = "CoreService",
-                forbiddenLayer = "pragmatic:presentation"
+                SpikeRequest(
+                    projectId = projectId,
+                    hypothesis = "clean-arch",
+                    target = "CoreService",
+                    forbiddenLayer = "pragmatic:presentation"
+                )
             )
 
             assertEquals("FALSIFIED", result.status)
@@ -410,11 +413,11 @@ class SpikeAnalysisEngineTest {
             )
 
             val engine = SpikeAnalysisEngine(store)
-            val passResult = engine.runSpike(projectId, hypothesis = "blast-ceiling", target = "RootA", maxFiles = 3)
+            val passResult = engine.runSpike(SpikeRequest(projectId, hypothesis = "blast-ceiling", target = "RootA", maxFiles = 3))
             assertEquals("CONFIRMED", passResult.status)
             assertTrue(passResult.passed)
 
-            val failResult = engine.runSpike(projectId, hypothesis = "blast-ceiling", target = "RootA", maxFiles = 2)
+            val failResult = engine.runSpike(SpikeRequest(projectId, hypothesis = "blast-ceiling", target = "RootA", maxFiles = 2))
             assertEquals("FALSIFIED", failResult.status)
             assertFalse(failResult.passed)
         } finally {

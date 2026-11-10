@@ -443,6 +443,47 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return symbols
     }
 
+    private fun matchesAnyTargetSymbol(targetSym: String, projectId: String, symbols: Set<String>): Boolean {
+        val cleanSym = targetSym.removePrefix("sym:")
+            .removePrefix("$projectId:endpoint#")
+            .removePrefix("$projectId:url_ref#")
+            .removePrefix("endpoint#")
+            .removePrefix("url_ref#")
+        val shortSym = cleanSym.substringAfterLast('.').substringAfterLast("::")
+        return cleanSym in symbols || shortSym in symbols || targetSym in symbols
+    }
+
+    private fun decodeTargetingRawEdge(stmt: NativeSqliteStatement, targetSym: String): GraphEdge {
+        val rawEdgeId = stmt.columnString(0)
+        val projId = stmt.columnString(1)
+        val sourceNodeId = stmt.columnString(2)
+        val edgeType = stmt.columnString(4)
+        val confidence = stmt.columnDouble(5)
+        val provenance = stmt.columnString(6)
+        val lineNumber = stmt.columnInt(7)
+        val normalizedTarget = when {
+            targetSym.startsWith("sym:") ||
+                targetSym.startsWith("$projId:endpoint#") ||
+                targetSym.startsWith("$projId:url_ref#") ||
+                targetSym.startsWith("endpoint#") ||
+                targetSym.startsWith("url_ref#") -> targetSym
+            else -> "sym:$targetSym"
+        }
+        val finalEdgeId = rawEdgeId.ifEmpty {
+            "$sourceNodeId:${edgeType.lowercase()}:${normalizedTarget.removePrefix("sym:")}:$lineNumber"
+        }
+        return GraphEdge(
+            edgeId = finalEdgeId,
+            projectId = projId,
+            sourceNodeId = sourceNodeId,
+            targetNodeId = normalizedTarget,
+            edgeType = edgeType,
+            provenance = provenance,
+            confidence = confidence,
+            lineNumber = lineNumber
+        )
+    }
+
     fun listRawSymbolEdgesTargetingSymbols(
         projectId: String,
         symbols: Set<String>
@@ -462,43 +503,8 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
             stmt.bindString(1, projectId)
             while (stmt.step()) {
                 val targetSym = stmt.columnString(3)
-                val cleanSym = targetSym.removePrefix("sym:")
-                    .removePrefix("$projectId:endpoint#")
-                    .removePrefix("$projectId:url_ref#")
-                    .removePrefix("endpoint#")
-                    .removePrefix("url_ref#")
-                val shortSym = cleanSym.substringAfterLast('.').substringAfterLast("::")
-                if (cleanSym in symbols || shortSym in symbols || targetSym in symbols) {
-                    val rawEdgeId = stmt.columnString(0)
-                    val projId = stmt.columnString(1)
-                    val sourceNodeId = stmt.columnString(2)
-                    val edgeType = stmt.columnString(4)
-                    val confidence = stmt.columnDouble(5)
-                    val provenance = stmt.columnString(6)
-                    val lineNumber = stmt.columnInt(7)
-                    val normalizedTarget = when {
-                        targetSym.startsWith("sym:") ||
-                            targetSym.startsWith("$projId:endpoint#") ||
-                            targetSym.startsWith("$projId:url_ref#") ||
-                            targetSym.startsWith("endpoint#") ||
-                            targetSym.startsWith("url_ref#") -> targetSym
-                        else -> "sym:$targetSym"
-                    }
-                    val finalEdgeId = rawEdgeId.ifEmpty {
-                        "$sourceNodeId:${edgeType.lowercase()}:${normalizedTarget.removePrefix("sym:")}:$lineNumber"
-                    }
-                    results.add(
-                        GraphEdge(
-                            edgeId = finalEdgeId,
-                            projectId = projId,
-                            sourceNodeId = sourceNodeId,
-                            targetNodeId = normalizedTarget,
-                            edgeType = edgeType,
-                            provenance = provenance,
-                            confidence = confidence,
-                            lineNumber = lineNumber
-                        )
-                    )
+                if (matchesAnyTargetSymbol(targetSym, projectId, symbols)) {
+                    results.add(decodeTargetingRawEdge(stmt, targetSym))
                 }
             }
         } finally {

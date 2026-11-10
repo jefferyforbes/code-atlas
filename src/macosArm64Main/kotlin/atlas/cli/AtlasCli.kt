@@ -7,6 +7,7 @@ import atlas.engine.WorkspaceInitEngine
 import atlas.mcp.AtlasMcpServer
 import atlas.model.RfcGroundResult
 import atlas.model.SpikeAnalysisResult
+import atlas.model.SpikeRequest
 import atlas.util.PlatformFiles
 import kotlin.math.roundToInt
 import kotlinx.serialization.encodeToString
@@ -261,14 +262,16 @@ class AtlasCli {
             val fromArg = args.target.ifEmpty { null }
             val toArg = args.secondaryTarget.ifEmpty { null }
             val result = effectiveServer.spikeAnalysisEngine.runSpike(
-                projectId = args.project,
-                hypothesis = hypothesis,
-                from = fromArg,
-                to = toArg,
-                target = fromArg,
-                forbiddenLayer = args.forbiddenLayerArg,
-                maxFiles = args.maxFilesArg,
-                maxHops = if (args.hasExplicitDepth) args.depth else 10
+                SpikeRequest(
+                    projectId = args.project,
+                    hypothesis = hypothesis,
+                    from = fromArg,
+                    to = toArg,
+                    target = fromArg,
+                    forbiddenLayer = args.forbiddenLayerArg,
+                    maxFiles = args.maxFilesArg,
+                    maxHops = if (args.hasExplicitDepth) args.depth else 10
+                )
             )
             val text = if (args.isJson) jsonPretty.encodeToString(result) else result.message
             println(text)

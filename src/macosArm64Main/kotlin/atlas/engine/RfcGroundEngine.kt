@@ -16,7 +16,7 @@ class RfcGroundEngine(
     fun groundSubsystem(projectId: String, query: String): RfcGroundResult {
         val cleanQuery = query.trim().trim('\'', '"')
         if (cleanQuery.isEmpty()) {
-            val emptyTable = renderTable(cleanQuery, emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), 0)
+            val emptyTable = renderTable(cleanQuery, SubsystemGroundingTiers.EMPTY, 0)
             return RfcGroundResult(
                 query = cleanQuery,
                 projectId = projectId,
@@ -45,42 +45,25 @@ class RfcGroundEngine(
         val afferentEntryPoints = extractAfferentEntryPoints(matchingNodes, subsystemNodeIds, allEdges, allNodesMap)
         val efferentDependencies = extractEfferentDependencies(subsystemNodeIds, allEdges, allNodesMap)
 
-        var maxItems = 4
-        var table = renderTable(
-            query = cleanQuery,
+        val tiers = SubsystemGroundingTiers(
             contracts = domainContracts,
             entryPoints = afferentEntryPoints,
             dependencies = efferentDependencies,
             syntactic = syntacticTier,
             semantic = semanticTier,
-            pragmatic = pragmaticTier,
-            maxItems = maxItems
+            pragmatic = pragmaticTier
         )
+
+        var maxItems = 4
+        var table = renderTable(cleanQuery, tiers, maxItems)
 
         while (table.encodeToByteArray().size > 800 && maxItems > 1) {
             maxItems--
-            table = renderTable(
-                query = cleanQuery,
-                contracts = domainContracts,
-                entryPoints = afferentEntryPoints,
-                dependencies = efferentDependencies,
-                syntactic = syntacticTier,
-                semantic = semanticTier,
-                pragmatic = pragmaticTier,
-                maxItems = maxItems
-            )
+            table = renderTable(cleanQuery, tiers, maxItems)
         }
 
         if (table.encodeToByteArray().size > 800) {
-            table = truncateToBudget(
-                query = cleanQuery,
-                contracts = domainContracts.take(1),
-                entryPoints = afferentEntryPoints.take(1),
-                dependencies = efferentDependencies.take(1),
-                syntactic = syntacticTier.take(1),
-                semantic = semanticTier.take(1),
-                pragmatic = pragmaticTier.take(1)
-            )
+            table = truncateToBudget(cleanQuery, tiers.takeFirst(1))
         }
 
         val byteSize = table.encodeToByteArray().size
@@ -130,46 +113,43 @@ class RfcGroundEngine(
         }
     }
 
-    private fun nodeMatchesSubsystem(node: GraphNode, query: String): Boolean {
-        val relPath = if (node.fileId.contains(':')) node.fileId.substringAfter(':') else node.fileId
-        if (node.moduleId.contains(query, ignoreCase = true) ||
+    private fun matchesDirectQuery(node: GraphNode, relPath: String, query: String): Boolean =
+        node.moduleId.contains(query, ignoreCase = true) ||
             relPath.contains(query, ignoreCase = true) ||
             node.name.contains(query, ignoreCase = true) ||
             node.qualifiedName.contains(query, ignoreCase = true) ||
             node.signature.contains(query, ignoreCase = true) ||
             (node.description?.contains(query, ignoreCase = true) == true)
-        ) {
-            return true
-        }
 
+    private fun matchesNormalizedQuery(node: GraphNode, relPath: String, query: String): Boolean {
         val normQuery = query.filter { it.isLetterOrDigit() }.lowercase()
-        if (normQuery.length >= 2) {
-            val nameNorm = node.name.filter { it.isLetterOrDigit() }
-            val qNameNorm = node.qualifiedName.filter { it.isLetterOrDigit() }
-            val pathNorm = relPath.filter { it.isLetterOrDigit() }
-            val moduleNorm = node.moduleId.filter { it.isLetterOrDigit() }
+        if (normQuery.length < 2) return false
+        val nameNorm = node.name.filter { it.isLetterOrDigit() }
+        val qNameNorm = node.qualifiedName.filter { it.isLetterOrDigit() }
+        val pathNorm = relPath.filter { it.isLetterOrDigit() }
+        val moduleNorm = node.moduleId.filter { it.isLetterOrDigit() }
+        return nameNorm.contains(normQuery, ignoreCase = true) ||
+            qNameNorm.contains(normQuery, ignoreCase = true) ||
+            pathNorm.contains(normQuery, ignoreCase = true) ||
+            moduleNorm.contains(normQuery, ignoreCase = true)
+    }
 
-            if (nameNorm.contains(normQuery, ignoreCase = true) ||
-                qNameNorm.contains(normQuery, ignoreCase = true) ||
-                pathNorm.contains(normQuery, ignoreCase = true) ||
-                moduleNorm.contains(normQuery, ignoreCase = true)
-            ) {
-                return true
-            }
-        }
-
+    private fun matchesTokenizedQuery(node: GraphNode, relPath: String, query: String): Boolean {
         val tokens = NameSegmentTokenizer.tokenize(query)
-        if (tokens.size >= 2) {
-            val allPresent = tokens.all { token ->
-                node.name.contains(token, ignoreCase = true) ||
-                    node.qualifiedName.contains(token, ignoreCase = true) ||
-                    relPath.contains(token, ignoreCase = true) ||
-                    node.moduleId.contains(token, ignoreCase = true)
-            }
-            if (allPresent) return true
+        if (tokens.size < 2) return false
+        return tokens.all { token ->
+            node.name.contains(token, ignoreCase = true) ||
+                node.qualifiedName.contains(token, ignoreCase = true) ||
+                relPath.contains(token, ignoreCase = true) ||
+                node.moduleId.contains(token, ignoreCase = true)
         }
+    }
 
-        return false
+    private fun nodeMatchesSubsystem(node: GraphNode, query: String): Boolean {
+        val relPath = if (node.fileId.contains(':')) node.fileId.substringAfter(':') else node.fileId
+        return matchesDirectQuery(node, relPath, query) ||
+            matchesNormalizedQuery(node, relPath, query) ||
+            matchesTokenizedQuery(node, relPath, query)
     }
 
     private fun extractDomainContracts(nodes: List<GraphNode>): List<String> =
@@ -211,6 +191,43 @@ class RfcGroundEngine(
             .map { it.name }
             .distinct()
 
+    private data class SubsystemGroundingTiers(
+        val contracts: List<String>,
+        val entryPoints: List<String>,
+        val dependencies: List<String>,
+        val syntactic: List<String>,
+        val semantic: List<String>,
+        val pragmatic: List<String>
+    ) {
+        companion object {
+            val EMPTY = SubsystemGroundingTiers(
+                emptyList(),
+                emptyList(),
+                emptyList(),
+                emptyList(),
+                emptyList(),
+                emptyList()
+            )
+        }
+
+        fun takeFirst(n: Int = 1): SubsystemGroundingTiers = SubsystemGroundingTiers(
+            contracts = contracts.take(n),
+            entryPoints = entryPoints.take(n),
+            dependencies = dependencies.take(n),
+            syntactic = syntactic.take(n),
+            semantic = semantic.take(n),
+            pragmatic = pragmatic.take(n)
+        )
+    }
+
+    private fun isExcludedAfferentSource(node: GraphNode?): Boolean {
+        if (node == null) return true
+        return node.semioticLayer == "test" ||
+            node.archLayer == "test" ||
+            node.isTestDouble ||
+            node.kind in EXCLUDED_KINDS
+    }
+
     private fun extractAfferentEntryPoints(
         nodes: List<GraphNode>,
         subsystemNodeIds: Set<String>,
@@ -218,21 +235,42 @@ class RfcGroundEngine(
         allNodesMap: Map<String, GraphNode>
     ): List<String> {
         val entryPoints = mutableMapOf<String, Int>()
+        collectExternalIncomingEdges(allEdges, subsystemNodeIds, allNodesMap, entryPoints)
+        collectFallbackEntryPoints(nodes, entryPoints)
 
+        return entryPoints.entries
+            .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+            .map { (name, inDeg) -> if (inDeg > 0) "$name (in: $inDeg)" else name }
+    }
+
+    private fun extractValidAfferentTarget(
+        edge: GraphEdge,
+        subsystemNodeIds: Set<String>,
+        allNodesMap: Map<String, GraphNode>
+    ): GraphNode? {
+        if (edge.edgeType in EXCLUDED_EDGE_TYPES) return null
+        if (edge.targetNodeId !in subsystemNodeIds || edge.sourceNodeId in subsystemNodeIds) return null
+        if (isExcludedAfferentSource(allNodesMap[edge.sourceNodeId])) return null
+        val tgtNode = allNodesMap[edge.targetNodeId] ?: return null
+        return if (tgtNode.kind in EXCLUDED_KINDS) null else tgtNode
+    }
+
+    private fun collectExternalIncomingEdges(
+        allEdges: List<GraphEdge>,
+        subsystemNodeIds: Set<String>,
+        allNodesMap: Map<String, GraphNode>,
+        entryPoints: MutableMap<String, Int>
+    ) {
         for (edge in allEdges) {
-            if (edge.edgeType in EXCLUDED_EDGE_TYPES) continue
-            if (edge.targetNodeId in subsystemNodeIds && edge.sourceNodeId !in subsystemNodeIds) {
-                val srcNode = allNodesMap[edge.sourceNodeId]
-                if (srcNode != null && (srcNode.semioticLayer == "test" || srcNode.archLayer == "test" || srcNode.isTestDouble || srcNode.kind in EXCLUDED_KINDS)) {
-                    continue
-                }
-                val tgtNode = allNodesMap[edge.targetNodeId]
-                if (tgtNode != null && tgtNode.kind !in EXCLUDED_KINDS) {
-                    entryPoints[tgtNode.name] = (entryPoints[tgtNode.name] ?: 0) + 1
-                }
-            }
+            val tgt = extractValidAfferentTarget(edge, subsystemNodeIds, allNodesMap) ?: continue
+            entryPoints[tgt.name] = (entryPoints[tgt.name] ?: 0) + 1
         }
+    }
 
+    private fun collectFallbackEntryPoints(
+        nodes: List<GraphNode>,
+        entryPoints: MutableMap<String, Int>
+    ) {
         for (node in nodes) {
             if (node.inDegree > 0 && node.name !in entryPoints) {
                 entryPoints[node.name] = node.inDegree
@@ -240,10 +278,18 @@ class RfcGroundEngine(
                 entryPoints[node.name] = 0
             }
         }
+    }
 
-        return entryPoints.entries
-            .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
-            .map { (name, inDeg) -> if (inDeg > 0) "$name (in: $inDeg)" else name }
+    private fun resolveDependencyTargetName(edge: GraphEdge, allNodesMap: Map<String, GraphNode>): String? {
+        val targetNode = allNodesMap[edge.targetNodeId]
+        if (targetNode != null && (targetNode.semioticLayer == "test" || targetNode.kind in EXCLUDED_KINDS)) {
+            return null
+        }
+        val targetName = targetNode?.name ?: (if (edge.targetNodeId.contains('#')) edge.targetNodeId.substringAfter('#') else edge.targetNodeId)
+        if (targetName.isEmpty() || targetName.endsWith(".md") || targetName.endsWith(".txt")) {
+            return null
+        }
+        return targetName
     }
 
     private fun extractEfferentDependencies(
@@ -252,32 +298,18 @@ class RfcGroundEngine(
         allNodesMap: Map<String, GraphNode>
     ): List<String> {
         val deps = mutableSetOf<String>()
-
         for (edge in allEdges) {
             if (edge.edgeType in EXCLUDED_EDGE_TYPES) continue
             if (edge.sourceNodeId in subsystemNodeIds && edge.targetNodeId !in subsystemNodeIds) {
-                val targetNode = allNodesMap[edge.targetNodeId]
-                if (targetNode != null && (targetNode.semioticLayer == "test" || targetNode.kind in EXCLUDED_KINDS)) {
-                    continue
-                }
-                val targetName = targetNode?.name ?: (if (edge.targetNodeId.contains('#')) edge.targetNodeId.substringAfter('#') else edge.targetNodeId)
-                if (targetName.isNotEmpty() && !targetName.endsWith(".md") && !targetName.endsWith(".txt")) {
-                    deps.add(targetName)
-                }
+                resolveDependencyTargetName(edge, allNodesMap)?.let { deps.add(it) }
             }
         }
-
         return deps.sorted()
     }
 
     private fun renderTable(
         query: String,
-        contracts: List<String>,
-        entryPoints: List<String>,
-        dependencies: List<String>,
-        syntactic: List<String>,
-        semantic: List<String>,
-        pragmatic: List<String>,
+        tiers: SubsystemGroundingTiers,
         maxItems: Int
     ): String {
         val formatList: (List<String>) -> String = { list ->
@@ -293,23 +325,18 @@ class RfcGroundEngine(
         return buildString {
             append("| Dimension | Subsystem Grounding (`").append(query.ifEmpty { "all" }).append("`) |\n")
             append("| :--- | :--- |\n")
-            append("| **Domain Contracts** | ").append(formatList(contracts)).append(" |\n")
-            append("| **Afferent Entry Points** | ").append(formatList(entryPoints)).append(" |\n")
-            append("| **Efferent Dependencies** | ").append(formatList(dependencies)).append(" |\n")
-            append("| **Syntactic Tier** | ").append(formatList(syntactic)).append(" |\n")
-            append("| **Semantic Tier** | ").append(formatList(semantic)).append(" |\n")
-            append("| **Pragmatic Tier** | ").append(formatList(pragmatic)).append(" |\n")
+            append("| **Domain Contracts** | ").append(formatList(tiers.contracts)).append(" |\n")
+            append("| **Afferent Entry Points** | ").append(formatList(tiers.entryPoints)).append(" |\n")
+            append("| **Efferent Dependencies** | ").append(formatList(tiers.dependencies)).append(" |\n")
+            append("| **Syntactic Tier** | ").append(formatList(tiers.syntactic)).append(" |\n")
+            append("| **Semantic Tier** | ").append(formatList(tiers.semantic)).append(" |\n")
+            append("| **Pragmatic Tier** | ").append(formatList(tiers.pragmatic)).append(" |\n")
         }
     }
 
     private fun truncateToBudget(
         query: String,
-        contracts: List<String>,
-        entryPoints: List<String>,
-        dependencies: List<String>,
-        syntactic: List<String>,
-        semantic: List<String>,
-        pragmatic: List<String>
+        tiers: SubsystemGroundingTiers
     ): String {
         val shorten: (String) -> String = { s -> if (s.length > 25) s.take(22) + "..." else s }
         val fmt: (List<String>) -> String = { l ->
@@ -319,12 +346,12 @@ class RfcGroundEngine(
         return buildString {
             append("| Dimension | Subsystem Grounding (`").append(safeQuery).append("`) |\n")
             append("| :--- | :--- |\n")
-            append("| **Domain Contracts** | ").append(fmt(contracts)).append(" |\n")
-            append("| **Afferent Entry Points** | ").append(fmt(entryPoints)).append(" |\n")
-            append("| **Efferent Dependencies** | ").append(fmt(dependencies)).append(" |\n")
-            append("| **Syntactic Tier** | ").append(fmt(syntactic)).append(" |\n")
-            append("| **Semantic Tier** | ").append(fmt(semantic)).append(" |\n")
-            append("| **Pragmatic Tier** | ").append(fmt(pragmatic)).append(" |\n")
+            append("| **Domain Contracts** | ").append(fmt(tiers.contracts)).append(" |\n")
+            append("| **Afferent Entry Points** | ").append(fmt(tiers.entryPoints)).append(" |\n")
+            append("| **Efferent Dependencies** | ").append(fmt(tiers.dependencies)).append(" |\n")
+            append("| **Syntactic Tier** | ").append(fmt(tiers.syntactic)).append(" |\n")
+            append("| **Semantic Tier** | ").append(fmt(tiers.semantic)).append(" |\n")
+            append("| **Pragmatic Tier** | ").append(fmt(tiers.pragmatic)).append(" |\n")
         }
     }
 

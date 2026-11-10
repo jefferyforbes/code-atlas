@@ -575,6 +575,43 @@ class AutonomousRemediationVerifier(
         }
 
         @OptIn(ExperimentalForeignApi::class)
+        private fun spawnChildShell(args: CPointer<CPointerVar<ByteVar>>): Int {
+            val pid = fork()
+            if (pid == 0) {
+                setpgid(0, 0)
+                val devNull = open("/dev/null", O_RDWR)
+                if (devNull >= 0) {
+                    dup2(devNull, STDIN_FILENO)
+                    dup2(devNull, STDOUT_FILENO)
+                    dup2(devNull, STDERR_FILENO)
+                    close(devNull)
+                }
+                execv("/bin/sh", args)
+                _exit(127)
+            }
+            if (pid > 0) {
+                setpgid(pid, pid)
+            }
+            return pid
+        }
+
+        private fun decodeExitStatus(rawStatus: Int): Int {
+            val signal = rawStatus and 0x7f
+            return if (signal != 0) 128 + signal else (rawStatus shr 8) and 0xff
+        }
+
+        @OptIn(ExperimentalForeignApi::class)
+        private fun terminateChildProcessGroup(pid: Int, statusPtr: CPointer<IntVar>) {
+            kill(-pid, SIGKILL)
+            kill(pid, SIGKILL)
+            for (i in 0 until 50) {
+                val wr = waitpid(pid, statusPtr, WNOHANG)
+                if (wr == pid || wr < 0) break
+                usleep(10_000u)
+            }
+        }
+
+        @OptIn(ExperimentalForeignApi::class)
         internal fun executeShellInWorkspace(
             workspaceRoot: String,
             cmdStr: String,
@@ -597,22 +634,8 @@ class AutonomousRemediationVerifier(
                 args[2] = cmdCStr.ptr
                 args[3] = null
 
-                val pid = fork()
+                val pid = spawnChildShell(args)
                 if (pid < 0) return -1
-                if (pid == 0) {
-                    setpgid(0, 0)
-                    val devNull = open("/dev/null", O_RDWR)
-                    if (devNull >= 0) {
-                        dup2(devNull, STDIN_FILENO)
-                        dup2(devNull, STDOUT_FILENO)
-                        dup2(devNull, STDERR_FILENO)
-                        close(devNull)
-                    }
-                    execv("/bin/sh", args)
-                    _exit(127)
-                }
-
-                setpgid(pid, pid)
 
                 val statusPtr = alloc<IntVar>()
                 try {
@@ -620,33 +643,18 @@ class AutonomousRemediationVerifier(
                         val waitRes = waitpid(pid, statusPtr.ptr, WNOHANG)
                         if (waitRes == pid) {
                             childTerminated = true
-                            val rawStatus = statusPtr.value
-                            val signal = rawStatus and 0x7f
-                            return if (signal != 0) {
-                                128 + signal
-                            } else {
-                                (rawStatus shr 8) and 0xff
-                            }
-                        } else if (waitRes < 0) {
-                            if (errno == EINTR) {
-                                continue
-                            }
+                            return decodeExitStatus(statusPtr.value)
+                        }
+                        if (waitRes < 0) {
+                            if (errno == EINTR) continue
                             childTerminated = true
                             return -1
                         }
-
                         if (startTime.elapsedNow() >= effectiveTimeout) {
-                            kill(-pid, SIGKILL)
-                            kill(pid, SIGKILL)
-                            for (i in 0 until 50) {
-                                val wr = waitpid(pid, statusPtr.ptr, WNOHANG)
-                                if (wr == pid || wr < 0) break
-                                usleep(10_000u)
-                            }
+                            terminateChildProcessGroup(pid, statusPtr.ptr)
                             childTerminated = true
                             return TIMEOUT_EXIT_CODE
                         }
-
                         usleep(20_000u)
                     }
                 } finally {
