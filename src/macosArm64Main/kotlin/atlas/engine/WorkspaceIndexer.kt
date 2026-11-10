@@ -82,6 +82,7 @@ class WorkspaceIndexer(
     private class ScanCollector {
         val validDiskFiles = mutableSetOf<String>()
         val changedNodes = mutableListOf<GraphNode>()
+        val purgedSymbolNames = mutableSetOf<String>()
         val markdownQueue = mutableListOf<Pair<String, String>>()
         val unchangedMarkdownQueue = mutableListOf<Pair<String, String>>()
         val pendingKotlinComposeFiles = mutableListOf<PendingKotlinComposeFile>()
@@ -163,6 +164,8 @@ class WorkspaceIndexer(
             scan.filesSkipped++
             return
         }
+
+        scan.purgedSymbolNames.addAll(store.getDeclaredSymbolsForFile(ctx.projectId, fileId))
 
         val sourceText = rawBytes.decodeToString()
         val maskedText = if (meta.lang == "kotlin") {
@@ -258,7 +261,8 @@ class WorkspaceIndexer(
         root: String,
         cachedFiles: Map<String, Pair<String, Double>>,
         validDiskFiles: Set<String>,
-        normalizedSubpaths: List<String>?
+        normalizedSubpaths: List<String>?,
+        purgedSymbolsCollector: MutableSet<String>? = null
     ): Int {
         var filesDeleted = 0
         for (indexedRel in cachedFiles.keys) {
@@ -267,6 +271,10 @@ class WorkspaceIndexer(
                 continue
             }
             if (indexedRel !in validDiskFiles) {
+                val fileId = "$projectId:$indexedRel"
+                if (purgedSymbolsCollector != null) {
+                    purgedSymbolsCollector.addAll(store.getDeclaredSymbolsForFile(projectId, fileId))
+                }
                 store.deleteFileRecord(projectId, indexedRel, recomputeDegrees = false)
                 store.deleteComposeNodesForFile(projectId, indexedRel)
                 filesDeleted++
@@ -477,7 +485,10 @@ class WorkspaceIndexer(
         combinedNodes: List<GraphNode>,
         pendingRawEdges: Map<String, List<GraphEdge>>,
         allNewComposeNodes: List<ComposeNodeRecord>,
-        allNewComposeParams: List<ComposeParamRecord>
+        allNewComposeParams: List<ComposeParamRecord>,
+        isFullReindex: Boolean,
+        declaredSymbols: Set<String>,
+        changedNodes: List<GraphNode>
     ): Pair<List<GraphEdge>, List<GraphEdge>> {
         if (pendingRawEdges.isNotEmpty()) {
             store.replaceBatchRawSymbolEdges(projectId, pendingRawEdges)
@@ -485,10 +496,35 @@ class WorkspaceIndexer(
         if (allNewComposeNodes.isNotEmpty() || allNewComposeParams.isNotEmpty()) {
             store.upsertComposeNodesAndParams(allNewComposeNodes, allNewComposeParams)
         }
-        store.deleteAllResolvedCodeEdges(projectId)
-        val allPersistedRawEdges = store.listRawSymbolEdges(projectId)
-        val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(projectId, combinedNodes, allPersistedRawEdges)
-        val kmpEdges = ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(projectId, combinedNodes)
+
+        if (isFullReindex) {
+            store.deleteAllResolvedCodeEdges(projectId)
+            val allPersistedRawEdges = store.listRawSymbolEdges(projectId)
+            val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(projectId, combinedNodes, allPersistedRawEdges)
+            val kmpEdges = ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(projectId, combinedNodes)
+            return Pair(resolvedEdges, kmpEdges)
+        }
+
+        val touchedRawEdges = pendingRawEdges.values.flatten()
+        val crossFileRawEdges = if (declaredSymbols.isNotEmpty()) {
+            store.listRawSymbolEdgesTargetingSymbols(projectId, declaredSymbols)
+        } else {
+            emptyList()
+        }
+        val touchedEdgeIds = touchedRawEdges.mapTo(mutableSetOf()) { it.edgeId }
+        val otherFileRawEdges = crossFileRawEdges.filter { it.edgeId !in touchedEdgeIds }
+
+        store.deleteEdgesForRawEdges(projectId, otherFileRawEdges)
+
+        val rawEdgesToResolve = (touchedRawEdges + otherFileRawEdges).distinctBy { it.edgeId }
+        val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(projectId, combinedNodes, rawEdgesToResolve)
+
+        val hasKmpDecls = changedNodes.any { it.kind == "expect_decl" || it.kind == "actual_decl" }
+        val kmpEdges = if (hasKmpDecls) {
+            ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(projectId, combinedNodes)
+        } else {
+            emptyList()
+        }
         return Pair(resolvedEdges, kmpEdges)
     }
 
@@ -593,9 +629,11 @@ class WorkspaceIndexer(
             cachedFiles = cachedFiles,
             filesWithRawEdges = filesWithRawEdges
         )
+        val isFullReindex = (effectiveForce && normalizedSubpaths.isNullOrEmpty()) || cachedFiles.isEmpty()
+
         val scan = store.withSavepoint("sp_scan_workspace") {
             val s = scanWorkspaceFiles(scanCtx)
-            val deleted = purgeDeletedFiles(projectId, root, cachedFiles, s.validDiskFiles, normalizedSubpaths)
+            val deleted = purgeDeletedFiles(projectId, root, cachedFiles, s.validDiskFiles, normalizedSubpaths, s.purgedSymbolNames)
             Pair(s, deleted)
         }
         val scanResult = scan.first
@@ -617,13 +655,22 @@ class WorkspaceIndexer(
                 mergedNodeMap = mergedNodeMap
             )
 
+            val declaredSymbols = scanResult.purgedSymbolNames.toMutableSet()
+            for (node in scanResult.changedNodes) {
+                if (node.name.isNotBlank()) declaredSymbols.add(node.name)
+                if (node.qualifiedName.isNotBlank()) declaredSymbols.add(node.qualifiedName)
+            }
+
             val combinedNodes = mergedNodeMap.values.toList()
             val (resolvedEdges, kmpEdges) = resolveWorkspaceEdges(
                 projectId = projectId,
                 combinedNodes = combinedNodes,
                 pendingRawEdges = scanResult.pendingRawEdges,
                 allNewComposeNodes = allNewComposeNodes,
-                allNewComposeParams = allNewComposeParams
+                allNewComposeParams = allNewComposeParams,
+                isFullReindex = isFullReindex,
+                declaredSymbols = declaredSymbols,
+                changedNodes = scanResult.changedNodes
             )
 
             reevaluateMarkdownFiles(
@@ -642,11 +689,17 @@ class WorkspaceIndexer(
 
             val endpointNodes = extractEndpoints(projectId, resolvedEdges, docEdges)
 
+            val allUpsertNodes = modNodes + scanResult.changedNodes.distinctBy { it.nodeId } + docNodes.distinctBy { it.nodeId } + endpointNodes
+            val allUpsertEdges = modEdges + resolvedEdges + kmpEdges + docEdges
+
             store.upsertNodesAndEdges(
                 projectId = projectId,
-                nodes = modNodes + scanResult.changedNodes.distinctBy { it.nodeId } + docNodes.distinctBy { it.nodeId } + endpointNodes,
-                edges = modEdges + resolvedEdges + kmpEdges + docEdges
+                nodes = allUpsertNodes,
+                edges = allUpsertEdges
             )
+            if (filesDeleted > 0 && allUpsertNodes.isEmpty() && allUpsertEdges.isEmpty()) {
+                store.recomputeDegrees(projectId)
+            }
             store.setProjectMetadata(projectId, "extractor_version", PolyglotAstExtractor.EXTRACTOR_VERSION)
 
             buildStatsResponse(projectId, scanResult.filesIndexed, scanResult.filesSkipped)
