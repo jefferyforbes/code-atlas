@@ -43,10 +43,14 @@ class NativeSqliteDatabase(val path: String) {
 
     val currentTransactionDepth: Int get() = transactionDepth
 
+    private fun requireDb(): CPointer<sqlite3> =
+        checkNotNull(dbPointer) { "NativeSqliteDatabase connection is closed" }
+
     fun exec(sql: String) {
+        val ptr = requireDb()
         memScoped {
             val errPtr = alloc<CPointerVar<ByteVar>>()
-            val rc = sqlite3_exec(dbPointer, sql, null, null, errPtr.ptr)
+            val rc = sqlite3_exec(ptr, sql, null, null, errPtr.ptr)
             if (rc != SQLITE_OK) {
                 val err = errPtr.value?.toKString() ?: "Error $rc"
                 sqlite3_free(errPtr.value)
@@ -56,19 +60,20 @@ class NativeSqliteDatabase(val path: String) {
     }
 
     fun prepare(sql: String): NativeSqliteStatement {
+        val ptr = requireDb()
         memScoped {
             val ppStmt = alloc<CPointerVar<sqlite3_stmt>>()
-            val rc = sqlite3_prepare_v2(dbPointer, sql, -1, ppStmt.ptr, null)
+            val rc = sqlite3_prepare_v2(ptr, sql, -1, ppStmt.ptr, null)
             if (rc != SQLITE_OK) {
                 if (ppStmt.value != null) {
                     sqlite3_finalize(ppStmt.value)
                 }
-                val err = sqlite3_errmsg(dbPointer)?.toKString() ?: "Error $rc"
+                val err = sqlite3_errmsg(ptr)?.toKString() ?: "Error $rc"
                 throw RuntimeException("SQLite prepare error ($rc): $err in SQL:\n$sql")
             }
             val stmtPtr = ppStmt.value
                 ?: throw IllegalArgumentException("SQLite prepare error: empty or comment-only SQL statement: [$sql]")
-            return NativeSqliteStatement(dbPointer, stmtPtr)
+            return NativeSqliteStatement(ptr, stmtPtr)
         }
     }
 

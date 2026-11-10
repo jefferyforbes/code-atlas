@@ -6,7 +6,7 @@ contract:
   task: pr-13-db-concurrency-and-incremental-indexing
   objective: Wrap SQLite schema initialization in immediate transactions to eliminate cold-start lock collisions, remove duplicate FTS migrations, and implement scoped cross-file edge invalidation in WorkspaceIndexer.
 
-status: ready
+status: completed
 
 size:
   complexity: medium

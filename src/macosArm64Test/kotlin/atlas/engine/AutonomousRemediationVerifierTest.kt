@@ -873,5 +873,27 @@ class AutonomousRemediationVerifierTest {
             cleanDir(tmpDir)
         }
     }
+
+    @Test
+    fun testExecuteShellInWorkspaceMutesOutputAndExecutesCleanly() {
+        val tmpDir = makeTempDir()
+        try {
+            val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(
+                workspaceRoot = tmpDir,
+                cmdStr = "echo 'corrupt_protocol' && exit 0",
+                timeoutSeconds = 5
+            )
+            assertEquals(0, exitCode)
+
+            val exitFail = AutonomousRemediationVerifier.executeShellInWorkspace(
+                workspaceRoot = tmpDir,
+                cmdStr = "echo 'error' >&2 && exit 42",
+                timeoutSeconds = 5
+            )
+            assertEquals(42, exitFail)
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
 }
 

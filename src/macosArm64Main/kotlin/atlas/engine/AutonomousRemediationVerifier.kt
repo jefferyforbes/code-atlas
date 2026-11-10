@@ -582,33 +582,38 @@ class AutonomousRemediationVerifier(
         ): Int {
             val escapedRoot = "'" + workspaceRoot.replace("'", "'\\''") + "'"
             val cmd = "cd $escapedRoot && $cmdStr"
-            val pid = fork()
-            if (pid < 0) return -1
-            if (pid == 0) {
-                setpgid(0, 0)
-                val devNull = open("/dev/null", O_RDONLY)
-                if (devNull >= 0) {
-                    dup2(devNull, STDIN_FILENO)
-                    close(devNull)
-                }
-                memScoped {
-                    val args = allocArray<CPointerVar<ByteVar>>(4)
-                    args[0] = "/bin/sh".cstr.ptr
-                    args[1] = "-c".cstr.ptr
-                    args[2] = cmd.cstr.ptr
-                    args[3] = null
-                    execv("/bin/sh", args)
-                }
-                _exit(127)
-            }
-
-            setpgid(pid, pid)
 
             val effectiveTimeout = timeoutSeconds.coerceAtLeast(1).seconds
             val startTime = TimeSource.Monotonic.markNow()
             var childTerminated = false
 
             memScoped {
+                val shPath = "/bin/sh".cstr
+                val cFlag = "-c".cstr
+                val cmdCStr = cmd.cstr
+                val args = allocArray<CPointerVar<ByteVar>>(4)
+                args[0] = shPath.ptr
+                args[1] = cFlag.ptr
+                args[2] = cmdCStr.ptr
+                args[3] = null
+
+                val pid = fork()
+                if (pid < 0) return -1
+                if (pid == 0) {
+                    setpgid(0, 0)
+                    val devNull = open("/dev/null", O_RDWR)
+                    if (devNull >= 0) {
+                        dup2(devNull, STDIN_FILENO)
+                        dup2(devNull, STDOUT_FILENO)
+                        dup2(devNull, STDERR_FILENO)
+                        close(devNull)
+                    }
+                    execv("/bin/sh", args)
+                    _exit(127)
+                }
+
+                setpgid(pid, pid)
+
                 val statusPtr = alloc<IntVar>()
                 try {
                     while (true) {
@@ -652,7 +657,6 @@ class AutonomousRemediationVerifier(
                     }
                 }
             }
-            return -1
         }
 
         private val VAR_PROP_SNIPPET_RE = Regex("""\bvar\s+([A-Za-z0-9_]+)\s*:""")
