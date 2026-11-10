@@ -139,6 +139,7 @@ internal object McpToolSchemas {
                     add("migrate_tools")
                     add("architect_context")
                     add("audit_skills")
+                    add("spike")
                 }
                 put("description", "Audit, synthesis, Compose compliance, complexity audit, learning, or indexing action to execute.")
             }
@@ -305,6 +306,31 @@ internal object McpToolSchemas {
             putJsonObject("target") {
                 put("type", "string")
                 put("description", "Target symbol name, file path, or composable identifier.")
+            }
+            putJsonObject("hypothesis") {
+                put("type", "string")
+                putJsonArray("enum") {
+                    add("decoupling")
+                    add("clean-arch")
+                    add("blast-ceiling")
+                }
+                put("description", "Topological spike hypothesis to evaluate (decoupling, clean-arch, blast-ceiling; default: decoupling).")
+            }
+            putJsonObject("from") {
+                put("type", "string")
+                put("description", "Source symbol, module, or file identifier for decoupling hypothesis.")
+            }
+            putJsonObject("to") {
+                put("type", "string")
+                put("description", "Target symbol, module, or file identifier for decoupling hypothesis.")
+            }
+            putJsonObject("forbidden_layer") {
+                put("type", "string")
+                put("description", "Forbidden layer or tier identifier for clean-arch spike (e.g. 'pragmatic:presentation').")
+            }
+            putJsonObject("max_files") {
+                put("type", "integer")
+                put("description", "Maximum blast-radius file ceiling for blast-ceiling spike (default: 20).")
             }
         }
         putJsonArray("required") {

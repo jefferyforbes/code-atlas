@@ -15,6 +15,7 @@ import atlas.engine.WorkMemoryStore
 import atlas.engine.WorkspaceIndexer
 import atlas.engine.ArchitectContextEngine
 import atlas.engine.RfcGroundEngine
+import atlas.engine.SpikeAnalysisEngine
 import atlas.extract.ComplexityExtractor
 import atlas.extract.UrlTargetResolver
 import atlas.model.ArchitectContextResult
@@ -79,6 +80,7 @@ class AtlasMcpServer(
     val codegraphEngine: CodegraphCompatibilityEngine
     val architectContextEngine: ArchitectContextEngine
     val rfcGroundEngine: RfcGroundEngine
+    val spikeAnalysisEngine: SpikeAnalysisEngine
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -109,6 +111,7 @@ class AtlasMcpServer(
         codegraphEngine = CodegraphCompatibilityEngine(store, workspaceRoot)
         architectContextEngine = ArchitectContextEngine(store, synthesizer, workspaceRoot, artifactsDir)
         rfcGroundEngine = RfcGroundEngine(store)
+        spikeAnalysisEngine = SpikeAnalysisEngine(store)
     }
 
     fun toolDefinitions(): List<JsonObject> = McpToolSchemas.toolDefinitions(enableCodegraphTools)
@@ -549,8 +552,33 @@ class AtlasMcpServer(
             "remedy_architecture", "fix_architecture", "fix", "remedy" -> handleAuditRemedyArchitecture(args, project, targets)
             "migrate_tools", "check_legacy_tools" -> handleAuditMigrateTools(args, targets)
             "audit_skills" -> handleAuditSkills(project, targets)
+            "spike" -> handleAuditSpike(args, project, targets)
             else -> throw IllegalArgumentException("Unsupported atlas_audit action: $action")
         }
+    }
+
+    private fun handleAuditSpike(args: JsonObject, project: String, targets: List<String>): JsonObject {
+        val hypothesis = args["hypothesis"]?.jsonPrimitive?.content ?: "decoupling"
+        val fromArg = args["from"]?.jsonPrimitive?.content
+            ?: args["target"]?.jsonPrimitive?.content
+            ?: targets.firstOrNull()
+        val toArg = args["to"]?.jsonPrimitive?.content
+            ?: args["secondary_target"]?.jsonPrimitive?.content
+            ?: targets.getOrNull(1)
+        val forbiddenLayer = args["forbidden_layer"]?.jsonPrimitive?.content
+        val maxFiles = args["max_files"]?.jsonPrimitive?.intOrNull
+        val depth = args["depth"]?.jsonPrimitive?.intOrNull ?: 10
+        val result = spikeAnalysisEngine.runSpike(
+            projectId = project,
+            hypothesis = hypothesis,
+            from = fromArg,
+            to = toArg,
+            target = fromArg,
+            forbiddenLayer = forbiddenLayer,
+            maxFiles = maxFiles,
+            maxHops = depth
+        )
+        return json.encodeToJsonElement(result).jsonObject
     }
 
     private fun handleAuditSyncIndex(

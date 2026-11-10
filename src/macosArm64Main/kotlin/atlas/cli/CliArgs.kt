@@ -15,6 +15,7 @@ data class CliArgs(
     var action: String = "search",
     var secondaryTarget: String = "",
     var depth: Int = 2,
+    var hasExplicitDepth: Boolean = false,
     var isJson: Boolean = false,
     var includeSource: Boolean = false,
     var fileKey: String? = null,
@@ -58,7 +59,10 @@ data class CliArgs(
     var hookTypeArg: String = "pre-commit",
     var isDryRun: Boolean = false,
     var forceFlag: Boolean = false,
-    var legacyToolsFlag: Boolean = false
+    var legacyToolsFlag: Boolean = false,
+    var hypothesisArg: String? = null,
+    var forbiddenLayerArg: String? = null,
+    var maxFilesArg: Int? = null
 ) {
     companion object {
         private val GENERAL_COMMANDS = setOf(
@@ -66,7 +70,7 @@ data class CliArgs(
             "dead-code", "dead_code", "record-memory", "record_memory", "serve-mcp", "serve",
             "explore", "context", "callers", "callees", "impact", "status", "files", "search",
             "node", "version", "verify-remediation", "verify_remediation", "init", "migrate-tools", "migrate_tools",
-            "rfc-ground", "rfc_ground"
+            "rfc-ground", "rfc_ground", "spike"
         )
 
         private val FIGMA_COMMANDS = setOf("index", "query", "audit", "synthesize-scope", "shortest-path", "shortest_path", "version")
@@ -107,6 +111,8 @@ data class CliArgs(
                     args.command = arg
                 } else if (args.target.isEmpty()) {
                     args.target = arg
+                } else if (args.secondaryTarget.isEmpty()) {
+                    args.secondaryTarget = arg
                 }
             }
             return idx + 1
@@ -236,10 +242,20 @@ data class CliArgs(
             val subT = parseTargetOption(argv, idx, args)
             if (subT != idx) return subT
 
+            val subSpike = parseSpikeOption(argv, idx, args)
+            if (subSpike != idx) return subSpike
+
             val subF = parseFileOption(argv, idx, args)
             if (subF != idx) return subF
 
             return parseRemediationOption(argv, idx, args)
+        }
+
+        private fun parseSpikeOption(argv: Array<String>, idx: Int, args: CliArgs): Int {
+            extractOption(argv, idx, "--hypothesis")?.let { (v, next) -> args.hypothesisArg = v; return next }
+            extractOption(argv, idx, "--forbidden-layer")?.let { (v, next) -> args.forbiddenLayerArg = v; return next }
+            extractOption(argv, idx, "--max-files")?.let { (v, next) -> args.maxFilesArg = v.toIntOrNull(); return next }
+            return idx
         }
 
         private fun parseProjectOption(argv: Array<String>, idx: Int, args: CliArgs): Int {
@@ -373,7 +389,11 @@ data class CliArgs(
         private fun parseStorageOption(argv: Array<String>, idx: Int, args: CliArgs): Int {
             extractOption(argv, idx, "--db")?.let { (v, next) -> args.customDb = v; return next }
             extractOption(argv, idx, "--cache-profile")?.let { (v, next) -> args.cacheProfile = v; return next }
-            extractOption(argv, idx, "--depth")?.let { (v, next) -> args.depth = v.toIntOrNull() ?: 2; return next }
+            extractOption(argv, idx, "--depth")?.let { (v, next) ->
+                args.depth = v.toIntOrNull() ?: 2
+                args.hasExplicitDepth = true
+                return next
+            }
             extractOption(argv, idx, "--limit")?.let { (v, next) -> args.limit = v.toIntOrNull() ?: 10; return next }
             return idx
         }
