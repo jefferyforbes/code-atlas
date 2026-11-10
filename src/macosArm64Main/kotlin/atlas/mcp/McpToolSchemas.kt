@@ -66,6 +66,8 @@ internal object McpToolSchemas {
                     add("complexity")
                     add("url")
                     add("explore")
+                    add("rfc_ground")
+                    add("rfc-ground")
                 }
                 put("description", "Query operation to execute against the indexed polyglot code, Compose stability, complexity, and vault graph.")
             }

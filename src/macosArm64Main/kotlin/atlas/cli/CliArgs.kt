@@ -65,7 +65,8 @@ data class CliArgs(
             "index", "query", "synthesize-scope", "audit", "doctor", "fix", "remedy", "remediate",
             "dead-code", "dead_code", "record-memory", "record_memory", "serve-mcp", "serve",
             "explore", "context", "callers", "callees", "impact", "status", "files", "search",
-            "node", "version", "verify-remediation", "verify_remediation", "init", "migrate-tools", "migrate_tools"
+            "node", "version", "verify-remediation", "verify_remediation", "init", "migrate-tools", "migrate_tools",
+            "rfc-ground", "rfc_ground"
         )
 
         private val FIGMA_COMMANDS = setOf("index", "query", "audit", "synthesize-scope", "shortest-path", "shortest_path", "version")
@@ -174,6 +175,7 @@ data class CliArgs(
             "remedy", "remediate" -> "fix"
             "migrate_tools" -> "migrate-tools"
             "serve" -> "serve-mcp"
+            "rfc_ground" -> "rfc-ground"
             else -> arg
         }
 
@@ -347,6 +349,7 @@ data class CliArgs(
 
         private fun parseTargetOption(argv: Array<String>, idx: Int, args: CliArgs): Int {
             extractOption(argv, idx, "--target")?.let { (v, next) -> args.target = v; return next }
+            extractOption(argv, idx, "--query")?.let { (v, next) -> args.target = v; return next }
             extractOption(argv, idx, "--from")?.let { (v, next) -> args.target = v; return next }
             extractOption(argv, idx, "--symbol")?.let { (v, next) -> args.target = v; return next }
             extractOption(argv, idx, "--url")?.let { (v, next) ->

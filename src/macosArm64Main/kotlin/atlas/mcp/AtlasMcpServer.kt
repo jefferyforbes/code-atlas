@@ -14,6 +14,7 @@ import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkMemoryStore
 import atlas.engine.WorkspaceIndexer
 import atlas.engine.ArchitectContextEngine
+import atlas.engine.RfcGroundEngine
 import atlas.extract.ComplexityExtractor
 import atlas.extract.UrlTargetResolver
 import atlas.model.ArchitectContextResult
@@ -77,6 +78,7 @@ class AtlasMcpServer(
     val remediationEngine: ArchitectureRemediationEngine
     val codegraphEngine: CodegraphCompatibilityEngine
     val architectContextEngine: ArchitectContextEngine
+    val rfcGroundEngine: RfcGroundEngine
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -106,6 +108,7 @@ class AtlasMcpServer(
         remediationEngine = ArchitectureRemediationEngine(workspaceRoot, store, remediationVerifier)
         codegraphEngine = CodegraphCompatibilityEngine(store, workspaceRoot)
         architectContextEngine = ArchitectContextEngine(store, synthesizer, workspaceRoot, artifactsDir)
+        rfcGroundEngine = RfcGroundEngine(store)
     }
 
     fun toolDefinitions(): List<JsonObject> = McpToolSchemas.toolDefinitions(enableCodegraphTools)
@@ -274,6 +277,10 @@ class AtlasMcpServer(
             }
             "url" -> store.searchByUrl(project, target)
             "complexity" -> handleQueryComplexity(project, target, args)
+            "rfc_ground", "rfc-ground" -> {
+                val res = rfcGroundEngine.groundSubsystem(project, target)
+                json.encodeToJsonElement(res).jsonObject
+            }
             "explore" -> {
                 val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 12
                 val res = codegraphEngine.explore(project, target, maxFiles = limit)
