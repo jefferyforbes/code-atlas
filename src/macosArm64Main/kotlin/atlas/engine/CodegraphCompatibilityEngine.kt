@@ -37,6 +37,10 @@ class CodegraphCompatibilityEngine(
             "xml" to "xml",
             "yaml" to "yaml", "yml" to "yaml"
         )
+
+        private val DOMAIN_MODEL_KINDS = setOf("class", "data_class", "struct", "model", "interface")
+        private val SEALED_KINDS = setOf("sealed_class", "sealed_interface", "enum", "enum_class")
+        private val ERROR_SUFFIXES = setOf("Error", "Exception", "Result", "Failure", "Status")
     }
 
     fun explore(projectId: String, query: String, maxFiles: Int = 12): JsonObject {
@@ -574,6 +578,85 @@ class CodegraphCompatibilityEngine(
     private fun detectLanguage(filePath: String): String {
         val ext = filePath.substringAfterLast('.', "").lowercase()
         return EXTENSION_LANG_MAP[ext] ?: ""
+    }
+
+    fun interviewContext(projectId: String, target: String = ""): JsonObject {
+        val trimmed = target.trim().trim('"', '\'')
+        val text = generateInterviewContext(projectId, trimmed)
+        return buildJsonObject {
+            put("target", trimmed)
+            put("projectId", projectId)
+            put("text", text)
+            put("byte_size", text.encodeToByteArray().size)
+        }
+    }
+
+    private fun generateInterviewContext(projectId: String, target: String): String {
+        val allNodes = store.listNodes(projectId).filter {
+            it.semioticLayer != "test" && it.archLayer != "test" && !it.isTestDouble
+        }
+        val candidates = if (target.isNotEmpty()) {
+            val matching = allNodes.filter { n ->
+                n.name.contains(target, ignoreCase = true) ||
+                    n.qualifiedName.contains(target, ignoreCase = true) ||
+                    n.moduleId.contains(target, ignoreCase = true) ||
+                    n.fileId.contains(target, ignoreCase = true)
+            }
+            if (matching.isNotEmpty()) matching else allNodes
+        } else {
+            allNodes
+        }
+
+        val domainModels = candidates
+            .filter { (it.archLayer == "domain" || it.kind in DOMAIN_MODEL_KINDS) && it.kind !in SEALED_KINDS && !isErrorSymbol(it.name) }
+            .sortedWith(compareByDescending<GraphNode> { it.inDegree }.thenBy { it.name })
+            .map { it.name }
+            .distinct()
+
+        val sealedHierarchies = candidates
+            .filter { it.kind in SEALED_KINDS || it.name.endsWith("State") || it.name.endsWith("Event") || it.name.endsWith("Intent") }
+            .sortedWith(compareByDescending<GraphNode> { it.inDegree }.thenBy { it.name })
+            .map { it.name }
+            .distinct()
+
+        val errorConventions = candidates
+            .filter { isErrorSymbol(it.name) }
+            .sortedWith(compareByDescending<GraphNode> { it.inDegree }.thenBy { it.name })
+            .map { it.name }
+            .distinct()
+
+        var maxItems = 4
+        var result = renderInterviewMarkdown(target, domainModels, sealedHierarchies, errorConventions, maxItems)
+        while (result.encodeToByteArray().size > 400 && maxItems > 1) {
+            maxItems--
+            result = renderInterviewMarkdown(target, domainModels, sealedHierarchies, errorConventions, maxItems)
+        }
+
+        if (result.encodeToByteArray().size > 400) {
+            result = renderInterviewMarkdown(target, domainModels.take(1), sealedHierarchies.take(1), errorConventions.take(1), 1)
+            val bytes = result.encodeToByteArray()
+            if (bytes.size > 400) {
+                result = bytes.copyOf(400).decodeToString().substringBeforeLast(" ") + "..."
+            }
+        }
+        return result
+    }
+
+    private fun isErrorSymbol(name: String): Boolean =
+        ERROR_SUFFIXES.any { name.contains(it, ignoreCase = true) }
+
+    private fun renderInterviewMarkdown(
+        target: String,
+        models: List<String>,
+        sealed: List<String>,
+        errors: List<String>,
+        limit: Int
+    ): String {
+        val title = if (target.isNotEmpty()) "### Interview Context: $target" else "### Interview Context"
+        val mStr = if (models.isEmpty()) "(none)" else models.take(limit).joinToString(", ")
+        val sStr = if (sealed.isEmpty()) "(none)" else sealed.take(limit).joinToString(", ")
+        val eStr = if (errors.isEmpty()) "(none)" else errors.take(limit).joinToString(", ")
+        return "$title\n- **Domain Models**: $mStr\n- **Sealed Hierarchies**: $sStr\n- **Error Conventions**: $eStr\n"
     }
 
     private fun globToRegex(glob: String): Regex = VaultPlanBridge.globToRegex(glob)

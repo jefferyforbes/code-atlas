@@ -556,4 +556,87 @@ class AtlasMcpServerTest {
             server.close()
         }
     }
+
+    @Test
+    fun testInterviewContextToolAction() {
+        val pid = getpid()
+        val rnd = Random.nextInt(100000, 999999)
+        val tmpDir = "/tmp/atlas_mcp_interview_${pid}_$rnd"
+        PlatformFiles.mkdirs(tmpDir)
+        val server = AtlasMcpServer(workspaceRoot = tmpDir)
+
+        try {
+            val projectId = "shop"
+            val orderNode = atlas.model.GraphNode(
+                nodeId = "$projectId:Order",
+                projectId = projectId,
+                fileId = "$projectId:src/Order.kt",
+                name = "Order",
+                qualifiedName = "com.shop.Order",
+                kind = "class",
+                moduleId = "core",
+                archLayer = "domain",
+                semioticLayer = "semantic"
+            )
+            val paymentStateNode = atlas.model.GraphNode(
+                nodeId = "$projectId:PaymentState",
+                projectId = projectId,
+                fileId = "$projectId:src/PaymentState.kt",
+                name = "PaymentState",
+                qualifiedName = "com.shop.PaymentState",
+                kind = "sealed_interface",
+                moduleId = "core",
+                archLayer = "domain",
+                semioticLayer = "syntactic"
+            )
+            val paymentErrorNode = atlas.model.GraphNode(
+                nodeId = "$projectId:PaymentException",
+                projectId = projectId,
+                fileId = "$projectId:src/PaymentException.kt",
+                name = "PaymentException",
+                qualifiedName = "com.shop.PaymentException",
+                kind = "class",
+                moduleId = "core",
+                archLayer = "domain",
+                semioticLayer = "syntactic"
+            )
+
+            server.store.upsertNodesAndEdges(projectId, listOf(orderNode, paymentStateNode, paymentErrorNode), emptyList())
+
+            val queryArgs = buildJsonObject {
+                put("action", "interview_context")
+                put("project", projectId)
+                put("target", "Payment")
+            }
+            val res = server.callTool("atlas_query", queryArgs)
+
+            assertNotNull(res["text"])
+            val text = res["text"]?.jsonPrimitive?.content ?: ""
+            assertTrue(text.contains("### Interview Context: Payment"))
+            assertTrue(text.contains("Sealed Hierarchies"))
+            assertTrue(text.contains("PaymentState"))
+            assertTrue(text.contains("Error Conventions"))
+            assertTrue(text.contains("PaymentException"))
+
+            val byteSize = res["byte_size"]?.jsonPrimitive?.int ?: 0
+            assertTrue(byteSize in 1..400, "Interview context byteSize ($byteSize) must be <= 400 bytes")
+            assertTrue(res["_mcp_raw_text"]?.jsonPrimitive?.booleanOrNull == true)
+
+            // Test empty target fallback
+            val emptyQueryArgs = buildJsonObject {
+                put("action", "interview-context")
+                put("project", projectId)
+                put("target", "")
+            }
+            val emptyRes = server.callTool("atlas_query", emptyQueryArgs)
+            val emptyText = emptyRes["text"]?.jsonPrimitive?.content ?: ""
+            assertTrue(emptyText.contains("### Interview Context"))
+            assertTrue(emptyText.contains("Order"))
+            val emptyByteSize = emptyRes["byte_size"]?.jsonPrimitive?.int ?: 0
+            assertTrue(emptyByteSize in 1..400)
+        } finally {
+            server.close()
+            PlatformFiles.delete(tmpDir)
+        }
+    }
 }

@@ -19,5 +19,6 @@ data class ArchitectContextResult(
     val seedSymbols: List<String>,
     val spilled: Boolean,
     val spilloverPath: String? = null,
-    val inlineMarkdown: String
+    val inlineMarkdown: String,
+    val semioticSizing: SemioticSizing? = null
 )
