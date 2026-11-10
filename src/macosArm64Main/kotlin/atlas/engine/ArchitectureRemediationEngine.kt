@@ -55,15 +55,7 @@ class ArchitectureRemediationEngine(
         val prescriptions = mutableListOf<ArchitectureRemediationPrescription>()
         for (v in boostViolations.take(req.limit)) {
             prescriptions.add(
-                remediateBoost003(
-                    projectId = req.projectId,
-                    violation = v,
-                    dryRun = req.dryRun,
-                    split = req.splitBoost003,
-                    makePrivate = req.makePrivateBoost003,
-                    testCommand = req.testCommand,
-                    testTimeoutSeconds = req.testTimeoutSeconds
-                )
+                remediateBoost003(req, v)
             )
         }
         val remaining = (req.limit - prescriptions.size).coerceAtLeast(0)
@@ -553,13 +545,8 @@ class ArchitectureRemediationEngine(
     }
 
     private fun remediateBoost003(
-        projectId: String,
-        violation: SingleDeclarationViolation,
-        dryRun: Boolean,
-        split: Boolean,
-        makePrivate: Boolean,
-        testCommand: String?,
-        testTimeoutSeconds: Int = AutonomousRemediationVerifier.DEFAULT_TIMEOUT_SECONDS
+        req: RemediationPlanRequest,
+        violation: SingleDeclarationViolation
     ): ArchitectureRemediationPrescription {
         val relPath = violation.relPath
         val root = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
@@ -572,7 +559,7 @@ class ArchitectureRemediationEngine(
 
         val ext = if (relPath.contains('.')) "." + relPath.substringAfterLast('.') else ""
         val lang = PolyglotAstExtractor.supportedLanguage(ext)
-        val (nodes, _, _) = PolyglotAstExtractor.extractFile(projectId, relPath, content)
+        val (nodes, _, _) = PolyglotAstExtractor.extractFile(req.projectId, relPath, content)
         val topNodes = filterCandidateTopNodes(nodes)
 
         if (topNodes.size <= 1) {
@@ -581,12 +568,12 @@ class ArchitectureRemediationEngine(
 
         val (primaryNode, secondaryNodes, targetRenameRelPath) = resolvePrimaryAndSecondaryNodes(topNodes, relPath, ext)
 
-        if (!split && !makePrivate) {
+        if (!req.splitBoost003 && !req.makePrivateBoost003) {
             return buildManualSplitPrescription(relPath, primaryNode, secondaryNodes, topNodes.size)
         }
 
         val splitReq = AstSplitRequest(
-            projectId = projectId,
+            projectId = req.projectId,
             relPath = relPath,
             root = root,
             fullPath = fullPath,
@@ -596,12 +583,12 @@ class ArchitectureRemediationEngine(
             primaryNode = primaryNode,
             secondaryNodes = secondaryNodes,
             targetRenameRelPath = targetRenameRelPath,
-            dryRun = dryRun,
-            testCommand = testCommand,
-            testTimeoutSeconds = testTimeoutSeconds
+            dryRun = req.dryRun,
+            testCommand = req.testCommand,
+            testTimeoutSeconds = req.testTimeoutSeconds
         )
 
-        if (makePrivate) {
+        if (req.makePrivateBoost003) {
             return remediateBoost003MakePrivate(splitReq)
         }
 
@@ -710,27 +697,23 @@ class ArchitectureRemediationEngine(
     }
 
     private fun applyPrivatizedAndRunTest(
-        fullPath: String,
-        originalContent: String,
+        req: AstSplitRequest,
         modifiedContent: String,
-        testCommand: String?,
-        dryRun: Boolean,
-        details: MutableList<String>,
-        testTimeoutSeconds: Int = AutonomousRemediationVerifier.DEFAULT_TIMEOUT_SECONDS
+        details: MutableList<String>
     ): Boolean {
-        if (dryRun) {
+        if (req.dryRun) {
             details.add("Dry-run mode: verified private helper conversion without modifying disk.")
             return true
         }
         var success = false
         return try {
-            val written = PlatformFiles.writeText(fullPath, modifiedContent)
+            val written = PlatformFiles.writeText(req.fullPath, modifiedContent)
             if (!written) {
-                details.add("Failed to write modified content to $fullPath. Performing rollback.")
+                details.add("Failed to write modified content to ${req.fullPath}. Performing rollback.")
                 return false
             }
-            if (!testCommand.isNullOrBlank()) {
-                val passed = executeTestCommand(testCommand, details, testTimeoutSeconds)
+            if (!req.testCommand.isNullOrBlank()) {
+                val passed = executeTestCommand(req.testCommand, details, req.testTimeoutSeconds)
                 if (!passed) {
                     return false
                 }
@@ -743,10 +726,10 @@ class ArchitectureRemediationEngine(
         } finally {
             if (!success) {
                 val rolledBack = runCatching {
-                    PlatformFiles.writeText(fullPath, originalContent)
+                    PlatformFiles.writeText(req.fullPath, req.originalContent)
                 }.getOrDefault(false)
-                if (!rolledBack || PlatformFiles.readText(fullPath) != originalContent) {
-                    details.add("CRITICAL: Failed to rollback file at $fullPath to original content.")
+                if (!rolledBack || PlatformFiles.readText(req.fullPath) != req.originalContent) {
+                    details.add("CRITICAL: Failed to rollback file at ${req.fullPath} to original content.")
                 }
             }
         }
@@ -777,13 +760,9 @@ class ArchitectureRemediationEngine(
 
         val diffPreview = buildDiffPreview(req.relPath, req.originalContent, modifiedContent, emptyList())
         val testsPreserved = applyPrivatizedAndRunTest(
-            fullPath = req.fullPath,
-            originalContent = req.originalContent,
+            req = req,
             modifiedContent = modifiedContent,
-            testCommand = req.testCommand,
-            dryRun = req.dryRun,
-            details = details,
-            testTimeoutSeconds = req.testTimeoutSeconds
+            details = details
         )
         val isSuccess = astValid && testsPreserved
 

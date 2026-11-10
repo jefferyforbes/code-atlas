@@ -274,6 +274,22 @@ class ComplexityDoctorEngine(
             stripped.startsWith("#")
     }
 
+    private fun checkElseReturnStatement(
+        line: String,
+        trimmed: String,
+        currentReturn: String?,
+        retRegex: Regex
+    ): Pair<Boolean, String?> {
+        if (currentReturn == null) {
+            val rMatch = retRegex.find(line) ?: return Pair(false, null)
+            return Pair(true, extractReturnExpr(rMatch))
+        }
+        if (!trimmed.contains('}')) {
+            return Pair(false, currentReturn)
+        }
+        return Pair(true, currentReturn)
+    }
+
     internal fun findMultiLineElseEnd(
         lines: List<String>,
         closeIfIdx: Int,
@@ -289,22 +305,14 @@ class ComplexityDoctorEngine(
             if (trimmed.isEmpty() || isCommentLine(trimmed)) {
                 continue
             }
-            if (defaultReturn == null) {
-                val rMatch = retRegex.find(line)
-                if (rMatch != null) {
-                    defaultReturn = extractReturnExpr(rMatch)
-                } else {
-                    // Non-empty, non-comment statement precedes the return line inside the else block
-                    return null
-                }
-            } else if (!trimmed.contains('}')) {
-                // Non-empty, non-comment statement follows return before closing the else block
-                return null
-            }
+            val (valid, newReturn) = checkElseReturnStatement(line, trimmed, defaultReturn, retRegex)
+            if (!valid) return null
+            defaultReturn = newReturn
+
             val masked = PolyglotAstExtractor.maskCommentsAndStrings(line, lang)
             elseDepth += masked.count { it == '{' } - masked.count { it == '}' }
             if (elseDepth == 0) {
-                return ElseResolution(i, defaultReturn)
+                return defaultReturn?.let { ElseResolution(i, it) }
             }
         }
         return null

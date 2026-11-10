@@ -48,37 +48,39 @@ object PlatformFiles {
         } else 0u
     }
 
-    fun writeSecureText(path: String, content: String, mode: UInt = 0b110000000u): Boolean {
+    private fun ensureSecureParentDirectory(path: String) {
         val parent = parentOf(path)
         if (parent.isNotEmpty()) {
             mkdirs(parent)
             chmod(parent, 0b111000000u)
         }
+    }
+
+    private fun writeAllBytes(fd: Int, bytes: ByteArray): Boolean {
+        if (bytes.isEmpty()) return true
+        return bytes.usePinned { pinned ->
+            var totalWritten = 0
+            while (totalWritten < bytes.size) {
+                val toWrite = (bytes.size - totalWritten).toULong()
+                val written = write(fd, pinned.addressOf(totalWritten), toWrite)
+                if (written <= 0) return@usePinned false
+                totalWritten += written.toInt()
+            }
+            true
+        }
+    }
+
+    fun writeSecureText(path: String, content: String, mode: UInt = 0b110000000u): Boolean {
+        ensureSecureParentDirectory(path)
         val fd = open(path, O_CREAT or O_WRONLY or O_TRUNC, mode.toUShort())
         if (fd < 0) return false
         var success = false
         try {
             if (fchmod(fd, mode.toUShort()) == 0) {
-                val bytes = content.encodeToByteArray()
-                val writeOk = if (bytes.isEmpty()) {
-                    true
-                } else {
-                    bytes.usePinned { pinned ->
-                        var totalWritten = 0
-                        while (totalWritten < bytes.size) {
-                            val toWrite = (bytes.size - totalWritten).toULong()
-                            val written = write(fd, pinned.addressOf(totalWritten), toWrite)
-                            if (written <= 0) return@usePinned false
-                            totalWritten += written.toInt()
-                        }
-                        true
-                    }
-                }
-                success = writeOk
+                success = writeAllBytes(fd, content.encodeToByteArray())
             }
         } finally {
-            val closeRes = close(fd)
-            if (closeRes != 0) {
+            if (close(fd) != 0) {
                 success = false
             }
         }

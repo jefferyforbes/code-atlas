@@ -62,36 +62,47 @@ internal object GraphSchemaMigrator {
     private fun hasInitializedSchemaSafely(db: NativeSqliteDatabase): Boolean =
         try { hasInitializedSchema(db) } catch (_: Exception) { false }
 
+    private fun isSchemaAlreadyCurrent(db: NativeSqliteDatabase): Boolean =
+        readUserVersionSafely(db) == CURRENT_SCHEMA_VERSION && hasInitializedSchemaSafely(db)
+
+    private fun applySchemaMigrationsInTransaction(db: NativeSqliteDatabase) {
+        db.withImmediateTransaction {
+            if (readUserVersion(db) == CURRENT_SCHEMA_VERSION && hasInitializedSchema(db)) {
+                return@withImmediateTransaction
+            }
+            migrateLegacySchema(db)
+            db.exec(SCHEMA_DDL)
+            migrateComposeSchema(db)
+            migrateNodesSchema(db)
+            migrateNodesFtsSchema(db)
+            db.exec("PRAGMA user_version = $CURRENT_SCHEMA_VERSION;")
+        }
+    }
+
+    private fun retrySchemaInitialization(db: NativeSqliteDatabase, maxAttempts: Int = 20) {
+        for (attempt in 1..maxAttempts) {
+            try {
+                applySchemaMigrationsInTransaction(db)
+                return
+            } catch (e: Exception) {
+                if (isSchemaAlreadyCurrent(db)) {
+                    return
+                }
+                if (attempt == maxAttempts) throw e
+                usleep(25000u)
+            }
+        }
+    }
+
     fun initSchema(db: NativeSqliteDatabase) {
         setWalModeSafely(db)
         try {
             db.exec("PRAGMA synchronous = NORMAL;")
         } catch (_: Exception) {}
-        if (readUserVersionSafely(db) == CURRENT_SCHEMA_VERSION && hasInitializedSchemaSafely(db)) {
+        if (isSchemaAlreadyCurrent(db)) {
             return
         }
-        for (attempt in 1..20) {
-            try {
-                db.withImmediateTransaction {
-                    if (readUserVersion(db) == CURRENT_SCHEMA_VERSION && hasInitializedSchema(db)) {
-                        return@withImmediateTransaction
-                    }
-                    migrateLegacySchema(db)
-                    db.exec(SCHEMA_DDL)
-                    migrateComposeSchema(db)
-                    migrateNodesSchema(db)
-                    migrateNodesFtsSchema(db)
-                    db.exec("PRAGMA user_version = $CURRENT_SCHEMA_VERSION;")
-                }
-                return
-            } catch (e: Exception) {
-                if (readUserVersionSafely(db) == CURRENT_SCHEMA_VERSION && hasInitializedSchemaSafely(db)) {
-                    return
-                }
-                if (attempt == 20) throw e
-                usleep(25000u)
-            }
-        }
+        retrySchemaInitialization(db)
     }
 
     fun migrateNodesFtsSchema(db: NativeSqliteDatabase) {

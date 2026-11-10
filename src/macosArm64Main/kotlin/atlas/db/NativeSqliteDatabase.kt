@@ -85,40 +85,52 @@ class NativeSqliteDatabase(val path: String) {
         return executeTransaction(savepointName = safeName, block = block)
     }
 
-    private fun <T> executeTransaction(savepointName: String?, block: () -> T): T {
-        val depth = transactionDepth
-        val isTopLevel = (depth == 0)
-        val spName = savepointName ?: "sp_imm_$depth"
-
+    private fun beginTransaction(isTopLevel: Boolean, spName: String) {
         if (isTopLevel) {
             exec("BEGIN IMMEDIATE TRANSACTION;")
         } else {
             exec("SAVEPOINT $spName;")
         }
+    }
+
+    private fun commitTransaction(isTopLevel: Boolean, spName: String) {
+        if (isTopLevel) {
+            exec("COMMIT;")
+        } else {
+            exec("RELEASE SAVEPOINT $spName;")
+        }
+    }
+
+    private fun rollbackTransaction(isTopLevel: Boolean, spName: String) {
+        try {
+            if (isTopLevel) {
+                exec("ROLLBACK;")
+            } else {
+                exec("ROLLBACK TO SAVEPOINT $spName;")
+                exec("RELEASE SAVEPOINT $spName;")
+            }
+        } catch (e: Exception) {
+            PlatformFiles.logWarning("NativeSqliteDatabase", "transaction rollback failed: ${e.message}")
+            if (isTopLevel) {
+                transactionDepth = 0
+            }
+        }
+    }
+
+    private fun <T> executeTransaction(savepointName: String?, block: () -> T): T {
+        val depth = transactionDepth
+        val isTopLevel = (depth == 0)
+        val spName = savepointName ?: "sp_imm_$depth"
+
+        beginTransaction(isTopLevel, spName)
         transactionDepth = depth + 1
 
         return try {
             val result = block()
-            if (isTopLevel) {
-                exec("COMMIT;")
-            } else {
-                exec("RELEASE SAVEPOINT $spName;")
-            }
+            commitTransaction(isTopLevel, spName)
             result
         } catch (t: Throwable) {
-            try {
-                if (isTopLevel) {
-                    exec("ROLLBACK;")
-                } else {
-                    exec("ROLLBACK TO SAVEPOINT $spName;")
-                    exec("RELEASE SAVEPOINT $spName;")
-                }
-            } catch (e: Exception) {
-                PlatformFiles.logWarning("NativeSqliteDatabase", "transaction rollback failed: ${e.message}")
-                if (isTopLevel) {
-                    transactionDepth = 0
-                }
-            }
+            rollbackTransaction(isTopLevel, spName)
             throw t
         } finally {
             if (transactionDepth > depth) {

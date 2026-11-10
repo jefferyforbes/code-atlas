@@ -182,28 +182,29 @@ internal class McpJsonRpcTransport(
         }
     }
 
-    internal fun buildToolCallSuccess(reqId: JsonPrimitive?, out: JsonObject): JsonObject {
-        val isToolErr = out.containsKey("error")
+    private fun extractRawTextPayload(out: JsonObject): Pair<String?, JsonObject> {
         val hasRawTextMarker = out["_mcp_raw_text"]?.jsonPrimitive?.booleanOrNull == true ||
             out["_rawText"]?.jsonPrimitive?.booleanOrNull == true
-        val rawText = if (hasRawTextMarker) out["text"]?.jsonPrimitive?.contentOrNull else null
-        val effectiveOut = if (hasRawTextMarker) {
-            buildJsonObject {
-                out.forEach { (k, v) ->
-                    if (k != "_mcp_raw_text" && k != "_rawText") put(k, v)
-                }
+        if (!hasRawTextMarker) return Pair(null, out)
+        val rawText = out["text"]?.jsonPrimitive?.contentOrNull
+        val effectiveOut = buildJsonObject {
+            out.forEach { (k, v) ->
+                if (k != "_mcp_raw_text" && k != "_rawText") put(k, v)
             }
-        } else out
+        }
+        return Pair(rawText, effectiveOut)
+    }
+
+    internal fun buildToolCallSuccess(reqId: JsonPrimitive?, out: JsonObject): JsonObject {
+        val isToolErr = out.containsKey("error")
+        val (rawText, effectiveOut) = extractRawTextPayload(out)
+        val textContent = rawText ?: json.encodeToString(effectiveOut)
 
         return jsonRpcResult(reqId) {
             putJsonArray("content") {
                 addJsonObject {
                     put("type", "text")
-                    if (rawText != null) {
-                        put("text", rawText)
-                    } else {
-                        put("text", json.encodeToString(effectiveOut))
-                    }
+                    put("text", textContent)
                 }
             }
             if (isToolErr) {

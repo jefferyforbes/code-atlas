@@ -480,48 +480,52 @@ class WorkspaceIndexer(
         return Pair(allNewComposeNodes, allNewComposeParams)
     }
 
+    private data class EdgeResolutionContext(
+        val projectId: String,
+        val combinedNodes: List<GraphNode>,
+        val pendingRawEdges: Map<String, List<GraphEdge>>,
+        val allNewComposeNodes: List<ComposeNodeRecord>,
+        val allNewComposeParams: List<ComposeParamRecord>,
+        val isFullReindex: Boolean,
+        val declaredSymbols: Set<String>,
+        val changedNodes: List<GraphNode>
+    )
+
     private fun resolveWorkspaceEdges(
-        projectId: String,
-        combinedNodes: List<GraphNode>,
-        pendingRawEdges: Map<String, List<GraphEdge>>,
-        allNewComposeNodes: List<ComposeNodeRecord>,
-        allNewComposeParams: List<ComposeParamRecord>,
-        isFullReindex: Boolean,
-        declaredSymbols: Set<String>,
-        changedNodes: List<GraphNode>
+        ctx: EdgeResolutionContext
     ): Pair<List<GraphEdge>, List<GraphEdge>> {
-        if (pendingRawEdges.isNotEmpty()) {
-            store.replaceBatchRawSymbolEdges(projectId, pendingRawEdges)
+        if (ctx.pendingRawEdges.isNotEmpty()) {
+            store.replaceBatchRawSymbolEdges(ctx.projectId, ctx.pendingRawEdges)
         }
-        if (allNewComposeNodes.isNotEmpty() || allNewComposeParams.isNotEmpty()) {
-            store.upsertComposeNodesAndParams(allNewComposeNodes, allNewComposeParams)
+        if (ctx.allNewComposeNodes.isNotEmpty() || ctx.allNewComposeParams.isNotEmpty()) {
+            store.upsertComposeNodesAndParams(ctx.allNewComposeNodes, ctx.allNewComposeParams)
         }
 
-        if (isFullReindex) {
-            store.deleteAllResolvedCodeEdges(projectId)
-            val allPersistedRawEdges = store.listRawSymbolEdges(projectId)
-            val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(projectId, combinedNodes, allPersistedRawEdges)
-            val kmpEdges = ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(projectId, combinedNodes)
+        if (ctx.isFullReindex) {
+            store.deleteAllResolvedCodeEdges(ctx.projectId)
+            val allPersistedRawEdges = store.listRawSymbolEdges(ctx.projectId)
+            val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(ctx.projectId, ctx.combinedNodes, allPersistedRawEdges)
+            val kmpEdges = ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(ctx.projectId, ctx.combinedNodes)
             return Pair(resolvedEdges, kmpEdges)
         }
 
-        val touchedRawEdges = pendingRawEdges.values.flatten()
-        val crossFileRawEdges = if (declaredSymbols.isNotEmpty()) {
-            store.listRawSymbolEdgesTargetingSymbols(projectId, declaredSymbols)
+        val touchedRawEdges = ctx.pendingRawEdges.values.flatten()
+        val crossFileRawEdges = if (ctx.declaredSymbols.isNotEmpty()) {
+            store.listRawSymbolEdgesTargetingSymbols(ctx.projectId, ctx.declaredSymbols)
         } else {
             emptyList()
         }
         val touchedEdgeIds = touchedRawEdges.mapTo(mutableSetOf()) { it.edgeId }
         val otherFileRawEdges = crossFileRawEdges.filter { it.edgeId !in touchedEdgeIds }
 
-        store.deleteEdgesForRawEdges(projectId, otherFileRawEdges)
+        store.deleteEdgesForRawEdges(ctx.projectId, otherFileRawEdges)
 
         val rawEdgesToResolve = (touchedRawEdges + otherFileRawEdges).distinctBy { it.edgeId }
-        val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(projectId, combinedNodes, rawEdgesToResolve)
+        val resolvedEdges = PolyglotAstExtractor.resolveCrossFileEdges(ctx.projectId, ctx.combinedNodes, rawEdgesToResolve)
 
-        val hasKmpDecls = changedNodes.any { it.kind == "expect_decl" || it.kind == "actual_decl" }
+        val hasKmpDecls = ctx.changedNodes.any { it.kind == "expect_decl" || it.kind == "actual_decl" }
         val kmpEdges = if (hasKmpDecls) {
-            ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(projectId, combinedNodes)
+            ModuleBoundaryDetector.synthesizeKmpExpectActualEdges(ctx.projectId, ctx.combinedNodes)
         } else {
             emptyList()
         }
@@ -644,9 +648,7 @@ class WorkspaceIndexer(
         }
 
         return store.withSavepoint("sp_finalize_index") {
-            val mergedNodeMap = store.listNodes(projectId).associateBy { it.nodeId }.toMutableMap()
-            for (n in modNodes) mergedNodeMap[n.nodeId] = n
-            for (n in scanResult.changedNodes) mergedNodeMap[n.nodeId] = n
+            val mergedNodeMap = initialNodeMap(projectId, modNodes, scanResult.changedNodes)
 
             val (allNewComposeNodes, allNewComposeParams) = processComposeFiles(
                 ctx = scanCtx,
@@ -655,22 +657,20 @@ class WorkspaceIndexer(
                 mergedNodeMap = mergedNodeMap
             )
 
-            val declaredSymbols = scanResult.purgedSymbolNames.toMutableSet()
-            for (node in scanResult.changedNodes) {
-                if (node.name.isNotBlank()) declaredSymbols.add(node.name)
-                if (node.qualifiedName.isNotBlank()) declaredSymbols.add(node.qualifiedName)
-            }
-
+            val declaredSymbols = collectDeclaredSymbols(scanResult)
             val combinedNodes = mergedNodeMap.values.toList()
+
             val (resolvedEdges, kmpEdges) = resolveWorkspaceEdges(
-                projectId = projectId,
-                combinedNodes = combinedNodes,
-                pendingRawEdges = scanResult.pendingRawEdges,
-                allNewComposeNodes = allNewComposeNodes,
-                allNewComposeParams = allNewComposeParams,
-                isFullReindex = isFullReindex,
-                declaredSymbols = declaredSymbols,
-                changedNodes = scanResult.changedNodes
+                EdgeResolutionContext(
+                    projectId = projectId,
+                    combinedNodes = combinedNodes,
+                    pendingRawEdges = scanResult.pendingRawEdges,
+                    allNewComposeNodes = allNewComposeNodes,
+                    allNewComposeParams = allNewComposeParams,
+                    isFullReindex = isFullReindex,
+                    declaredSymbols = declaredSymbols,
+                    changedNodes = scanResult.changedNodes
+                )
             )
 
             reevaluateMarkdownFiles(
@@ -679,31 +679,63 @@ class WorkspaceIndexer(
                 reEvaluate = scanResult.codeFilesIndexed > 0 || filesDeleted > 0
             )
 
-            val docNodes = mutableListOf<GraphNode>()
-            val docEdges = mutableListOf<GraphEdge>()
-            for ((relMd, mdText) in scanResult.markdownQueue) {
-                val (dNodes, dEdges) = VaultPlanBridge.extractMarkdownAndPlans(projectId, relMd, mdText, combinedNodes)
-                docNodes.addAll(dNodes)
-                docEdges.addAll(dEdges)
-            }
-
+            val (docNodes, docEdges) = extractDocumentationNodes(projectId, scanResult, combinedNodes)
             val endpointNodes = extractEndpoints(projectId, resolvedEdges, docEdges)
 
             val allUpsertNodes = modNodes + scanResult.changedNodes.distinctBy { it.nodeId } + docNodes.distinctBy { it.nodeId } + endpointNodes
             val allUpsertEdges = modEdges + resolvedEdges + kmpEdges + docEdges
 
-            store.upsertNodesAndEdges(
-                projectId = projectId,
-                nodes = allUpsertNodes,
-                edges = allUpsertEdges
-            )
-            if (filesDeleted > 0 && allUpsertNodes.isEmpty() && allUpsertEdges.isEmpty()) {
-                store.recomputeDegrees(projectId)
-            }
-            store.setProjectMetadata(projectId, "extractor_version", PolyglotAstExtractor.EXTRACTOR_VERSION)
-
+            persistFinalizedGraph(projectId, allUpsertNodes, allUpsertEdges, filesDeleted)
             buildStatsResponse(projectId, scanResult.filesIndexed, scanResult.filesSkipped)
         }
+    }
+
+    private fun initialNodeMap(
+        projectId: String,
+        modNodes: List<GraphNode>,
+        changedNodes: List<GraphNode>
+    ): MutableMap<String, GraphNode> {
+        val merged = store.listNodes(projectId).associateBy { it.nodeId }.toMutableMap()
+        for (n in modNodes) merged[n.nodeId] = n
+        for (n in changedNodes) merged[n.nodeId] = n
+        return merged
+    }
+
+    private fun collectDeclaredSymbols(scanResult: ScanCollector): Set<String> {
+        val declared = scanResult.purgedSymbolNames.toMutableSet()
+        for (node in scanResult.changedNodes) {
+            if (node.name.isNotBlank()) declared.add(node.name)
+            if (node.qualifiedName.isNotBlank()) declared.add(node.qualifiedName)
+        }
+        return declared
+    }
+
+    private fun extractDocumentationNodes(
+        projectId: String,
+        scanResult: ScanCollector,
+        combinedNodes: List<GraphNode>
+    ): Pair<List<GraphNode>, List<GraphEdge>> {
+        val docNodes = mutableListOf<GraphNode>()
+        val docEdges = mutableListOf<GraphEdge>()
+        for ((relMd, mdText) in scanResult.markdownQueue) {
+            val (dNodes, dEdges) = VaultPlanBridge.extractMarkdownAndPlans(projectId, relMd, mdText, combinedNodes)
+            docNodes.addAll(dNodes)
+            docEdges.addAll(dEdges)
+        }
+        return Pair(docNodes, docEdges)
+    }
+
+    private fun persistFinalizedGraph(
+        projectId: String,
+        nodes: List<GraphNode>,
+        edges: List<GraphEdge>,
+        filesDeleted: Int
+    ) {
+        store.upsertNodesAndEdges(projectId = projectId, nodes = nodes, edges = edges)
+        if (filesDeleted > 0 && nodes.isEmpty() && edges.isEmpty()) {
+            store.recomputeDegrees(projectId)
+        }
+        store.setProjectMetadata(projectId, "extractor_version", PolyglotAstExtractor.EXTRACTOR_VERSION)
     }
 
     /**

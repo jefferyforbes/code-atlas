@@ -387,74 +387,76 @@ internal object NativeSystemsAstExtractor {
         return -1
     }
 
-    private fun extractRustImplTarget(headerText: String): String? {
-        var text = headerText.trim()
-        if (text.startsWith("unsafe")) {
-            text = text.removePrefix("unsafe").trim()
-        }
-        if (!text.startsWith("impl")) return null
-        text = text.removePrefix("impl").trim()
+    private fun stripImplPrefix(raw: String): String? {
+        val trimmed = raw.trim()
+        val withoutUnsafe = if (trimmed.startsWith("unsafe")) trimmed.removePrefix("unsafe").trim() else trimmed
+        if (!withoutUnsafe.startsWith("impl")) return null
+        return withoutUnsafe.removePrefix("impl").trim()
+    }
 
-        if (text.startsWith("<")) {
-            var depth = 0
-            var closeIdx = -1
-            for (i in text.indices) {
-                if (text[i] == '<') depth++
-                else if (text[i] == '>') {
-                    depth--
-                    if (depth == 0) {
-                        closeIdx = i
-                        break
-                    }
-                }
-            }
-            if (closeIdx != -1) {
-                text = text.substring(closeIdx + 1).trim()
-            }
-        }
-
-        var forIdx = -1
+    private fun stripLeadingGenerics(text: String): String {
+        if (!text.startsWith("<")) return text
         var depth = 0
-        var i = 0
-        while (i < text.length) {
-            val ch = text[i]
-            if (ch == '<') depth++
-            else if (ch == '>') { if (depth > 0) depth-- }
-            else if (depth == 0 && text.startsWith("for", i)) {
-                val beforeOk = i == 0 || text[i - 1].isWhitespace()
-                val afterIdx = i + 3
-                val afterOk = afterIdx >= text.length || text[afterIdx].isWhitespace()
-                if (beforeOk && afterOk) {
-                    forIdx = i
+        for (i in text.indices) {
+            when (text[i]) {
+                '<' -> depth++
+                '>' -> {
+                    depth--
+                    if (depth == 0) return text.substring(i + 1).trim()
                 }
             }
-            i++
         }
+        return text
+    }
 
-        val targetPart = if (forIdx != -1) {
-            text.substring(forIdx + 3).trim()
-        } else {
-            text.trim()
+    private fun isForKeywordBoundary(text: String, index: Int): Boolean {
+        if (!text.startsWith("for", index)) return false
+        val beforeOk = index == 0 || text[index - 1].isWhitespace()
+        val afterIdx = index + 3
+        val afterOk = afterIdx >= text.length || text[afterIdx].isWhitespace()
+        return beforeOk && afterOk
+    }
+
+    private fun extractTargetAfterFor(text: String): String {
+        var depth = 0
+        for (i in text.indices) {
+            val ch = text[i]
+            if (ch == '<') {
+                depth++
+            } else if (ch == '>') {
+                if (depth > 0) depth--
+            } else if (depth == 0 && isForKeywordBoundary(text, i)) {
+                return text.substring(i + 3).trim()
+            }
         }
+        return text.trim()
+    }
 
-        var cleaned = targetPart
+    private fun stripTypeModifiers(target: String): String {
+        var cleaned = target
         while (cleaned.startsWith("&") || cleaned.startsWith("*")) {
             cleaned = cleaned.substring(1).trim()
         }
         if (cleaned.startsWith("'")) {
             cleaned = cleaned.replaceFirst(Regex("""^'[A-Za-z0-9_]+\s*"""), "").trim()
         }
-        if (cleaned.startsWith("mut ")) {
-            cleaned = cleaned.removePrefix("mut").trim()
-        } else if (cleaned.startsWith("const ")) {
-            cleaned = cleaned.removePrefix("const").trim()
+        return when {
+            cleaned.startsWith("mut ") -> cleaned.removePrefix("mut").trim()
+            cleaned.startsWith("const ") -> cleaned.removePrefix("const").trim()
+            else -> cleaned
         }
+    }
 
-        val typeBeforeGenerics = cleaned
+    private fun extractRustImplTarget(headerText: String): String? {
+        val withoutImpl = stripImplPrefix(headerText) ?: return null
+        val withoutGenerics = stripLeadingGenerics(withoutImpl)
+        val targetPart = extractTargetAfterFor(withoutGenerics)
+        val cleaned = stripTypeModifiers(targetPart)
+
+        val structName = cleaned
             .substringBefore('<')
             .substringBefore("where")
             .trim()
-        val structName = typeBeforeGenerics
             .substringAfterLast("::")
             .trim()
 
