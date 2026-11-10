@@ -5,6 +5,8 @@ import atlas.engine.CodegraphCompatibilityEngine
 import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkspaceInitEngine
 import atlas.mcp.AtlasMcpServer
+import atlas.model.RfcGroundResult
+import atlas.model.SpikeAnalysisResult
 import atlas.util.PlatformFiles
 import kotlin.math.roundToInt
 import kotlinx.serialization.encodeToString
@@ -143,7 +145,8 @@ class AtlasCli {
         }
 
         private val CODEGRAPH_INSPECTION_COMMANDS = setOf(
-            "explore", "callers", "callees", "impact", "status", "files", "search", "node", "context", "index", "synthesize-scope"
+            "explore", "callers", "callees", "impact", "status", "files", "search", "node", "context", "index", "synthesize-scope",
+            "rfc-ground", "rfc_ground", "spike"
         )
         private val CODEGRAPH_REMEDIATION_COMMANDS = setOf(
             "audit", "fix", "doctor", "dead-code", "record-memory", "verify-remediation", "query"
@@ -164,6 +167,8 @@ class AtlasCli {
             "context" -> runContextCommand(server, args)
             "index" -> runIndexCommand(server, args)
             "synthesize-scope" -> runSynthesizeScopeCommand(server, args)
+            "rfc-ground", "rfc_ground" -> runRfcGroundCommand(server, args)
+            "spike" -> runSpikeCommand(server, args)
             else -> 1
         }
 
@@ -233,6 +238,35 @@ class AtlasCli {
             return 0
         }
 
+        private fun runRfcGroundCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val effectiveServer = server.resolveServerForProject(args.project, args.workspace)
+            val queryText = getQueryText(args).ifEmpty { args.target }
+            val result = effectiveServer.rfcGroundEngine.groundSubsystem(args.project, queryText)
+            val text = if (args.isJson) jsonPretty.encodeToString(result) else result.markdownTable
+            println(text)
+            return 0
+        }
+
+        private fun runSpikeCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val effectiveServer = server.resolveServerForProject(args.project, args.workspace)
+            val hypothesis = args.hypothesisArg ?: "decoupling"
+            val fromArg = args.target.ifEmpty { null }
+            val toArg = args.secondaryTarget.ifEmpty { null }
+            val result = effectiveServer.spikeAnalysisEngine.runSpike(
+                projectId = args.project,
+                hypothesis = hypothesis,
+                from = fromArg,
+                to = toArg,
+                target = fromArg,
+                forbiddenLayer = args.forbiddenLayerArg,
+                maxFiles = args.maxFilesArg,
+                maxHops = if (args.hasExplicitDepth) args.depth else 10
+            )
+            val text = if (args.isJson) jsonPretty.encodeToString(result) else result.message
+            println(text)
+            return if (result.passed) 0 else 1
+        }
+
         private fun runIndexCommand(server: AtlasMcpServer, args: CliArgs): Int {
             val effectiveServer = server.resolveServerForProject(args.project)
             val expandedPaths = args.paths.map { resolveUserHome(it) }
@@ -266,6 +300,9 @@ class AtlasCli {
             }
             if (args.action == "architect_context" || args.action == "architect-context") {
                 return runAuditArchitectContext(server, args.project, filterPaths, args.depth, args.isJson)
+            }
+            if (args.action == "spike") {
+                return runSpikeCommand(server, args)
             }
             if (args.ruleIdArg?.startsWith("SKILL") == true) {
                 return runAuditSkills(server, args.project, filterPaths, args.ruleIdArg, args.isJson)
@@ -548,6 +585,9 @@ class AtlasCli {
         private fun runQueryCommand(server: AtlasMcpServer, args: CliArgs): Int {
             if (args.action == "explore") {
                 return runExploreQuery(server, args)
+            }
+            if (args.action == "rfc_ground" || args.action == "rfc-ground") {
+                return runRfcGroundCommand(server, args)
             }
             return runStandardQuery(server, args)
         }
@@ -936,6 +976,8 @@ class AtlasCli {
                   migrate-tools      Detect and optionally migrate deprecated codegraph_* tool calls
                   record-memory      Record execution outcome annotation for a node into work memory
                   verify-remediation Verify and optionally apply autonomous remediation with pre-flight & post-verification checks
+                  rfc-ground         Extract dense subsystem discovery table (contracts, entry points, tiers)
+                  spike              Run topological hypothesis test (decoupling BFS, clean-arch, blast-ceiling)
                   serve-mcp          Run JSON-RPC 2.0 MCP server over stdio
                   version            Print version information
 
@@ -998,6 +1040,14 @@ class AtlasCli {
                   --compiler-reports <d>   Path to Compose Compiler metrics directory or report file
                   --trace-log <p>          Path to @TraceRecomposition JSONL/Logcat telemetry log
                   --strong-skipping <bool> Evaluate under Kotlin 2.0+ Strong Skipping mode (default: true)
+
+                Spike & RFC-Ground Options:
+                  --hypothesis <h>         Hypothesis type (decoupling, clean-arch, blast-ceiling; default: decoupling)
+                  --from <sym|module>      Source symbol, module, or package for decoupling
+                  --to <sym|module>        Target symbol, module, or package for decoupling
+                  --query <concept>        Subsystem concept query for rfc-ground table extraction
+                  --forbidden-layer <l>    Forbidden layer or tier identifier for clean-arch (e.g. presentation, data)
+                  --max-files <n>          Maximum blast-radius file ceiling for blast-ceiling spike (default: 20)
 
                 Remediation Options:
                   --complexity             Run complexity doctor mode
