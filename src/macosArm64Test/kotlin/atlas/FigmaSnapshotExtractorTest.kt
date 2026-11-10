@@ -10,6 +10,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+// Mock fixture data for hermetic offline testing without live network
 class FigmaSnapshotExtractorTest {
 
     private fun withTempStore(block: (SqliteGraphStore) -> Unit) {

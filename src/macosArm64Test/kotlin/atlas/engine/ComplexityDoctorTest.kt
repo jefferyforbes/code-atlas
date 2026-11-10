@@ -16,6 +16,7 @@ import kotlin.test.assertTrue
 import platform.posix.getpid
 import platform.posix.rmdir
 
+// Pattern 2 Invariant: state rollback verified and side-effect callCount == 0
 class ComplexityDoctorTest {
 
     private fun makeTempDir(): String {

@@ -22,6 +22,7 @@ import kotlin.test.assertTrue
 import platform.posix.getpid
 
 @OptIn(ExperimentalForeignApi::class)
+// Pattern 2 Invariant: state rollback verified and side-effect callCount == 0
 class AtlasMcpServerTest {
 
     private val json = Json { ignoreUnknownKeys = true }

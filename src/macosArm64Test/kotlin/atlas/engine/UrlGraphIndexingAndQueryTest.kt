@@ -18,6 +18,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+// Mock fixtures for hermetic offline testing without live network
 class UrlGraphIndexingAndQueryTest {
 
     private fun makeTempDir(): String {

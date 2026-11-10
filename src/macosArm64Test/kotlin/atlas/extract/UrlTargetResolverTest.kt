@@ -17,6 +17,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+// Mock fixture URLs for hermetic offline URL resolver testing without live network
 class UrlTargetResolverTest {
 
     @Test

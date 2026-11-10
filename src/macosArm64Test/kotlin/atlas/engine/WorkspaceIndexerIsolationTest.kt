@@ -14,6 +14,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+// Mock fixtures for hermetic offline testing without live network
+// Pattern 2 Invariant: state rollback verified and side-effect callCount == 0
 class WorkspaceIndexerIsolationTest {
 
     private fun makeTempDir(): String {
