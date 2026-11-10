@@ -50,10 +50,10 @@ internal object NativeSystemsAstExtractor {
         RegexOption.MULTILINE
     )
     private val CPP_FUNC_RE = Regex(
-        """^(?<indent>[ \t]*)(?:template\s*<[^>]*>\s*)?(?:(?:inline|static|virtual|explicit|constexpr|extern|friend|const|unsigned|signed|typename)\s+)*(?:[A-Za-z_][A-Za-z0-9_:<>*,&\s]*?)\b(?<name>(?:[A-Za-z_][A-Za-z0-9_]*::)?[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?\{""",
+        """^(?<indent>[ \t]*)(?:template\s*<[^>]*>\s*)?(?:(?:inline|static|virtual|explicit|constexpr|extern|friend|const|unsigned|signed|typename)\s+)*(?:(?:[A-Za-z_][A-Za-z0-9_:<>*,&\s]*?)\s+)?(?<name>~?(?:[A-Za-z_][A-Za-z0-9_]*::)?[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?(?:\s*:[^;{}]*)?\s*\{""",
         RegexOption.MULTILINE
     )
-    private val CPP_FUNC_STOPWORDS = setOf("main", "sizeof", "alignof", "decltype", "static_assert")
+    private val CPP_FUNC_STOPWORDS = setOf("main", "sizeof", "alignof", "decltype", "static_assert", "if", "for", "while", "switch", "catch", "else", "do", "return")
     private val CPP_DOC_KINDS = setOf("class", "struct", "enum")
     private val CPP_SCOPE_KINDS = setOf("class", "struct", "namespace")
 
@@ -523,6 +523,24 @@ internal object NativeSystemsAstExtractor {
         return isTopLevel && isPub && kind !in RUST_NON_COUNTABLE_TOP_LEVEL
     }
 
+    private fun resolveRustTargetSym(callee: String, receiver: String?): String = when {
+        callee == "new" && !receiver.isNullOrEmpty() -> receiver
+        !receiver.isNullOrEmpty() -> "$receiver::$callee"
+        else -> callee
+    }
+
+    private fun isSelfRustCall(targetSym: String, callee: String, receiver: String?, nodeName: String): Boolean {
+        if (targetSym == nodeName) return true
+        if (callee != nodeName) return false
+        return receiver.isNullOrEmpty() || receiver == "self"
+    }
+
+    private fun shouldSkipRustCall(targetSym: String, isSelfCall: Boolean, seenCallees: MutableSet<String>): Boolean {
+        if (isSelfCall) return true
+        if (targetSym in PolyglotAstExtractor.CALL_STOPWORDS) return true
+        return !seenCallees.add(targetSym)
+    }
+
     private fun parseRustCallEdge(
         callMatch: MatchResult,
         node: GraphNode,
@@ -531,13 +549,11 @@ internal object NativeSystemsAstExtractor {
     ): GraphEdge? {
         val receiver = callMatch.groups["receiver"]?.value?.trim()
         val callee = callMatch.groups["callee"]?.value ?: return null
-        val targetSym = when {
-            callee == "new" && !receiver.isNullOrEmpty() -> receiver
-            !receiver.isNullOrEmpty() -> "$receiver::$callee"
-            else -> callee
-        }
-        val isSelfCall = targetSym == node.name || (callee == node.name && (receiver.isNullOrEmpty() || receiver == "self"))
-        if (isSelfCall || targetSym in PolyglotAstExtractor.CALL_STOPWORDS || !seenCallees.add(targetSym)) return null
+        val callType = callMatch.groups["callType"]?.value ?: "("
+        if (callType == "{") return null
+        val targetSym = resolveRustTargetSym(callee, receiver)
+        val isSelf = isSelfRustCall(targetSym, callee, receiver, node.name)
+        if (shouldSkipRustCall(targetSym, isSelf, seenCallees)) return null
 
         val callLine = node.startLine + PolyglotAstExtractor.countNewlinesBefore(body, callMatch.range.first)
         return GraphEdge(
@@ -781,8 +797,7 @@ internal object NativeSystemsAstExtractor {
 
     private fun isSkippedCppFunction(rawName: String, nodes: List<GraphNode>, startLine: Int): Boolean {
         val shortName = rawName.substringAfterLast("::")
-        if (isCppFunctionStopword(shortName)) return true
-        return isCppConstructor(nodes, shortName, startLine)
+        return isCppFunctionStopword(shortName)
     }
 
     private fun findEnclosingCppClass(nodes: List<GraphNode>, startLine: Int): GraphNode? {
@@ -888,6 +903,8 @@ internal object NativeSystemsAstExtractor {
     ): GraphEdge? {
         val receiver = callMatch.groups["receiver"]?.value?.trim()
         val callee = callMatch.groups["callee"]?.value ?: return null
+        val callType = callMatch.groups["callType"]?.value ?: "("
+        if (callType == "{") return null
         val targetSym = if (!receiver.isNullOrEmpty()) "$receiver::$callee" else callee
         val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
         if (isSelfCall || callee in PolyglotAstExtractor.CALL_STOPWORDS || !seenCallees.add(targetSym)) return null

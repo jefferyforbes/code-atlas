@@ -518,4 +518,112 @@ class PolyglotExtractorTest {
         assertNotNull(runEngineMethod, "OuterEngine::runEngine method must be extracted")
         assertEquals("proj:src/nested.cpp#OuterEngine::runEngine", runEngineMethod.nodeId)
     }
+
+    @Test
+    fun `KotlinAstExtractor extracts backtick quoted function names and trailing lambda calls`() {
+        val ktSource = """
+            package test.behavior
+
+            class TestRunner {
+                fun `verify database transactions rollback cleanly on error`() {
+                    statement.use { stmt ->
+                        stmt.step()
+                    }
+                }
+            }
+        """.trimIndent()
+        val (nodes, edges, _) = PolyglotAstExtractor.extractFile("proj", "src/TestRunner.kt", ktSource)
+        val testFunc = nodes.firstOrNull { it.name == "verify database transactions rollback cleanly on error" }
+        assertNotNull(testFunc, "Backtick function declaration must be extracted")
+        assertEquals("function", testFunc.kind)
+
+        val useCall = edges.firstOrNull { it.edgeType == "CALLS" && (it.targetNodeId == "sym:use" || it.targetNodeId == "sym:statement.use") }
+        assertNotNull(useCall, "Trailing lambda call .use { ... } must be extracted")
+    }
+
+    @Test
+    fun `NativeSystemsAstExtractor extracts Cpp constructor with member initializer list`() {
+        val cppSource = """
+            class SocketChannel {
+            private:
+                int m_fd;
+                int m_port;
+            public:
+                SocketChannel(int fd, int port) : m_fd(fd), m_port(port) {
+                    initChannel();
+                }
+                void initChannel() {}
+            };
+        """.trimIndent()
+        val (nodes, edges, _) = PolyglotAstExtractor.extractFile("proj", "src/socket.cpp", cppSource)
+        val ctor = nodes.firstOrNull { it.name == "SocketChannel" && it.kind == "function" }
+        assertNotNull(ctor, "Cpp constructor with member initializer list must be extracted")
+        val call = edges.firstOrNull { it.edgeType == "CALLS" && it.targetNodeId == "sym:initChannel" }
+        assertNotNull(call, "Call from constructor body must be extracted")
+    }
+
+    @Test
+    fun `TypeScriptAstExtractor extracts namespace combined and type imports`() {
+        val tsSource = """
+            import React, { useState, useEffect as ue } from 'react';
+            import * as fs from 'fs';
+            import type { UserProfile } from './types';
+
+            export function renderApp() {
+                useState();
+            }
+        """.trimIndent()
+        val (_, edges, _) = PolyglotAstExtractor.extractFile("proj", "src/app.tsx", tsSource)
+        val imports = edges.filter { it.edgeType == "IMPORTS" }.map { it.targetNodeId }
+        assertTrue("sym:React" in imports, "Default import React must be captured")
+        assertTrue("sym:useState" in imports, "Named import useState must be captured")
+        assertTrue("sym:useEffect" in imports, "Aliased named import useEffect must be captured")
+        assertTrue("sym:fs" in imports, "Namespace import fs must be captured")
+        assertTrue("sym:UserProfile" in imports, "Type import UserProfile must be captured")
+    }
+
+    @Test
+    fun `PythonAstExtractor extracts imported symbol tokens from from-import statements`() {
+        val pySource = """
+            from os.path import exists, join as pjoin
+            import json, sys
+
+            def check_file(path):
+                return exists(path)
+        """.trimIndent()
+        val (_, edges, _) = PolyglotAstExtractor.extractFile("proj", "src/check.py", pySource)
+        val imports = edges.filter { it.edgeType == "IMPORTS" }.map { it.targetNodeId }
+        assertTrue("sym:os.path" in imports, "Module os.path must be captured")
+        assertTrue("sym:exists" in imports, "Direct symbol exists must be captured")
+        assertTrue("sym:os.path.exists" in imports, "FQN os.path.exists must be captured")
+        assertTrue("sym:join" in imports, "Imported symbol join must be captured")
+        assertTrue("sym:json" in imports, "Imported module json must be captured")
+        assertTrue("sym:sys" in imports, "Imported module sys must be captured")
+    }
+
+    @Test
+    fun `extractFile handles trailing commas and blank components in TypeScript and Python import clauses`() {
+        val tsSource = """
+            import { Alpha, , Beta, } from './services';
+            export function run() { Alpha(); }
+        """.trimIndent()
+        val (_, tsEdges, _) = PolyglotAstExtractor.extractFile("proj", "src/run.ts", tsSource)
+        val tsImports = tsEdges.filter { it.edgeType == "IMPORTS" }.map { it.targetNodeId }.toSet()
+        assertTrue("sym:Alpha" in tsImports)
+        assertTrue("sym:Beta" in tsImports)
+
+        val pySource = """
+            from os.path import exists, , isdir,
+            import sys, , os,
+
+            def check():
+                return exists(".")
+        """.trimIndent()
+        val (_, pyEdges, _) = PolyglotAstExtractor.extractFile("proj", "src/run.py", pySource)
+        val pyImports = pyEdges.filter { it.edgeType == "IMPORTS" }.map { it.targetNodeId }.toSet()
+        assertTrue("sym:exists" in pyImports)
+        assertTrue("sym:isdir" in pyImports)
+        assertTrue("sym:sys" in pyImports)
+        assertTrue("sym:os" in pyImports)
+    }
 }

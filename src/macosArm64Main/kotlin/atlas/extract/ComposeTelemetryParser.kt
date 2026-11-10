@@ -6,16 +6,19 @@ import atlas.extract.ComposeStabilityExtractor.Companion.MAX_TELEMETRY_LINES
 import atlas.extract.ComposeStabilityExtractor.TraceRecord
 import atlas.model.ComposeNodeRecord
 import atlas.model.ComposeParamRecord
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import platform.posix.time
 
 /**
  * Compose Compiler metrics report (`*-composables.txt`) and `@TraceRecomposition` runtime telemetry parser.
  */
+@OptIn(ExperimentalForeignApi::class)
 internal object ComposeTelemetryParser {
 
     private val COMPILER_HEADER_RE = Regex("""^(.*?\bfun\s+)([A-Za-z0-9_.]+)\s*\(""")
@@ -211,7 +214,7 @@ internal object ComposeTelemetryParser {
             val skip = extractJsonCount(obj, "skip_count", "skip")
             val dirtyArr = obj["dirty_params"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
             val dirtyJson = formatDirtyParamsJson(dirtyArr)
-            val ts = obj["recorded_at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 1729190000L
+            val ts = obj["recorded_at"]?.jsonPrimitive?.content?.toLongOrNull() ?: time(null)
 
             TraceRecord(
                 fqNameOrNodeId = target,
@@ -246,7 +249,7 @@ internal object ComposeTelemetryParser {
             recompositionCount = recomp,
             skipCount = skip,
             dirtyParamsJson = dirtyJson,
-            recordedAt = 1729190000L
+            recordedAt = time(null)
         )
     }
 

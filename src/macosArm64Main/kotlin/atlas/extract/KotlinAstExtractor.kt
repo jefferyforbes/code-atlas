@@ -25,7 +25,7 @@ internal object KotlinAstExtractor {
     private val KT_DECL_RE = Regex(
         """^(?<indent>[ \t]*)(?<annotations>(?:@[A-Za-z0-9_]+(?:\((?:[^()]|\([^()]*\))*\))?\s*)*)""" +
             """(?<modifiers>(?:(?:public|internal|private|protected|open|abstract|sealed|data|value|inline|suspend|expect|actual|override|companion|fun|final|inner|enum|annotation|operator|infix|tailrec|external)\s+)*)""" +
-            """(?<kw>class|interface|object|fun|typealias)(?:\s*<(?:[^<>]|<[^<>]*>)+>)?(?:\s+(?:[A-Za-z0-9_<>?,.\t ]+\.)?(?<name>[A-Za-z0-9_]+))?""",
+            """(?<kw>class|interface|object|fun|typealias)(?:\s*<(?:[^<>]|<[^<>]*>)+>)?(?:\s+(?:[A-Za-z0-9_<>?,.\t ]+\.)?(?<name>[A-Za-z0-9_]+|`[^`\r\n]+`))?""",
         RegexOption.MULTILINE
     )
 
@@ -228,7 +228,13 @@ internal object KotlinAstExtractor {
     }
 
     private fun resolveKotlinDeclName(rawName: String?, kw: String, modTokens: Set<String>): String? {
-        if (!rawName.isNullOrEmpty()) return rawName
+        if (!rawName.isNullOrEmpty()) {
+            return if (rawName.startsWith('`') && rawName.endsWith('`') && rawName.length > 2) {
+                rawName.substring(1, rawName.length - 1)
+            } else {
+                rawName
+            }
+        }
         if (kw == "object" && "companion" in modTokens) return "Companion"
         return null
     }
@@ -339,9 +345,9 @@ internal object KotlinAstExtractor {
         }
     }
 
-    private fun isStandardCallEligible(nodeName: String, receiver: String?, callee: String): Boolean {
+    private fun isStandardCallEligible(nodeName: String, receiver: String?, callee: String, callType: String): Boolean {
         val isSelf = callee == nodeName && (receiver.isNullOrEmpty() || receiver == "this")
-        return !isSelf && callee !in PolyglotAstExtractor.CALL_STOPWORDS
+        return !isSelf && PolyglotAstExtractor.isValidCallMatch(callee, receiver, callType)
     }
 
     private fun extractKotlinStandardCallEdges(
@@ -355,7 +361,8 @@ internal object KotlinAstExtractor {
         for (callMatch in PolyglotAstExtractor.CALL_RE.findAll(body)) {
             val receiver = callMatch.groups["receiver"]?.value?.trim()
             val callee = callMatch.groups["callee"]?.value ?: continue
-            if (!isStandardCallEligible(node.name, receiver, callee)) continue
+            val callType = callMatch.groups["callType"]?.value ?: "("
+            if (!isStandardCallEligible(node.name, receiver, callee, callType)) continue
 
             val (targetSym, provenance) = resolveCallTargetAndProvenance(receiver, callee, localReceiverTypes)
             if (seenCallees.add(targetSym)) {

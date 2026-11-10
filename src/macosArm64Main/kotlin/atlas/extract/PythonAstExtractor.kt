@@ -18,7 +18,8 @@ import atlas.model.GraphNode
  */
 internal object PythonAstExtractor {
 
-    private val PY_IMP_RE = Regex("""^\s*(?:from\s+([a-zA-Z0-9_.]+)\s+import|import\s+([a-zA-Z0-9_.]+))""", RegexOption.MULTILINE)
+    private val PY_FROM_IMP_RE = Regex("""^\s*from\s+([a-zA-Z0-9_.]+)\s+import\s+([^#\r\n;]+)""", RegexOption.MULTILINE)
+    private val PY_PLAIN_IMP_RE = Regex("""^\s*import\s+([^#\r\n;]+)""", RegexOption.MULTILINE)
     private val PY_DECL_RE = Regex("""^(?<indent>[ \t]*)(?<kw>class|def|async\s+def)\s+(?<name>[A-Za-z0-9_]+)""", RegexOption.MULTILINE)
     private val WHITESPACE_RE = Regex("""\s+""")
 
@@ -442,14 +443,57 @@ internal object PythonAstExtractor {
         return true
     }
 
+    private fun extractFromImportSymbols(
+        mod: String,
+        clause: String,
+        lineNo: Int,
+        imports: MutableList<Pair<String, Int>>
+    ) {
+        if (mod.isNotEmpty()) {
+            imports.add(Pair(mod, lineNo))
+        }
+        val cleanClause = clause.removePrefix("(").removeSuffix(")")
+        for (part in cleanClause.split(',').filter { it.isNotBlank() }) {
+            val sym = part.trim().substringBefore(" as ").trim()
+            if (sym.isNotEmpty() && sym != "*") {
+                imports.add(Pair(sym, lineNo))
+                if (mod.isNotEmpty()) {
+                    imports.add(Pair("$mod.$sym", lineNo))
+                }
+            }
+        }
+    }
+
+    private fun extractPlainImportModules(
+        clause: String,
+        lineNo: Int,
+        imports: MutableList<Pair<String, Int>>
+    ) {
+        for (part in clause.split(',').filter { it.isNotBlank() }) {
+            val mod = part.trim().substringBefore(" as ").trim()
+            if (mod.isNotEmpty()) {
+                imports.add(Pair(mod, lineNo))
+            }
+        }
+    }
+
     private fun extractPythonImports(
         maskedText: String,
         lineIndex: LineOffsetIndex = LineOffsetIndex.from(maskedText)
     ): List<Pair<String, Int>> {
-        return PY_IMP_RE.findAll(maskedText).map { match ->
-            val mod = match.groupValues[1].ifEmpty { match.groupValues[2] }
-            Pair(mod, lineIndex.lineNumberAt(match.range.first))
-        }.toList()
+        val imports = mutableListOf<Pair<String, Int>>()
+        for (match in PY_FROM_IMP_RE.findAll(maskedText)) {
+            val mod = match.groupValues[1].trim()
+            val clause = match.groupValues[2].trim()
+            val lineNo = lineIndex.lineNumberAt(match.range.first)
+            extractFromImportSymbols(mod, clause, lineNo, imports)
+        }
+        for (match in PY_PLAIN_IMP_RE.findAll(maskedText)) {
+            val clause = match.groupValues[1].trim()
+            val lineNo = lineIndex.lineNumberAt(match.range.first)
+            extractPlainImportModules(clause, lineNo, imports)
+        }
+        return imports
     }
 
     private fun buildPythonNodeIdentifiers(
@@ -606,6 +650,8 @@ internal object PythonAstExtractor {
     ): GraphEdge? {
         val receiver = callMatch.groups["receiver"]?.value?.trim()
         val callee = callMatch.groups["callee"]?.value ?: return null
+        val callType = callMatch.groups["callType"]?.value ?: "("
+        if (callType == "{") return null
         val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
         if (!isAllowedPythonCallee(callee, node.name, receiver) || !seenCallees.add(targetSym)) {
             return null
