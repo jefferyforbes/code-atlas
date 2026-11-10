@@ -335,11 +335,23 @@ class ArchitectureRemediationEngine(
         }
     }
 
-    private fun rollbackFiles(writtenPaths: List<String>, fullPath: String, originalContent: String) {
+    private fun rollbackFiles(
+        writtenPaths: List<String>,
+        fullPath: String,
+        originalContent: String,
+        details: MutableList<String>? = null
+    ) {
         for (w in writtenPaths) {
             deleteFileIfPresent(w)
         }
-        PlatformFiles.writeText(fullPath, originalContent)
+        val rolledBack = runCatching {
+            PlatformFiles.writeText(fullPath, originalContent)
+        }.getOrDefault(false)
+        if (!rolledBack || PlatformFiles.readText(fullPath) != originalContent) {
+            val msg = "CRITICAL: Failed to rollback file at $fullPath to original content."
+            PlatformFiles.logWarning("ArchitectureRemediationEngine", msg)
+            details?.add(msg)
+        }
     }
 
     private fun executeTestCommand(
@@ -364,14 +376,19 @@ class ArchitectureRemediationEngine(
         root: String,
         spawnedFiles: List<SpawnedFileRecord>,
         writtenPaths: MutableList<String>
-    ) {
+    ): Boolean {
         for (sf in spawnedFiles) {
             val fPath = "$root/${sf.relPath}"
             val dirCreated = PlatformFiles.mkdirs(fPath.substringBeforeLast('/'))
             if (!dirCreated) PlatformFiles.logWarning("ArchitectureRemediationEngine", "Failed to mkdirs for $fPath")
-            PlatformFiles.writeText(fPath, sf.content)
+            val ok = PlatformFiles.writeText(fPath, sf.content)
+            if (!ok) {
+                PlatformFiles.logWarning("ArchitectureRemediationEngine", "Failed to write spawned file: $fPath")
+                return false
+            }
             writtenPaths.add(fPath)
         }
+        return true
     }
 
     private fun applyFilesAndRunTest(
@@ -384,13 +401,22 @@ class ArchitectureRemediationEngine(
         val writtenPaths = mutableListOf<String>()
         var success = false
         return try {
-            writeSpawnedFiles(req.root, spawnedFiles, writtenPaths)
-            if (req.targetRenameRelPath != null) {
+            val spawnedOk = writeSpawnedFiles(req.root, spawnedFiles, writtenPaths)
+            if (!spawnedOk) {
+                details.add("Failed to write one or more spawned files to disk. Performing rollback.")
+                return false
+            }
+            val primaryOk = if (req.targetRenameRelPath != null) {
                 deleteFileIfPresent(req.fullPath)
-                PlatformFiles.writeText(primaryNewFullPath, cleanModified)
+                val wrote = PlatformFiles.writeText(primaryNewFullPath, cleanModified)
                 writtenPaths.add(primaryNewFullPath)
+                wrote
             } else {
                 PlatformFiles.writeText(req.fullPath, cleanModified)
+            }
+            if (!primaryOk) {
+                details.add("Failed to write primary modified file to disk. Performing rollback.")
+                return false
             }
 
             if (!req.testCommand.isNullOrBlank()) {
@@ -406,7 +432,7 @@ class ArchitectureRemediationEngine(
             false
         } finally {
             if (!success) {
-                rollbackFiles(writtenPaths, req.fullPath, req.originalContent)
+                rollbackFiles(writtenPaths, req.fullPath, req.originalContent, details)
             }
         }
     }
@@ -698,7 +724,11 @@ class ArchitectureRemediationEngine(
         }
         var success = false
         return try {
-            PlatformFiles.writeText(fullPath, modifiedContent)
+            val written = PlatformFiles.writeText(fullPath, modifiedContent)
+            if (!written) {
+                details.add("Failed to write modified content to $fullPath. Performing rollback.")
+                return false
+            }
             if (!testCommand.isNullOrBlank()) {
                 val passed = executeTestCommand(testCommand, details, testTimeoutSeconds)
                 if (!passed) {
@@ -712,7 +742,12 @@ class ArchitectureRemediationEngine(
             false
         } finally {
             if (!success) {
-                PlatformFiles.writeText(fullPath, originalContent)
+                val rolledBack = runCatching {
+                    PlatformFiles.writeText(fullPath, originalContent)
+                }.getOrDefault(false)
+                if (!rolledBack || PlatformFiles.readText(fullPath) != originalContent) {
+                    details.add("CRITICAL: Failed to rollback file at $fullPath to original content.")
+                }
             }
         }
     }

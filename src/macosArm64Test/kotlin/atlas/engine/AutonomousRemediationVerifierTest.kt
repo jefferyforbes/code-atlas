@@ -13,7 +13,9 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import platform.posix.getpid
+import platform.posix.kill
 import platform.posix.rmdir
+import platform.posix.usleep
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -751,16 +753,82 @@ class AutonomousRemediationVerifierTest {
     fun `commands spawning background process tree are terminated cleanly on timeout`() {
         val tmpDir = makeTempDir()
         try {
+            val pidFile = "$tmpDir/bg.pid"
             val mark = kotlin.time.TimeSource.Monotonic.markNow()
             val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(
                 tmpDir,
-                "sh -c '(sleep 10 &) && sleep 10'",
+                "sh -c '(sleep 10 & echo \$! > \"$pidFile\") && sleep 10'",
                 timeoutSeconds = 1
             )
             val elapsed = mark.elapsedNow()
 
             assertEquals(AutonomousRemediationVerifier.TIMEOUT_EXIT_CODE, exitCode)
             assertTrue(elapsed.inWholeMilliseconds < 4000, "Process tree should be killed promptly, took ${elapsed.inWholeMilliseconds}ms")
+
+            if (PlatformFiles.exists(pidFile)) {
+                val bgPid = PlatformFiles.readText(pidFile).trim().toIntOrNull()
+                if (bgPid != null) {
+                    var alive = true
+                    for (i in 0 until 50) {
+                        if (kill(bgPid, 0) != 0) {
+                            alive = false
+                            break
+                        }
+                        usleep(10_000u)
+                    }
+                    assertFalse(alive, "Background child process $bgPid must be terminated by supervisor on timeout")
+                }
+            }
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun `commands failing with background process tree terminate child processes cleanly`() {
+        val tmpDir = makeTempDir()
+        try {
+            val pidFile = "$tmpDir/bg_fail.pid"
+            val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(
+                tmpDir,
+                "sh -c '(sleep 10 & echo \$! > \"$pidFile\") && exit 1'",
+                timeoutSeconds = 5
+            )
+
+            assertEquals(1, exitCode)
+            if (PlatformFiles.exists(pidFile)) {
+                val bgPid = PlatformFiles.readText(pidFile).trim().toIntOrNull()
+                if (bgPid != null) {
+                    var alive = true
+                    for (i in 0 until 50) {
+                        if (kill(bgPid, 0) != 0) {
+                            alive = false
+                            break
+                        }
+                        usleep(10_000u)
+                    }
+                    assertFalse(alive, "Background child process $bgPid must be terminated on command failure")
+                }
+            }
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun `interactive commands reading stdin receive EOF and do not hang`() {
+        val tmpDir = makeTempDir()
+        try {
+            val mark = kotlin.time.TimeSource.Monotonic.markNow()
+            val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(
+                tmpDir,
+                "read line",
+                timeoutSeconds = 5
+            )
+            val elapsed = mark.elapsedNow()
+
+            assertEquals(1, exitCode)
+            assertTrue(elapsed.inWholeMilliseconds < 1500, "Command reading stdin should receive EOF immediately, took ${elapsed.inWholeMilliseconds}ms")
         } finally {
             cleanDir(tmpDir)
         }

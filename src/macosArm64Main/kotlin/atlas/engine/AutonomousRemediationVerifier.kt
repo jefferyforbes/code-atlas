@@ -429,14 +429,19 @@ class AutonomousRemediationVerifier(
     ): String? {
         if (!req.dryRun) {
             if (req.testCommand.isNullOrBlank()) {
-                try {
+                val ok = try {
                     PlatformFiles.writeText(fullPath, modifiedContent)
-                    details.add("Remediation safely written to disk at ${req.relPath}.")
                 } catch (e: Exception) {
                     val msg = "Application failed: Write error writing to $fullPath: ${e.message}"
                     details.add(msg)
                     return msg
                 }
+                if (!ok) {
+                    val msg = "Application failed: Could not write modified content to $fullPath"
+                    details.add(msg)
+                    return msg
+                }
+                details.add("Remediation safely written to disk at ${req.relPath}.")
             } else {
                 details.add("Remediation safely verified and committed to disk at ${req.relPath}.")
             }
@@ -581,6 +586,11 @@ class AutonomousRemediationVerifier(
             if (pid < 0) return -1
             if (pid == 0) {
                 setpgid(0, 0)
+                val devNull = open("/dev/null", O_RDONLY)
+                if (devNull >= 0) {
+                    dup2(devNull, STDIN_FILENO)
+                    close(devNull)
+                }
                 memScoped {
                     val args = allocArray<CPointerVar<ByteVar>>(4)
                     args[0] = "/bin/sh".cstr.ptr
@@ -622,6 +632,7 @@ class AutonomousRemediationVerifier(
 
                         if (startTime.elapsedNow() >= effectiveTimeout) {
                             kill(-pid, SIGKILL)
+                            kill(pid, SIGKILL)
                             for (i in 0 until 50) {
                                 val wr = waitpid(pid, statusPtr.ptr, WNOHANG)
                                 if (wr == pid || wr < 0) break
@@ -634,8 +645,9 @@ class AutonomousRemediationVerifier(
                         usleep(20_000u)
                     }
                 } finally {
+                    kill(-pid, SIGKILL)
                     if (!childTerminated) {
-                        kill(-pid, SIGKILL)
+                        kill(pid, SIGKILL)
                         waitpid(pid, statusPtr.ptr, WNOHANG)
                     }
                 }

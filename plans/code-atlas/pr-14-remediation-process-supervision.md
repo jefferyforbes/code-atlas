@@ -36,6 +36,7 @@ scope:
     - src/macosArm64Main/kotlin/atlas/engine/AutonomousRemediationVerifier.kt
     - src/macosArm64Main/kotlin/atlas/engine/ArchitectureRemediationEngine.kt
     - src/macosArm64Test/kotlin/atlas/engine/AutonomousRemediationVerifierTest.kt
+    - src/macosArm64Test/kotlin/atlas/engine/ArchitectureRemediationEngineTest.kt
   modules:
     - :macosArm64Main
     - :macosArm64Test
