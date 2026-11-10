@@ -1,6 +1,6 @@
 package atlas.engine
 
-import atlas.db.SqliteGraphStore
+import atlas.model.GraphReader
 import atlas.extract.ComplexityExtractor
 import atlas.extract.PolyglotAstExtractor
 import atlas.model.AuditReport
@@ -20,7 +20,7 @@ import kotlin.math.roundToInt
  * AST-backed Architecture Auditor enforcing Clean Architecture layers, BOOST-003, and 3D collision safety.
  */
 class ArchitectureAuditor(
-    private val store: SqliteGraphStore,
+    private val store: GraphReader,
     private val workspaceRoot: String = "."
 ) {
 

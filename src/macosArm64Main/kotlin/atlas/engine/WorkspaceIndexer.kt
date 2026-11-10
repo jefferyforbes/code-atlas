@@ -7,6 +7,8 @@ import atlas.extract.ComposeTypeStabilityAnalyzer
 import atlas.extract.ModuleBoundaryDetector
 import atlas.extract.PolyglotAstExtractor
 import atlas.extract.SemioticLayerClassifier
+import atlas.model.FileRecordUpsert
+import atlas.model.GraphStore
 import atlas.model.ComposeNodeRecord
 import atlas.model.ComposeParamRecord
 import atlas.model.GraphEdge
@@ -26,7 +28,7 @@ import kotlin.math.abs
  */
 class WorkspaceIndexer(
     private val workspaceRoot: String,
-    private val store: SqliteGraphStore
+    private val store: GraphStore
 ) {
     private val composeExtractor = ComposeStabilityExtractor()
 
@@ -74,8 +76,7 @@ class WorkspaceIndexer(
 
     private data class PendingKotlinComposeFile(
         val relStr: String,
-        val sourceText: String,
-        val maskedText: String,
+        val filePath: String,
         val baseEdges: List<GraphEdge>
     )
 
@@ -132,7 +133,7 @@ class WorkspaceIndexer(
             val sourceText = rawBytes.decodeToString()
             scan.markdownQueue.add(Pair(meta.relStr, sourceText))
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = projectId,
                     relPath = meta.relStr,
                     language = "markdown",
@@ -181,7 +182,7 @@ class WorkspaceIndexer(
         val srcSet = SemioticLayerClassifier.detectSourceSet(meta.relStr)
 
         store.upsertFileRecord(
-            SqliteGraphStore.FileRecordUpsert(
+            FileRecordUpsert(
                 projectId = ctx.projectId,
                 relPath = meta.relStr,
                 language = meta.lang,
@@ -195,10 +196,17 @@ class WorkspaceIndexer(
                 topLevelDeclCount = topDeclCount
             )
         )
-        if (meta.lang == "kotlin" && maskedText != null) {
-            scan.pendingKotlinComposeFiles.add(
-                PendingKotlinComposeFile(meta.relStr, sourceText, maskedText, fEdges)
-            )
+        if (meta.lang == "kotlin") {
+            val mightContainComposeOrClass = sourceText.contains("@Composable") ||
+                sourceText.contains("class ") ||
+                sourceText.contains("interface ")
+            if (mightContainComposeOrClass) {
+                scan.pendingKotlinComposeFiles.add(
+                    PendingKotlinComposeFile(meta.relStr, meta.filePath, fEdges)
+                )
+            } else {
+                scan.pendingRawEdges[fileId] = fEdges
+            }
         } else {
             scan.pendingRawEdges[fileId] = fEdges
         }
@@ -421,6 +429,66 @@ class WorkspaceIndexer(
         return merged
     }
 
+    private fun analyzeFileClasses(
+        item: PendingKotlinComposeFile,
+        stabilityPatterns: List<Regex>
+    ): Map<String, Pair<String, String>> {
+        val sourceText = PlatformFiles.readText(item.filePath)
+        val maskedText = PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "kotlin")
+        return composeExtractor.analyzeClassesInSource(sourceText, maskedText, stabilityPatterns)
+    }
+
+    private class ComposeProcessingContext(
+        val ctx: WorkspaceScanContext,
+        val stabilityPatterns: List<Regex>,
+        val precomputedStability: Map<String, Pair<String, String>>,
+        val fileClassStability: Map<String, Map<String, Pair<String, String>>>,
+        val scan: ScanCollector,
+        val mergedNodeMap: MutableMap<String, GraphNode>
+    )
+
+    private fun processSingleComposeFile(
+        item: PendingKotlinComposeFile,
+        pctx: ComposeProcessingContext,
+        allNewComposeNodes: MutableList<ComposeNodeRecord>,
+        allNewComposeParams: MutableList<ComposeParamRecord>
+    ) {
+        val relStr = item.relStr
+        val fileId = "${pctx.ctx.projectId}:$relStr"
+        store.deleteComposeNodesForFile(pctx.ctx.projectId, relStr)
+        val sourceText = PlatformFiles.readText(item.filePath)
+        if (!sourceText.contains("@Composable")) {
+            pctx.scan.pendingRawEdges[fileId] = item.baseEdges
+            return
+        }
+        val maskedText = PolyglotAstExtractor.maskCommentsAndStrings(sourceText, "kotlin")
+        val bundle = composeExtractor.extractWithPrecomputedStability(
+            ComposeStabilityExtractor.PrecomputedComposeInput(
+                projectSlug = pctx.ctx.projectId,
+                relPath = relStr,
+                sourceText = sourceText,
+                masked = maskedText,
+                stabilityPatterns = pctx.stabilityPatterns,
+                localClassStability = resolveFileLocalClassStability(pctx.precomputedStability, pctx.fileClassStability[relStr])
+            )
+        )
+        if (isComposeSourceFile(bundle, sourceText)) {
+            allNewComposeNodes.addAll(bundle.nodes)
+            allNewComposeParams.addAll(bundle.params)
+
+            val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
+            val modId = ModuleBoundaryDetector.resolveModuleId(relStr, pctx.ctx.knownModules)
+            val syncCtx = ComposeFileSyncContext(pctx.ctx.projectId, fileId, relStr, modId, semLayer, archLayer)
+
+            syncComposeNodeRecords(bundle.nodes, syncCtx, pctx.mergedNodeMap, pctx.scan.changedNodes)
+            syncComposeEdgeEntities(bundle.edges, syncCtx, pctx.mergedNodeMap, pctx.scan.changedNodes)
+
+            pctx.scan.pendingRawEdges[fileId] = item.baseEdges + bundle.edges
+        } else {
+            pctx.scan.pendingRawEdges[fileId] = item.baseEdges
+        }
+    }
+
     private fun processComposeFiles(
         ctx: WorkspaceScanContext,
         stabilityPatterns: List<Regex>,
@@ -432,7 +500,7 @@ class WorkspaceIndexer(
         val rawStability = mutableMapOf<String, Pair<String, String>>()
         val fileClassStability = HashMap<String, Map<String, Pair<String, String>>>(scan.pendingKotlinComposeFiles.size)
         for (item in scan.pendingKotlinComposeFiles) {
-            val classesInFile = composeExtractor.analyzeClassesInSource(item.sourceText, item.maskedText, stabilityPatterns)
+            val classesInFile = analyzeFileClasses(item, stabilityPatterns)
             if (classesInFile.isNotEmpty()) {
                 fileClassStability[item.relStr] = classesInFile
                 rawStability.putAll(classesInFile)
@@ -446,36 +514,9 @@ class WorkspaceIndexer(
 
         val allNewComposeNodes = mutableListOf<ComposeNodeRecord>()
         val allNewComposeParams = mutableListOf<ComposeParamRecord>()
+        val pctx = ComposeProcessingContext(ctx, stabilityPatterns, precomputedStability, fileClassStability, scan, mergedNodeMap)
         for (item in scan.pendingKotlinComposeFiles) {
-            val relStr = item.relStr
-            val sourceText = item.sourceText
-            val fileId = "${ctx.projectId}:$relStr"
-            store.deleteComposeNodesForFile(ctx.projectId, relStr)
-            val bundle = composeExtractor.extractWithPrecomputedStability(
-                ComposeStabilityExtractor.PrecomputedComposeInput(
-                    projectSlug = ctx.projectId,
-                    relPath = relStr,
-                    sourceText = sourceText,
-                    masked = item.maskedText,
-                    stabilityPatterns = stabilityPatterns,
-                    localClassStability = resolveFileLocalClassStability(precomputedStability, fileClassStability[relStr])
-                )
-            )
-            if (isComposeSourceFile(bundle, sourceText)) {
-                allNewComposeNodes.addAll(bundle.nodes)
-                allNewComposeParams.addAll(bundle.params)
-
-                val (semLayer, archLayer, _) = SemioticLayerClassifier.classify(relStr)
-                val modId = ModuleBoundaryDetector.resolveModuleId(relStr, ctx.knownModules)
-                val syncCtx = ComposeFileSyncContext(ctx.projectId, fileId, relStr, modId, semLayer, archLayer)
-
-                syncComposeNodeRecords(bundle.nodes, syncCtx, mergedNodeMap, scan.changedNodes)
-                syncComposeEdgeEntities(bundle.edges, syncCtx, mergedNodeMap, scan.changedNodes)
-
-                scan.pendingRawEdges[fileId] = item.baseEdges + bundle.edges
-            } else {
-                scan.pendingRawEdges[fileId] = item.baseEdges
-            }
+            processSingleComposeFile(item, pctx, allNewComposeNodes, allNewComposeParams)
         }
         return Pair(allNewComposeNodes, allNewComposeParams)
     }

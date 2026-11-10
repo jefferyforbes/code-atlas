@@ -220,23 +220,29 @@ class AtlasMcpServer(
         return callToolDirect(name, arguments)
     }
 
+    private fun dispatchCodegraphTool(name: String, arguments: JsonObject): JsonObject = when (name) {
+        "codegraph_explore" -> handleCodegraphExplore(arguments)
+        "codegraph_node" -> handleCodegraphNode(arguments)
+        "codegraph_search" -> handleCodegraphSearch(arguments)
+        "codegraph_callers" -> handleCodegraphCallers(arguments)
+        "codegraph_callees" -> handleCodegraphCallees(arguments)
+        "codegraph_impact" -> handleCodegraphImpact(arguments)
+        "codegraph_status" -> handleCodegraphStatus(arguments)
+        "codegraph_files" -> handleCodegraphFiles(arguments)
+        else -> throw IllegalArgumentException("Unknown MCP tool: $name")
+    }
+
+    private fun dispatchToolByName(name: String, arguments: JsonObject): JsonObject = when (name) {
+        "atlas_query" -> handleQuery(arguments)
+        "atlas_audit" -> handleAudit(arguments)
+        "figma_audit" -> handleFigmaAudit(arguments)
+        "figma_scope" -> handleFigmaScope(arguments)
+        else -> dispatchCodegraphTool(name, arguments)
+    }
+
     private fun callToolDirect(name: String, arguments: JsonObject): JsonObject {
         val project = resolveProjectFromArgs(arguments)
-        val rawPayload = when (name) {
-            "atlas_query" -> handleQuery(arguments)
-            "atlas_audit" -> handleAudit(arguments)
-            "figma_audit" -> handleFigmaAudit(arguments)
-            "figma_scope" -> handleFigmaScope(arguments)
-            "codegraph_explore" -> handleCodegraphExplore(arguments)
-            "codegraph_node" -> handleCodegraphNode(arguments)
-            "codegraph_search" -> handleCodegraphSearch(arguments)
-            "codegraph_callers" -> handleCodegraphCallers(arguments)
-            "codegraph_callees" -> handleCodegraphCallees(arguments)
-            "codegraph_impact" -> handleCodegraphImpact(arguments)
-            "codegraph_status" -> handleCodegraphStatus(arguments)
-            "codegraph_files" -> handleCodegraphFiles(arguments)
-            else -> throw IllegalArgumentException("Unknown MCP tool: $name")
-        }
+        val rawPayload = dispatchToolByName(name, arguments)
         val payload = if (name.startsWith("codegraph_") && rawPayload.containsKey("text")) {
             buildJsonObject {
                 rawPayload.forEach { (k, v) -> put(k, v) }
