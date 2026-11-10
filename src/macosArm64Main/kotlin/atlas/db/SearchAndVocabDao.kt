@@ -84,19 +84,6 @@ class SearchAndVocabDao(
         }
     }
 
-    fun scoreCandidate(node: GraphNode, query: String, baseScore: Double = 0.0): Double {
-        var score = baseScore
-        if (node.name.equals(query, ignoreCase = true)) {
-            score += 25.0
-        } else if (node.name.startsWith(query, ignoreCase = true)) {
-            score += 16.0
-        } else if (node.name.contains(query, ignoreCase = true)) {
-            score += 12.0
-        }
-        score += minOf(10.0, node.inDegree.coerceAtLeast(0).toDouble() * 0.5)
-        return score
-    }
-
     fun insertNodeVocabulary(
         stmt: NativeSqliteStatement,
         nodeId: String,

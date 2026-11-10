@@ -35,16 +35,30 @@ class PolyglotAstExtractor {
             ".cpp" to "cpp", ".cc" to "cpp", ".h" to "cpp", ".hpp" to "cpp"
         )
 
-        internal val CALL_RE = Regex("""\b(?:(?<receiver>[A-Za-z_][A-Za-z0-9_]*)(?:::|\.))?(?<callee>[A-Za-z_][A-Za-z0-9_]{2,})\s*\(""")
+        internal val CALL_RE = Regex(
+            """\b(?:(?<receiver>[A-Za-z_][A-Za-z0-9_]*)(?:::|\.))?(?<callee>[A-Za-z_][A-Za-z0-9_]+)\s*(?<callType>\(|\{)"""
+        )
         private val INLINE_ANNOTATION_RE = Regex("""^@[A-Za-z0-9_]+(?:\((?:[^()]|\([^()]*\))*\))?\s*""")
         private val CPP_MACRO_ATTRIBUTE_RE = Regex("""^[A-Z][A-Z0-9_]+(?:\(.*\))?$""")
         internal val CALL_STOPWORDS = setOf(
             "if", "for", "while", "switch", "when", "return", "catch", "super", "this", "self",
             "print", "println", "len", "str", "int", "float", "bool", "listOf", "mapOf", "setOf",
-            "require", "check", "match", "throw", "yield", "guard", "case", "typeof"
+            "require", "check", "match", "throw", "yield", "guard", "case", "typeof",
+            "init", "get", "set", "else", "try", "finally", "do"
         )
 
-        const val EXTRACTOR_VERSION: String = "1.4.1"
+        fun isValidCallMatch(callee: String, receiver: String?, callType: String): Boolean {
+            if (callee in CALL_STOPWORDS) return false
+            if (callType == "{") {
+                if (receiver.isNullOrEmpty()) {
+                    return callee.length >= 3 && callee[0].isLowerCase()
+                }
+                return callee.length >= 2
+            }
+            return callee.length >= 2
+        }
+
+        const val EXTRACTOR_VERSION: String = "1.4.2"
 
         fun supportedLanguage(ext: String): String = EXT_MAP[ext.lowercase()] ?: ""
 

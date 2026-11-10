@@ -22,7 +22,7 @@ import atlas.model.GraphNode
  */
 internal object TypeScriptAstExtractor {
 
-    private val TS_IMP_RE = Regex("""import\s+(?:type\s+)?(?:(?:\{([^}]+)\})|([A-Za-z0-9_]+))\s+from\s+['"]([^'"]+)['"]""")
+    private val TS_IMP_RE = Regex("""import\s+(?:type\s+)?(?<clause>[^'"]+?)\s+from\s+['"](?<source>[^'"]+)['"]""")
     private val TS_DECL_RE = Regex(
         """^(?<indent>[ \t]*)(?<export>export\s+)?(?:(?:default|async|abstract|declare)\s+)*(?<kw>class|interface|type|function|const\s+enum|enum|const|let|var)\s+(?<name>[A-Za-z0-9_]+)""",
         RegexOption.MULTILINE
@@ -58,6 +58,45 @@ internal object TypeScriptAstExtractor {
         val isTopLevel: Boolean
     )
 
+    private fun extractNamedTsImports(clause: String): Pair<List<String>, String> {
+        if (!clause.contains('{') || !clause.contains('}')) return Pair(emptyList(), clause)
+        val namedPart = clause.substringAfter('{').substringBefore('}')
+        val list = mutableListOf<String>()
+        for (sym in namedPart.split(',')) {
+            val clean = sym.trim().removePrefix("type ").trim().substringBefore(" as ").trim()
+            if (clean.isNotEmpty()) list.add(clean)
+        }
+        val remaining = clause.substringBefore('{').trim().trimEnd(',')
+        return Pair(list, remaining)
+    }
+
+    private fun extractNamespaceTsImport(clause: String): Pair<String?, String> {
+        if (!clause.contains("* as ")) return Pair(null, clause)
+        val nsName = clause.substringAfter("* as ").trim().substringBefore(',').trim()
+        val remaining = clause.substringBefore("* as ").trim().trimEnd(',')
+        return Pair(nsName.ifEmpty { null }, remaining)
+    }
+
+    private fun extractDefaultTsImport(remaining: String): String? {
+        val defaultSym = remaining.trim().removePrefix("type ").trim()
+        if (defaultSym.isEmpty() || defaultSym.contains(' ') || defaultSym == "*") return null
+        return defaultSym
+    }
+
+    private fun parseTsImportClause(clause: String): List<String> {
+        val results = mutableListOf<String>()
+        val (named, afterNamed) = extractNamedTsImports(clause.trim())
+        results.addAll(named)
+
+        val (ns, afterNs) = extractNamespaceTsImport(afterNamed)
+        if (ns != null) results.add(ns)
+
+        val defaultSym = extractDefaultTsImport(afterNs)
+        if (defaultSym != null) results.add(defaultSym)
+
+        return results
+    }
+
     private fun extractTypeScriptImports(
         maskedText: String,
         sourceText: String,
@@ -67,11 +106,10 @@ internal object TypeScriptAstExtractor {
         for (m in TS_IMP_RE.findAll(maskedText)) {
             val origMatch = sourceText.substring(m.range)
             val parsed = TS_IMP_RE.find(origMatch) ?: m
-            val named = parsed.groupValues[1].ifEmpty { parsed.groupValues[2] }
+            val clause = parsed.groups["clause"]?.value ?: continue
             val lineNo = lineIndex.lineNumberAt(m.range.first)
-            for (sym in named.split(",").filter { it.isNotBlank() }) {
-                val clean = sym.trim().substringBefore(" as ").trim()
-                if (clean.isNotEmpty()) imports.add(Pair(clean, lineNo))
+            for (sym in parseTsImportClause(clause)) {
+                imports.add(Pair(sym, lineNo))
             }
         }
         return imports
@@ -275,9 +313,11 @@ internal object TypeScriptAstExtractor {
     ): GraphEdge? {
         val receiver = callMatch.groups["receiver"]?.value?.trim()
         val callee = callMatch.groups["callee"]?.value ?: return null
+        val callType = callMatch.groups["callType"]?.value ?: "("
+        if (callType == "{" && receiver.isNullOrEmpty()) return null
         val targetSym = if (!receiver.isNullOrEmpty()) "$receiver.$callee" else callee
         val isSelfCall = callee == node.name && (receiver.isNullOrEmpty() || receiver == "this")
-        if (isSelfCall || callee in PolyglotAstExtractor.CALL_STOPWORDS || !seenCallees.add(targetSym)) return null
+        if (isSelfCall || !PolyglotAstExtractor.isValidCallMatch(callee, receiver, callType) || !seenCallees.add(targetSym)) return null
 
         val callLine = node.startLine + PolyglotAstExtractor.countNewlinesBefore(body, callMatch.range.first)
         return GraphEdge(
