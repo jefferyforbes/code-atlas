@@ -5,6 +5,7 @@ import atlas.engine.CodegraphCompatibilityEngine
 import atlas.engine.ToolMigrationEngine
 import atlas.engine.WorkspaceInitEngine
 import atlas.mcp.AtlasMcpServer
+import atlas.model.RfcGroundResult
 import atlas.util.PlatformFiles
 import kotlin.math.roundToInt
 import kotlinx.serialization.encodeToString
@@ -143,7 +144,8 @@ class AtlasCli {
         }
 
         private val CODEGRAPH_INSPECTION_COMMANDS = setOf(
-            "explore", "callers", "callees", "impact", "status", "files", "search", "node", "context", "index", "synthesize-scope"
+            "explore", "callers", "callees", "impact", "status", "files", "search", "node", "context", "index", "synthesize-scope",
+            "rfc-ground", "rfc_ground"
         )
         private val CODEGRAPH_REMEDIATION_COMMANDS = setOf(
             "audit", "fix", "doctor", "dead-code", "record-memory", "verify-remediation", "query"
@@ -164,6 +166,7 @@ class AtlasCli {
             "context" -> runContextCommand(server, args)
             "index" -> runIndexCommand(server, args)
             "synthesize-scope" -> runSynthesizeScopeCommand(server, args)
+            "rfc-ground", "rfc_ground" -> runRfcGroundCommand(server, args)
             else -> 1
         }
 
@@ -219,6 +222,15 @@ class AtlasCli {
 
         private fun getQueryText(args: CliArgs): String =
             if (args.target.isNotEmpty()) args.target else args.paths.joinToString(" ")
+
+        private fun runRfcGroundCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val effectiveServer = server.resolveServerForProject(args.project, args.workspace)
+            val queryText = getQueryText(args).ifEmpty { args.target }
+            val result = effectiveServer.rfcGroundEngine.groundSubsystem(args.project, queryText)
+            val text = if (args.isJson) jsonPretty.encodeToString(result) else result.markdownTable
+            println(text)
+            return 0
+        }
 
         private fun runContextCommand(server: AtlasMcpServer, args: CliArgs): Int {
             val effectiveServer = server.resolveServerForProject(args.project, args.workspace)
@@ -548,6 +560,9 @@ class AtlasCli {
         private fun runQueryCommand(server: AtlasMcpServer, args: CliArgs): Int {
             if (args.action == "explore") {
                 return runExploreQuery(server, args)
+            }
+            if (args.action == "rfc_ground" || args.action == "rfc-ground") {
+                return runRfcGroundCommand(server, args)
             }
             return runStandardQuery(server, args)
         }
@@ -936,6 +951,7 @@ class AtlasCli {
                   migrate-tools      Detect and optionally migrate deprecated codegraph_* tool calls
                   record-memory      Record execution outcome annotation for a node into work memory
                   verify-remediation Verify and optionally apply autonomous remediation with pre-flight & post-verification checks
+                  rfc-ground         Extract dense subsystem discovery table (contracts, entry points, dependencies <= 800B)
                   serve-mcp          Run JSON-RPC 2.0 MCP server over stdio
                   version            Print version information
 
