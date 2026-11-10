@@ -1,5 +1,6 @@
 package atlas.db
 
+import atlas.model.FileRecordUpsert
 import atlas.util.PlatformFiles
 import platform.posix.getpid
 import kotlin.random.Random
@@ -168,7 +169,7 @@ class NativeSqliteStatementTest {
         val store = SqliteGraphStore(dbPath)
         try {
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = "p1",
                     relPath = "src/Main.kt",
                     language = "kotlin",

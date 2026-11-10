@@ -1,6 +1,7 @@
 package atlas
 
 import atlas.db.SqliteGraphStore
+import atlas.model.FileRecordUpsert
 import atlas.engine.WorkspaceIndexer
 import atlas.model.ComposeNodeRecord
 import atlas.model.ComposeParamRecord
@@ -429,7 +430,7 @@ class SqliteGraphStoreTest {
         val store = SqliteGraphStore(":memory:")
         try {
             val projectId = "proj_url_test"
-            val fileRecord = SqliteGraphStore.FileRecordUpsert(
+            val fileRecord = FileRecordUpsert(
                 projectId = projectId,
                 relPath = "src/OrderController.kt",
                 language = "kotlin",
@@ -489,7 +490,7 @@ class SqliteGraphStoreTest {
 
             // Insert file record and a node
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = projectId,
                     relPath = relPath,
                     language = "kotlin",
@@ -527,7 +528,7 @@ class SqliteGraphStoreTest {
 
             // Re-index/upsert the file record (purging existing nodes and their FTS entries by rowid)
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = projectId,
                     relPath = relPath,
                     language = "kotlin",

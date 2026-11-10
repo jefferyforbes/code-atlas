@@ -1,6 +1,6 @@
 package atlas.engine
 
-import atlas.db.SqliteGraphStore
+import atlas.model.GraphReader
 import atlas.model.ArchitectContextResult
 import atlas.model.GraphNode
 import atlas.model.ScopeRecommendation
@@ -13,7 +13,7 @@ import kotlin.math.roundToInt
  * and structural AST skeletons for /architect, /boost, and /plan.
  */
 class ArchitectContextEngine(
-    val store: SqliteGraphStore,
+    val store: GraphReader,
     val synthesizer: ScopeSynthesizer,
     val workspaceRoot: String,
     val artifactsDir: String,
@@ -21,7 +21,7 @@ class ArchitectContextEngine(
 ) {
 
     internal data class ClassSkeletonSpec(
-        val store: SqliteGraphStore,
+        val store: GraphReader,
         val projectId: String,
         val node: GraphNode,
         val relPath: String,

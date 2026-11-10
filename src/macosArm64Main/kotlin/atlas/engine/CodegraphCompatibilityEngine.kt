@@ -1,7 +1,7 @@
 package atlas.engine
 
 import atlas.bridge.VaultPlanBridge
-import atlas.db.SqliteGraphStore
+import atlas.model.GraphReader
 import atlas.model.GraphNode
 import atlas.model.LiveSourceSlice
 import atlas.util.PlatformFiles
@@ -15,7 +15,7 @@ import kotlinx.serialization.json.put
  * codegraph_callees, codegraph_impact, codegraph_status, and codegraph_files.
  */
 class CodegraphCompatibilityEngine(
-    val store: SqliteGraphStore,
+    val store: GraphReader,
     val workspaceRoot: String
 ) {
 
@@ -487,7 +487,8 @@ class CodegraphCompatibilityEngine(
         sb.append("- **Indexed Files:** ${stats.files}\n")
         sb.append("- **AST Nodes:** ${stats.nodes}\n")
         sb.append("- **Graph Edges:** ${stats.edges}\n")
-        sb.append("- **Database:** `${store.dbPath}`\n")
+        val dbPathStr = (store as? atlas.db.SqliteGraphStore)?.dbPath ?: ":memory:"
+        sb.append("- **Database:** `$dbPathStr`\n")
         sb.append("- **Engine:** Atlas Native AOT (sub-10ms query latency)\n")
 
         return buildJsonObject {

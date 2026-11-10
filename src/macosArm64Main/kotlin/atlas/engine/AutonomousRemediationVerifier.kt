@@ -1,6 +1,6 @@
 package atlas.engine
 
-import atlas.db.SqliteGraphStore
+import atlas.model.GraphReader
 import atlas.extract.ComposeStabilityExtractor
 import atlas.extract.PolyglotAstExtractor
 import atlas.extract.SemioticLayerClassifier
@@ -22,7 +22,7 @@ import kotlin.time.TimeSource
  */
 class AutonomousRemediationVerifier(
     private val workspaceRoot: String = ".",
-    private val store: SqliteGraphStore? = null
+    private val store: GraphReader? = null
 ) {
     private val composeExtractor = ComposeStabilityExtractor()
 

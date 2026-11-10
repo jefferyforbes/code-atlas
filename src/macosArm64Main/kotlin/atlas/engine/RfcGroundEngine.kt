@@ -1,6 +1,6 @@
 package atlas.engine
 
-import atlas.db.SqliteGraphStore
+import atlas.model.GraphReader
 import atlas.extract.NameSegmentTokenizer
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
@@ -10,7 +10,7 @@ import atlas.model.RfcGroundResult
  * Engine extracting dense subsystem discovery tables (<= 800B) for RFC-0 research grounding.
  */
 class RfcGroundEngine(
-    private val store: SqliteGraphStore
+    private val store: GraphReader
 ) {
 
     fun groundSubsystem(projectId: String, query: String): RfcGroundResult {

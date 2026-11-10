@@ -3,6 +3,7 @@ package atlas
 import atlas.cli.AtlasCli
 import atlas.db.NativeSqliteDatabase
 import atlas.db.SqliteGraphStore
+import atlas.model.FileRecordUpsert
 import atlas.engine.ArchitectureAuditor
 import atlas.engine.ScopeSynthesizer
 import atlas.engine.WorkMemoryStore
@@ -214,7 +215,7 @@ class AtlasNativeTest {
 
             // Test file record pruning and deletion
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = "p",
                     relPath = "A.kt",
                     language = "kotlin",
@@ -707,7 +708,7 @@ class AtlasNativeTest {
             assertTrue(indexNames.contains("idx_raw_edges_file"))
 
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = "p",
                     relPath = "src/Caller.kt",
                     language = "kotlin",

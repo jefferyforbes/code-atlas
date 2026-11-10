@@ -1,6 +1,6 @@
 package atlas.engine
 
-import atlas.db.SqliteGraphStore
+import atlas.model.GraphReader
 import atlas.extract.ComposeStabilityExtractor
 import atlas.model.ComposeAuditResult
 import atlas.model.ComposeDoctorReport
@@ -22,7 +22,7 @@ import kotlin.math.round
  * (100-point world-class benchmark + mandatory Remaining 5% Polish Delta),
  * Strong Skipping Reality Check correlation, and write-site verified Doctor remediation previews.
  */
-class ComposeStabilityEngine(private val store: SqliteGraphStore) {
+class ComposeStabilityEngine(private val store: GraphReader) {
 
     private data class RuleMetadata(
         val bit: Int,

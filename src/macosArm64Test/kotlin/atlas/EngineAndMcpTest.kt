@@ -4,6 +4,7 @@ import atlas.bridge.VaultPlanBridge
 import atlas.cli.AtlasCli
 import atlas.config.CacheProfileResolver
 import atlas.db.SqliteGraphStore
+import atlas.model.FileRecordUpsert
 import atlas.engine.ArchitectureAuditor
 import atlas.engine.AutonomousRemediationVerifier
 import atlas.engine.ScopeSynthesizer
@@ -166,7 +167,7 @@ class EngineAndMcpTest {
         val store = SqliteGraphStore(dbPath)
         try {
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = "p",
                     relPath = "src/MultiClass.kt",
                     language = "kotlin",
@@ -181,7 +182,7 @@ class EngineAndMcpTest {
                 )
             )
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = "p",
                     relPath = "src/TestMulti.kt",
                     language = "kotlin",
@@ -1124,7 +1125,7 @@ class EngineAndMcpTest {
         val store = SqliteGraphStore(dbPath)
         try {
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = "p",
                     relPath = "src/service/OrderService.kt",
                     language = "kotlin",
@@ -1139,7 +1140,7 @@ class EngineAndMcpTest {
                 )
             )
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = "p",
                     relPath = "src/models/Order.kt",
                     language = "kotlin",
@@ -1820,7 +1821,7 @@ class EngineAndMcpTest {
                 kind = "class"
             )
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = "proj",
                     relPath = "src/FileA.kt",
                     language = "kotlin",
@@ -1838,7 +1839,7 @@ class EngineAndMcpTest {
 
             // Re-upsert file A (which deletes old nodes from nodes and nodes_fts)
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = "proj",
                     relPath = "src/FileA.kt",
                     language = "kotlin",
@@ -2346,7 +2347,7 @@ class EngineAndMcpTest {
         val store = SqliteGraphStore(dbPath)
         try {
             store.upsertFileRecord(
-                SqliteGraphStore.FileRecordUpsert(
+                FileRecordUpsert(
                     projectId = "p",
                     relPath = "src/OrderService.kt",
                     language = "kotlin",

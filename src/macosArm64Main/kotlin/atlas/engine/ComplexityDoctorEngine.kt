@@ -1,6 +1,6 @@
 package atlas.engine
 
-import atlas.db.SqliteGraphStore
+import atlas.model.GraphReader
 import atlas.extract.ComplexityExtractor
 import atlas.extract.PolyglotAstExtractor
 import atlas.model.ComplexityDoctorReport
@@ -15,7 +15,7 @@ import kotlin.math.roundToInt
  * complexity reduction measurement and multi-gate verification.
  */
 class ComplexityDoctorEngine(
-    private val store: SqliteGraphStore? = null,
+    private val store: GraphReader? = null,
     private val workspaceRoot: String = "."
 ) {
 

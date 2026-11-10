@@ -1,7 +1,7 @@
 package atlas.engine
 
 import atlas.bridge.VaultPlanBridge
-import atlas.db.SqliteGraphStore
+import atlas.model.GraphReader
 import atlas.extract.UrlTargetResolver
 import atlas.model.Compose3DScope
 import atlas.model.ComposeNodeRecord
@@ -14,7 +14,7 @@ import atlas.model.ScopeRecommendation
 /**
  * 3D Concurrency Scope Synthesizer for /architect and /plan task decomposition.
  */
-class ScopeSynthesizer(private val store: SqliteGraphStore) {
+class ScopeSynthesizer(private val store: GraphReader) {
 
     private data class ImpactSets(
         val files: Set<String>,

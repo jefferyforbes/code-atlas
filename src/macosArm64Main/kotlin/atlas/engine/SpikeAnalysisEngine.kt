@@ -1,6 +1,6 @@
 package atlas.engine
 
-import atlas.db.SqliteGraphStore
+import atlas.model.GraphReader
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.model.LayerInversionViolation
@@ -11,7 +11,7 @@ import atlas.model.SpikeRequest
  * Engine executing topological hypothesis tests across decoupling and Clean Architecture boundaries.
  */
 class SpikeAnalysisEngine(
-    private val store: SqliteGraphStore
+    private val store: GraphReader
 ) {
 
     fun runSpike(request: SpikeRequest): SpikeAnalysisResult {

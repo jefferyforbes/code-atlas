@@ -1,6 +1,9 @@
 package atlas.db
 
 import atlas.extract.FigmaSnapshotExtractor
+import atlas.model.FileRecordUpsert
+import atlas.model.GraphReader
+import atlas.model.GraphStore
 import atlas.model.ComplexityScoreRecord
 import atlas.model.ComposeNodeRecord
 import atlas.model.ComposeParamRecord
@@ -28,9 +31,9 @@ import kotlin.math.abs
 /**
  * Persistent SQLite WAL knowledge graph store with FTS5, segment vocabulary, and freshness slicing.
  */
-class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
+class SqliteGraphStore(val dbPath: String) : GraphStore {
 
-    internal companion object {
+    companion object {
         internal const val NODES_SELECT_COLUMNS =
             "node_id, project_id, file_id, name, qualified_name, kind, signature, " +
                 "start_line, end_line, module_id, source_set, semiotic_layer, arch_layer, " +
@@ -62,7 +65,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         GraphSchemaMigrator.initSchema(db)
     }
 
-    fun getProjectMetadata(projectId: String, key: String): String? {
+    override fun getProjectMetadata(projectId: String, key: String): String? {
         val stmt = db.prepare("SELECT value FROM project_metadata WHERE project_id = ? AND key = ?;")
         try {
             stmt.bindString(1, projectId)
@@ -76,7 +79,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun setProjectMetadata(projectId: String, key: String, value: String) {
+    override fun setProjectMetadata(projectId: String, key: String, value: String) {
         val stmt = db.prepare(
             """
             INSERT INTO project_metadata (project_id, key, value)
@@ -98,9 +101,9 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
 
     fun migrateNodesSchema() = GraphSchemaMigrator.migrateNodesSchema(db)
 
-    fun <T> withImmediateTransaction(block: () -> T): T = db.withImmediateTransaction(block)
+    override fun <T> withImmediateTransaction(block: () -> T): T = db.withImmediateTransaction(block)
 
-    fun <T> withSavepoint(name: String, block: () -> T): T = db.withSavepoint(name, block)
+    override fun <T> withSavepoint(name: String, block: () -> T): T = db.withSavepoint(name, block)
 
     internal class StatementScope(private val db: NativeSqliteDatabase) : AutoCloseable {
         private val statements = mutableListOf<NativeSqliteStatement>()
@@ -131,11 +134,11 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
     }
 
 
-    fun close() {
+    override fun close() {
         db.close()
     }
 
-    fun insertNodeAnnotation(
+    override fun insertNodeAnnotation(
         annotationId: String,
         projectId: String,
         nodeId: String,
@@ -163,7 +166,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun getNodeAnnotations(projectId: String, nodeId: String): List<NodeAnnotation> {
+    override fun getNodeAnnotations(projectId: String, nodeId: String): List<NodeAnnotation> {
         val stmt = db.prepare(
             """
             SELECT annotation_id, project_id, node_id, outcome, note, created_at_epoch
@@ -194,7 +197,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return results
     }
 
-    fun getFileRecordsMap(projectId: String): Map<String, Pair<String, Double>> {
+    override fun getFileRecordsMap(projectId: String): Map<String, Pair<String, Double>> {
         val stmt = db.prepare("SELECT rel_path, sha256, mtime FROM files WHERE project_id = ? AND rel_path != '__endpoints__';")
         val result = mutableMapOf<String, Pair<String, Double>>()
         try {
@@ -299,7 +302,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun replaceBatchRawSymbolEdges(projectId: String, fileEdgesMap: Map<String, List<GraphEdge>>) {
+    override fun replaceBatchRawSymbolEdges(projectId: String, fileEdgesMap: Map<String, List<GraphEdge>>) {
         if (fileEdgesMap.isEmpty()) return
         withImmediateTransaction {
             val scope = StatementScope(db)
@@ -324,11 +327,11 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun replaceFileRawSymbolEdges(projectId: String, fileId: String, edges: List<GraphEdge>) {
+    override fun replaceFileRawSymbolEdges(projectId: String, fileId: String, edges: List<GraphEdge>) {
         replaceBatchRawSymbolEdges(projectId, mapOf(fileId to edges))
     }
 
-    fun listRawSymbolEdges(projectId: String): List<GraphEdge> {
+    override fun listRawSymbolEdges(projectId: String): List<GraphEdge> {
         val stmt = db.prepare(
             """
             SELECT edge_id, project_id, source_node_id, target_symbol, edge_type,
@@ -380,7 +383,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return results
     }
 
-    fun filesWithRawSymbolEdges(projectId: String): Set<String> {
+    override fun filesWithRawSymbolEdges(projectId: String): Set<String> {
         val stmt = db.prepare("SELECT DISTINCT file_id FROM raw_symbol_edges WHERE project_id = ?;")
         val result = mutableSetOf<String>()
         try {
@@ -394,7 +397,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return result
     }
 
-    fun deleteFileRawSymbolEdges(projectId: String, fileId: String) {
+    override fun deleteFileRawSymbolEdges(projectId: String, fileId: String) {
         val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
         val stmt = db.prepare("DELETE FROM raw_symbol_edges WHERE project_id = ? AND file_id = ?;")
         try {
@@ -406,7 +409,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun deleteOutgoingEdgesForFile(projectId: String, relPath: String) {
+    override fun deleteOutgoingEdgesForFile(projectId: String, relPath: String) {
         val fileId = if (relPath.startsWith("$projectId:")) relPath else "$projectId:$relPath"
         val stmt = db.prepare(
             """
@@ -424,7 +427,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun getDeclaredSymbolsForFile(projectId: String, fileId: String): List<String> {
+    override fun getDeclaredSymbolsForFile(projectId: String, fileId: String): List<String> {
         val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
         val stmt = db.prepare("SELECT name, qualified_name FROM nodes WHERE project_id = ? AND file_id = ?;")
         val symbols = mutableListOf<String>()
@@ -484,7 +487,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         )
     }
 
-    fun listRawSymbolEdgesTargetingSymbols(
+    override fun listRawSymbolEdgesTargetingSymbols(
         projectId: String,
         symbols: Set<String>
     ): List<GraphEdge> {
@@ -513,7 +516,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return results
     }
 
-    fun deleteEdgesForRawEdges(projectId: String, rawEdges: List<GraphEdge>) {
+    override fun deleteEdgesForRawEdges(projectId: String, rawEdges: List<GraphEdge>) {
         if (rawEdges.isEmpty()) return
         val stmt = db.prepare(
             "DELETE FROM edges WHERE project_id = ? AND (edge_id = ? OR (edge_id >= ? AND edge_id < ?));"
@@ -533,7 +536,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun deleteAllResolvedCodeEdges(projectId: String) {
+    override fun deleteAllResolvedCodeEdges(projectId: String) {
         val stmt = db.prepare(
             """
             DELETE FROM edges
@@ -552,7 +555,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun ensureVirtualFileRecord(projectId: String, virtualRelPath: String = "__endpoints__"): String {
+    override fun ensureVirtualFileRecord(projectId: String, virtualRelPath: String): String {
         val fileId = "$projectId:$virtualRelPath"
         val stmt = db.prepare(
             """
@@ -572,20 +575,6 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
         return fileId
     }
-
-    data class FileRecordUpsert(
-        val projectId: String,
-        val relPath: String,
-        val language: String,
-        val moduleId: String,
-        val sourceSet: String,
-        val semioticLayer: String,
-        val archLayer: String,
-        val sha256: String,
-        val mtime: Double,
-        val loc: Int,
-        val topLevelDeclCount: Int
-    )
 
     private fun purgeExistingFileNodesAndEdges(
         scope: StatementScope,
@@ -634,7 +623,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return oldNodes
     }
 
-    fun upsertFileRecord(record: FileRecordUpsert): String {
+    override fun upsertFileRecord(record: FileRecordUpsert): String {
         val fileId = "${record.projectId}:${record.relPath}"
         withImmediateTransaction {
             val scope = StatementScope(db)
@@ -679,7 +668,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return fileId
     }
 
-    fun listIndexedFiles(projectId: String): List<String> {
+    override fun listIndexedFiles(projectId: String): List<String> {
         val res = mutableListOf<String>()
         val stmt = db.prepare("SELECT rel_path FROM files WHERE project_id = ? AND rel_path != '__endpoints__';")
         try {
@@ -693,7 +682,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return res
     }
 
-    fun recomputeDegrees(projectId: String) {
+    override fun recomputeDegrees(projectId: String) {
         val updateDeg = db.prepare(
             """
             UPDATE nodes SET
@@ -712,7 +701,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun deleteFileRecord(projectId: String, relPath: String, recomputeDegrees: Boolean = true) {
+    override fun deleteFileRecord(projectId: String, relPath: String, recomputeDegrees: Boolean) {
         val fileId = "$projectId:$relPath"
         withImmediateTransaction {
             val scope = StatementScope(db)
@@ -846,7 +835,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun upsertNodesAndEdges(
+    override fun upsertNodesAndEdges(
         projectId: String,
         nodes: List<GraphNode>,
         edges: List<GraphEdge>
@@ -985,16 +974,16 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         )
     }
 
-    fun getNode(projectId: String, target: String): GraphNode? =
+    override fun getNode(projectId: String, target: String): GraphNode? =
         urlResolutionDao.getNode(projectId, target)
 
-    fun queryByUrl(projectId: String, target: String): GraphNode? =
+    override fun queryByUrl(projectId: String, target: String): GraphNode? =
         urlResolutionDao.queryByUrl(projectId, target)
 
-    fun queryNodesAtLocation(projectId: String, filePath: String, line: Int): List<GraphNode> =
+    override fun queryNodesAtLocation(projectId: String, filePath: String, line: Int): List<GraphNode> =
         urlResolutionDao.queryNodesAtLocation(projectId, filePath, line)
 
-    fun getNodesForFile(projectId: String, relPath: String): List<GraphNode> {
+    override fun getNodesForFile(projectId: String, relPath: String): List<GraphNode> {
         val norm = relPath.trim().trim('\'', '"').removePrefix("./").replace('\\', '/')
         val escaped = NativeSqliteStatement.escapeSqlLike(norm)
         val stmt = db.prepare(
@@ -1026,7 +1015,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return results
     }
 
-    fun getNodesForFileIds(projectId: String, fileIds: List<String>): List<GraphNode> {
+    override fun getNodesForFileIds(projectId: String, fileIds: List<String>): List<GraphNode> {
         if (fileIds.isEmpty()) return emptyList()
         val results = mutableListOf<GraphNode>()
         for (chunk in fileIds.chunked(250)) {
@@ -1052,48 +1041,48 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return results
     }
 
-    fun searchNodes(
+    override fun searchNodes(
         projectId: String,
         query: String,
-        limit: Int = 15,
-        kind: String? = null
+        limit: Int,
+        kind: String?
     ): List<GraphNode> = searchAndVocabDao.searchNodes(projectId, query, limit, kind)
 
-    fun rebuildVocabulary(projectId: String) =
+    override fun rebuildVocabulary(projectId: String) =
         searchAndVocabDao.rebuildVocabulary(projectId)
 
-    fun getCallers(projectId: String, nodeId: String, depth: Int = 2): List<GraphHop> =
+    override fun getCallers(projectId: String, nodeId: String, depth: Int): List<GraphHop> =
         traversalDao.getCallers(projectId, nodeId, depth)
 
-    fun getCallees(projectId: String, nodeId: String, depth: Int = 2): List<GraphHop> =
+    override fun getCallees(projectId: String, nodeId: String, depth: Int): List<GraphHop> =
         traversalDao.getCallees(projectId, nodeId, depth)
 
-    fun getImpactRadius(projectId: String, nodeId: String, depth: Int = 2): ImpactRadiusResult =
+    override fun getImpactRadius(projectId: String, nodeId: String, depth: Int): ImpactRadiusResult =
         traversalDao.getImpactRadius(projectId, nodeId, depth)
 
-    fun getGodNodes(projectId: String, topN: Int = 10): List<GraphNode> =
+    override fun getGodNodes(projectId: String, topN: Int): List<GraphNode> =
         traversalDao.getGodNodes(projectId, topN)
 
-    fun resolveNodesByUrlOrRoute(projectId: String, rawUrlOrRoute: String, limit: Int = 25): List<GraphNode> =
+    override fun resolveNodesByUrlOrRoute(projectId: String, rawUrlOrRoute: String, limit: Int): List<GraphNode> =
         traversalDao.resolveNodesByUrlOrRoute(projectId, rawUrlOrRoute, limit)
 
-    fun searchByUrl(projectId: String, rawUrlOrRoute: String, limit: Int = 20): JsonObject =
+    override fun searchByUrl(projectId: String, rawUrlOrRoute: String, limit: Int): JsonObject =
         traversalDao.searchByUrl(projectId, rawUrlOrRoute, limit)
 
-    fun getShortestPath(
+    override fun getShortestPath(
         projectId: String,
         sourceNodeId: String,
         targetNodeId: String,
-        maxHops: Int = 6
+        maxHops: Int
     ): List<String> = traversalDao.getShortestPath(projectId, sourceNodeId, targetNodeId, maxHops)
 
-    fun sliceLiveSource(
+    override fun sliceLiveSource(
         projectRoot: String,
         projectId: String,
         node: GraphNode
     ): LiveSourceSlice = traversalDao.sliceLiveSource(projectRoot, node)
 
-    fun listFiles(projectId: String): List<FileRecord> {
+    override fun listFiles(projectId: String): List<FileRecord> {
         val stmt = db.prepare(
             """
             SELECT file_id, project_id, rel_path, language, module_id, source_set,
@@ -1128,7 +1117,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return results
     }
 
-    fun listNodes(projectId: String): List<GraphNode> {
+    override fun listNodes(projectId: String): List<GraphNode> {
         val stmt = db.prepare(
             "SELECT $NODES_SELECT_COLUMNS FROM nodes WHERE project_id = ? ORDER BY node_id ASC;"
         )
@@ -1144,7 +1133,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         return results
     }
 
-    fun listEdges(projectId: String, edgeTypes: List<String>? = null): List<GraphEdge> {
+    override fun listEdges(projectId: String, edgeTypes: List<String>?): List<GraphEdge> {
         val sql = if (edgeTypes != null && edgeTypes.isNotEmpty()) {
             val placeholders = edgeTypes.joinToString(",") { "?" }
             "SELECT edge_id, project_id, source_node_id, target_node_id, edge_type, provenance, confidence, line_number FROM edges WHERE project_id = ? AND edge_type IN ($placeholders);"
@@ -1175,7 +1164,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
-    fun getStats(projectId: String): GraphStats {
+    override fun getStats(projectId: String): GraphStats {
         val filesCount = db.prepare("SELECT COUNT(*) FROM files WHERE project_id = ? AND rel_path != '__endpoints__';").use { stmt ->
             stmt.bindString(1, projectId)
             if (stmt.step()) stmt.columnInt(0) else 0
@@ -1220,7 +1209,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
 
     override fun insertFigmaDocument(document: FigmaDocument) = figmaDao.insertFigmaDocument(document)
 
-    fun getFigmaDocument(fileKey: String): FigmaDocument? = figmaDao.getFigmaDocument(fileKey)
+    override fun getFigmaDocument(fileKey: String): FigmaDocument? = figmaDao.getFigmaDocument(fileKey)
 
     override fun deleteFigmaDocument(fileKey: String) = figmaDao.deleteFigmaDocument(fileKey)
 
@@ -1233,12 +1222,12 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
     override fun insertFigmaEdges(fileKey: String, edges: List<FigmaEdge>) =
         figmaDao.insertFigmaEdges(fileKey, edges)
 
-    fun queryFigmaSpatialIntersection(
+    override fun queryFigmaSpatialIntersection(
         fileKey: String,
         bounds: FigmaSpatialBounds
     ): List<FigmaNode> = figmaDao.queryFigmaSpatialIntersection(fileKey, bounds)
 
-    fun queryFigmaSpatialIntersection(
+    override fun queryFigmaSpatialIntersection(
         fileKey: String,
         minX: Double,
         maxX: Double,
@@ -1246,49 +1235,49 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         maxY: Double
     ): List<FigmaNode> = figmaDao.queryFigmaSpatialIntersection(fileKey, minX, maxX, minY, maxY)
 
-    fun queryFigmaNodeById(fileKey: String, nodeId: String): FigmaNode? =
+    override fun queryFigmaNodeById(fileKey: String, nodeId: String): FigmaNode? =
         figmaDao.queryFigmaNodeById(fileKey, nodeId)
 
-    fun queryFigmaNodesByName(fileKey: String, name: String): List<FigmaNode> =
+    override fun queryFigmaNodesByName(fileKey: String, name: String): List<FigmaNode> =
         figmaDao.queryFigmaNodesByName(fileKey, name)
 
-    fun queryFigmaNodesByType(fileKey: String, nodeType: String): List<FigmaNode> =
+    override fun queryFigmaNodesByType(fileKey: String, nodeType: String): List<FigmaNode> =
         figmaDao.queryFigmaNodesByType(fileKey, nodeType)
 
-    fun queryFigmaVariableById(fileKey: String, variableId: String): FigmaVariable? =
+    override fun queryFigmaVariableById(fileKey: String, variableId: String): FigmaVariable? =
         figmaDao.queryFigmaVariableById(fileKey, variableId)
 
-    fun queryFigmaVariableByName(fileKey: String, name: String): FigmaVariable? =
+    override fun queryFigmaVariableByName(fileKey: String, name: String): FigmaVariable? =
         figmaDao.queryFigmaVariableByName(fileKey, name)
 
-    fun queryFigmaEdgesBySource(fileKey: String, sourceNodeId: String): List<FigmaEdge> =
+    override fun queryFigmaEdgesBySource(fileKey: String, sourceNodeId: String): List<FigmaEdge> =
         figmaDao.queryFigmaEdgesBySource(fileKey, sourceNodeId)
 
-    fun queryFigmaEdgesByTarget(fileKey: String, targetNodeId: String): List<FigmaEdge> =
+    override fun queryFigmaEdgesByTarget(fileKey: String, targetNodeId: String): List<FigmaEdge> =
         figmaDao.queryFigmaEdgesByTarget(fileKey, targetNodeId)
 
-    fun queryFigmaEdgesByType(fileKey: String, edgeType: String): List<FigmaEdge> =
+    override fun queryFigmaEdgesByType(fileKey: String, edgeType: String): List<FigmaEdge> =
         figmaDao.queryFigmaEdgesByType(fileKey, edgeType)
 
-    fun resolveVariableAliasImpact(
+    override fun resolveVariableAliasImpact(
         fileKey: String,
         variableIdOrName: String,
-        depth: Int = 10
+        depth: Int
     ): List<FigmaVariable> = figmaDao.resolveVariableAliasImpact(fileKey, variableIdOrName, depth)
 
-    fun queryNodesBoundToVariable(fileKey: String, variableId: String): List<FigmaNode> =
+    override fun queryNodesBoundToVariable(fileKey: String, variableId: String): List<FigmaNode> =
         figmaDao.queryNodesBoundToVariable(fileKey, variableId)
 
-    fun resolveVariableBlastRadius(
+    override fun resolveVariableBlastRadius(
         fileKey: String,
         variableIdOrName: String,
-        depth: Int = 10
+        depth: Int
     ): FigmaVariableImpact = figmaDao.resolveVariableBlastRadius(fileKey, variableIdOrName, depth)
 
-    fun queryFigmaCallers(
+    override fun queryFigmaCallers(
         fileKey: String,
         componentNameOrId: String,
-        depth: Int = 2
+        depth: Int
     ): List<FigmaNode> = figmaDao.queryFigmaCallers(fileKey, componentNameOrId, depth)
 
     internal fun prepare(sql: String): NativeSqliteStatement = db.prepare(sql)
@@ -1297,57 +1286,57 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         db.exec(sql)
     }
 
-    fun getLatestFigmaFileKey(): String? = figmaDao.getLatestFigmaFileKey()
+    override fun getLatestFigmaFileKey(): String? = figmaDao.getLatestFigmaFileKey()
 
-    fun queryFigmaGodNodes(fileKey: String, limit: Int = 10): List<Pair<FigmaNode, Int>> =
+    override fun queryFigmaGodNodes(fileKey: String, limit: Int): List<Pair<FigmaNode, Int>> =
         figmaDao.queryFigmaGodNodes(fileKey, limit)
 
-    fun queryFigmaNodesByIds(fileKey: String, nodeIds: List<String>): List<FigmaNode> =
+    override fun queryFigmaNodesByIds(fileKey: String, nodeIds: List<String>): List<FigmaNode> =
         figmaDao.queryFigmaNodesByIds(fileKey, nodeIds)
 
-    fun findFigmaShortestPath(
+    override fun findFigmaShortestPath(
         fileKey: String,
         sourceTarget: String,
         destTarget: String,
-        depth: Int = 10
+        depth: Int
     ): List<FigmaNode> = figmaDao.findFigmaShortestPath(fileKey, sourceTarget, destTarget, depth)
 
-    fun countFigmaNodes(fileKey: String): Int = figmaDao.countFigmaNodes(fileKey)
+    override fun countFigmaNodes(fileKey: String): Int = figmaDao.countFigmaNodes(fileKey)
 
-    fun queryFigmaNodesByNameLike(fileKey: String, substring: String): List<FigmaNode> =
+    override fun queryFigmaNodesByNameLike(fileKey: String, substring: String): List<FigmaNode> =
         figmaDao.queryFigmaNodesByNameLike(fileKey, substring)
 
-    fun queryCircularFillInHugViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryCircularFillInHugViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryCircularFillInHugViolations(fileKey)
 
-    fun queryStaticContainerFrameViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryStaticContainerFrameViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryStaticContainerFrameViolations(fileKey)
 
-    fun queryDefault100PxFrameHeightViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryDefault100PxFrameHeightViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryDefault100PxFrameHeightViolations(fileKey)
 
-    fun queryMinTouchTargetViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryMinTouchTargetViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryMinTouchTargetViolations(fileKey)
 
-    fun queryNegativeCoordinateViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryNegativeCoordinateViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryNegativeCoordinateViolations(fileKey)
 
-    fun queryChildAmputationWidthViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryChildAmputationWidthViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryChildAmputationWidthViolations(fileKey)
 
-    fun queryNoEmojiViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryNoEmojiViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryNoEmojiViolations(fileKey)
 
-    fun queryUnboundTokenViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryUnboundTokenViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryUnboundTokenViolations(fileKey)
 
-    fun queryAdHocDetachedSpecimenViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryAdHocDetachedSpecimenViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryAdHocDetachedSpecimenViolations(fileKey)
 
-    fun queryCanvasSpatialTopologyViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryCanvasSpatialTopologyViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryCanvasSpatialTopologyViolations(fileKey)
 
-    fun queryWcagContrastViolations(fileKey: String): List<FigmaViolation> =
+    override fun queryWcagContrastViolations(fileKey: String): List<FigmaViolation> =
         figmaDao.queryWcagContrastViolations(fileKey)
 
     // =========================================================================
@@ -1356,16 +1345,16 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
 
     fun provenanceRank(provenance: String): Int = composeDao.provenanceRank(provenance)
 
-    fun upsertComposeNodesAndParams(
+    override fun upsertComposeNodesAndParams(
         nodes: List<ComposeNodeRecord>,
         params: List<ComposeParamRecord>,
-        preserveHigherProvenance: Boolean = true
+        preserveHigherProvenance: Boolean
     ) = composeDao.upsertComposeNodesAndParams(nodes, params, preserveHigherProvenance)
 
-    fun deleteComposeNodesForFile(projectSlug: String, filePath: String) =
+    override fun deleteComposeNodesForFile(projectSlug: String, filePath: String) =
         composeDao.deleteComposeNodesForFile(projectSlug, filePath)
 
-    fun upsertComposeTraceMetric(
+    override fun upsertComposeTraceMetric(
         nodeId: String,
         sessionId: String,
         recompositionCount: Int,
@@ -1383,41 +1372,41 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         )
     )
 
-    fun listComposeNodes(projectSlug: String, onlyViolating: Boolean = false): List<ComposeNodeRecord> =
+    override fun listComposeNodes(projectSlug: String, onlyViolating: Boolean): List<ComposeNodeRecord> =
         composeDao.listComposeNodes(projectSlug, onlyViolating)
 
-    fun getComposeNode(projectSlug: String, target: String): ComposeNodeRecord? =
+    override fun getComposeNode(projectSlug: String, target: String): ComposeNodeRecord? =
         composeDao.getComposeNode(projectSlug, target)
 
-    fun listComposeParams(nodeId: String): List<ComposeParamRecord> =
+    override fun listComposeParams(nodeId: String): List<ComposeParamRecord> =
         composeDao.listComposeParams(nodeId)
 
-    fun listComposeParamsForProject(projectSlug: String): Map<String, List<ComposeParamRecord>> =
+    override fun listComposeParamsForProject(projectSlug: String): Map<String, List<ComposeParamRecord>> =
         composeDao.listComposeParamsForProject(projectSlug)
 
-    fun listComposeTraceMetrics(projectSlug: String): Map<String, Triple<Int, Int, String>> =
+    override fun listComposeTraceMetrics(projectSlug: String): Map<String, Triple<Int, Int, String>> =
         composeDao.listComposeTraceMetrics(projectSlug)
 
-    fun queryComposeCascade(
+    override fun queryComposeCascade(
         projectSlug: String,
         rootNodeId: String,
-        maxDepth: Int = 5
+        maxDepth: Int
     ): List<ComposeQueryResult.CascadeHop> =
         composeDao.queryComposeCascade(projectSlug, rootNodeId, maxDepth)
 
-    fun queryComposeBlame(
+    override fun queryComposeBlame(
         projectSlug: String,
         composableId: String
     ): List<ComposeQueryResult.BlameHop> =
         composeDao.queryComposeBlame(projectSlug, composableId)
 
-    fun countPropertyMutations(
+    override fun countPropertyMutations(
         projectSlug: String,
         targetSymbolOrNodeId: String,
-        ownerClassName: String? = null
+        ownerClassName: String?
     ): Int = composeDao.countPropertyMutations(projectSlug, targetSymbolOrNodeId, ownerClassName)
 
-    fun upsertNodeComplexity(
+    override fun upsertNodeComplexity(
         nodeId: String,
         cyclomatic: Int,
         cognitive: Int,
@@ -1425,16 +1414,16 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         score: Double
     ) = traversalDao.upsertNodeComplexity(nodeId, cyclomatic, cognitive, maxNesting, score)
 
-    fun queryComplexNodes(
+    override fun queryComplexNodes(
         projectId: String,
-        minCognitive: Int = 10,
-        limit: Int = 50
+        minCognitive: Int,
+        limit: Int
     ): List<ComplexityScoreRecord> = traversalDao.queryComplexNodes(projectId, minCognitive, limit)
 
-    fun queryArchitecturalRiskNodes(
+    override fun queryArchitecturalRiskNodes(
         projectId: String,
-        minRisk: Double = 0.0,
-        limit: Int = 50
+        minRisk: Double,
+        limit: Int
     ): List<ComplexityScoreRecord> = traversalDao.queryArchitecturalRiskNodes(projectId, minRisk, limit)
 }
 
