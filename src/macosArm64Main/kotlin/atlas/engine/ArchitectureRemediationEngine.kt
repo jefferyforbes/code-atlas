@@ -43,7 +43,8 @@ class ArchitectureRemediationEngine(
         val splitBoost003: Boolean = true,
         val makePrivateBoost003: Boolean = false,
         val testCommand: String? = null,
-        val limit: Int = 50
+        val limit: Int = 50,
+        val testTimeoutSeconds: Int = AutonomousRemediationVerifier.DEFAULT_TIMEOUT_SECONDS
     )
 
     private fun collectPlannedPrescriptions(
@@ -60,7 +61,8 @@ class ArchitectureRemediationEngine(
                     dryRun = req.dryRun,
                     split = req.splitBoost003,
                     makePrivate = req.makePrivateBoost003,
-                    testCommand = req.testCommand
+                    testCommand = req.testCommand,
+                    testTimeoutSeconds = req.testTimeoutSeconds
                 )
             )
         }
@@ -340,8 +342,16 @@ class ArchitectureRemediationEngine(
         PlatformFiles.writeText(fullPath, originalContent)
     }
 
-    private fun executeTestCommand(cmdStr: String, details: MutableList<String>): Boolean {
-        val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(workspaceRoot, cmdStr)
+    private fun executeTestCommand(
+        cmdStr: String,
+        details: MutableList<String>,
+        timeoutSeconds: Int = AutonomousRemediationVerifier.DEFAULT_TIMEOUT_SECONDS
+    ): Boolean {
+        val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(workspaceRoot, cmdStr, timeoutSeconds)
+        if (exitCode == AutonomousRemediationVerifier.TIMEOUT_EXIT_CODE) {
+            details.add("Test command '$cmdStr' timed out after ${timeoutSeconds}s (exit code $exitCode). Automatic rollback performed.")
+            return false
+        }
         if (exitCode != 0) {
             details.add("Test command '$cmdStr' failed (exit code $exitCode). Automatic rollback performed.")
             return false
@@ -372,6 +382,7 @@ class ArchitectureRemediationEngine(
         details: MutableList<String>
     ): Boolean {
         val writtenPaths = mutableListOf<String>()
+        var success = false
         return try {
             writeSpawnedFiles(req.root, spawnedFiles, writtenPaths)
             if (req.targetRenameRelPath != null) {
@@ -383,17 +394,20 @@ class ArchitectureRemediationEngine(
             }
 
             if (!req.testCommand.isNullOrBlank()) {
-                val passed = executeTestCommand(req.testCommand, details)
+                val passed = executeTestCommand(req.testCommand, details, req.testTimeoutSeconds)
                 if (!passed) {
-                    rollbackFiles(writtenPaths, req.fullPath, req.originalContent)
                     return false
                 }
             }
+            success = true
             true
         } catch (e: Exception) {
             details.add("Disk application error: ${e.message}. Performing rollback.")
-            rollbackFiles(writtenPaths, req.fullPath, req.originalContent)
             false
+        } finally {
+            if (!success) {
+                rollbackFiles(writtenPaths, req.fullPath, req.originalContent)
+            }
         }
     }
 
@@ -461,7 +475,8 @@ class ArchitectureRemediationEngine(
         val secondaryNodes: List<GraphNode>,
         val targetRenameRelPath: String?,
         val dryRun: Boolean,
-        val testCommand: String?
+        val testCommand: String?,
+        val testTimeoutSeconds: Int = AutonomousRemediationVerifier.DEFAULT_TIMEOUT_SECONDS
     )
 
     private fun applyOrDryRun(
@@ -517,7 +532,8 @@ class ArchitectureRemediationEngine(
         dryRun: Boolean,
         split: Boolean,
         makePrivate: Boolean,
-        testCommand: String?
+        testCommand: String?,
+        testTimeoutSeconds: Int = AutonomousRemediationVerifier.DEFAULT_TIMEOUT_SECONDS
     ): ArchitectureRemediationPrescription {
         val relPath = violation.relPath
         val root = PlatformFiles.canonicalPath(workspaceRoot).trimEnd('/')
@@ -555,7 +571,8 @@ class ArchitectureRemediationEngine(
             secondaryNodes = secondaryNodes,
             targetRenameRelPath = targetRenameRelPath,
             dryRun = dryRun,
-            testCommand = testCommand
+            testCommand = testCommand,
+            testTimeoutSeconds = testTimeoutSeconds
         )
 
         if (makePrivate) {
@@ -672,26 +689,31 @@ class ArchitectureRemediationEngine(
         modifiedContent: String,
         testCommand: String?,
         dryRun: Boolean,
-        details: MutableList<String>
+        details: MutableList<String>,
+        testTimeoutSeconds: Int = AutonomousRemediationVerifier.DEFAULT_TIMEOUT_SECONDS
     ): Boolean {
         if (dryRun) {
             details.add("Dry-run mode: verified private helper conversion without modifying disk.")
             return true
         }
+        var success = false
         return try {
             PlatformFiles.writeText(fullPath, modifiedContent)
             if (!testCommand.isNullOrBlank()) {
-                val passed = executeTestCommand(testCommand, details)
+                val passed = executeTestCommand(testCommand, details, testTimeoutSeconds)
                 if (!passed) {
-                    PlatformFiles.writeText(fullPath, originalContent)
                     return false
                 }
             }
+            success = true
             true
         } catch (e: Exception) {
             details.add("Disk application error: ${e.message}. Performing rollback.")
-            PlatformFiles.writeText(fullPath, originalContent)
             false
+        } finally {
+            if (!success) {
+                PlatformFiles.writeText(fullPath, originalContent)
+            }
         }
     }
 
@@ -719,7 +741,15 @@ class ArchitectureRemediationEngine(
         }
 
         val diffPreview = buildDiffPreview(req.relPath, req.originalContent, modifiedContent, emptyList())
-        val testsPreserved = applyPrivatizedAndRunTest(req.fullPath, req.originalContent, modifiedContent, req.testCommand, req.dryRun, details)
+        val testsPreserved = applyPrivatizedAndRunTest(
+            fullPath = req.fullPath,
+            originalContent = req.originalContent,
+            modifiedContent = modifiedContent,
+            testCommand = req.testCommand,
+            dryRun = req.dryRun,
+            details = details,
+            testTimeoutSeconds = req.testTimeoutSeconds
+        )
         val isSuccess = astValid && testsPreserved
 
         return ArchitectureRemediationPrescription(
