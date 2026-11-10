@@ -1,6 +1,7 @@
 package atlas.db
 
 import atlas.util.PlatformFiles
+import platform.posix.usleep
 
 /**
  * SQLite WAL schema DDL initializer and incremental table migrator for [SqliteGraphStore].
@@ -29,18 +30,67 @@ internal object GraphSchemaMigrator {
         }
     }
 
+    private fun isWalMode(db: NativeSqliteDatabase): Boolean {
+        return try {
+            val stmt = db.prepare("PRAGMA journal_mode;")
+            try {
+                stmt.step() && stmt.columnString(0).equals("wal", ignoreCase = true)
+            } finally {
+                stmt.close()
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun setWalModeSafely(db: NativeSqliteDatabase) {
+        for (attempt in 1..50) {
+            if (isWalMode(db)) return
+            try {
+                db.exec("PRAGMA journal_mode = WAL;")
+                return
+            } catch (_: Exception) {
+                usleep(10000u)
+            }
+        }
+    }
+
+    private fun readUserVersionSafely(db: NativeSqliteDatabase): Int =
+        try { readUserVersion(db) } catch (_: Exception) { 0 }
+
+    private fun hasInitializedSchemaSafely(db: NativeSqliteDatabase): Boolean =
+        try { hasInitializedSchema(db) } catch (_: Exception) { false }
+
     fun initSchema(db: NativeSqliteDatabase) {
-        if (readUserVersion(db) == CURRENT_SCHEMA_VERSION && hasInitializedSchema(db)) {
+        setWalModeSafely(db)
+        try {
             db.exec("PRAGMA synchronous = NORMAL;")
+        } catch (_: Exception) {}
+        if (readUserVersionSafely(db) == CURRENT_SCHEMA_VERSION && hasInitializedSchemaSafely(db)) {
             return
         }
-        migrateLegacySchema(db)
-        migrateNodesFtsSchema(db)
-        db.exec(SCHEMA_DDL)
-        migrateComposeSchema(db)
-        migrateNodesSchema(db)
-        migrateNodesFtsSchema(db)
-        db.exec("PRAGMA user_version = $CURRENT_SCHEMA_VERSION;")
+        for (attempt in 1..20) {
+            try {
+                db.withImmediateTransaction {
+                    if (readUserVersion(db) == CURRENT_SCHEMA_VERSION && hasInitializedSchema(db)) {
+                        return@withImmediateTransaction
+                    }
+                    migrateLegacySchema(db)
+                    db.exec(SCHEMA_DDL)
+                    migrateComposeSchema(db)
+                    migrateNodesSchema(db)
+                    migrateNodesFtsSchema(db)
+                    db.exec("PRAGMA user_version = $CURRENT_SCHEMA_VERSION;")
+                }
+                return
+            } catch (e: Exception) {
+                if (readUserVersionSafely(db) == CURRENT_SCHEMA_VERSION && hasInitializedSchemaSafely(db)) {
+                    return
+                }
+                if (attempt == 20) throw e
+                usleep(25000u)
+            }
+        }
     }
 
     fun migrateNodesFtsSchema(db: NativeSqliteDatabase) {
@@ -155,9 +205,6 @@ internal object GraphSchemaMigrator {
     }
 
     private val SCHEMA_DDL = """
-        PRAGMA journal_mode = WAL;
-        PRAGMA synchronous = NORMAL;
-
         CREATE TABLE IF NOT EXISTS files (
             file_id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -235,6 +282,7 @@ internal object GraphSchemaMigrator {
         );
         CREATE INDEX IF NOT EXISTS idx_raw_edges_proj ON raw_symbol_edges(project_id);
         CREATE INDEX IF NOT EXISTS idx_raw_edges_file ON raw_symbol_edges(file_id);
+        CREATE INDEX IF NOT EXISTS idx_raw_edges_target ON raw_symbol_edges(project_id, target_symbol);
 
         CREATE TABLE IF NOT EXISTS node_annotations (
             annotation_id TEXT PRIMARY KEY,

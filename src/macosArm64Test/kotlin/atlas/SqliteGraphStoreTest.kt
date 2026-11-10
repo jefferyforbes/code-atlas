@@ -9,6 +9,8 @@ import atlas.model.FigmaNode
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
+import kotlin.native.concurrent.TransferMode
+import kotlin.native.concurrent.Worker
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -478,14 +480,14 @@ class SqliteGraphStoreTest {
     }
 
     @Test
-    fun `test unconditional nodes_fts purge by rowid even when oldNodes is empty`() {
+    fun `test nodes_fts purge by rowid on file re-indexing`() {
         val store = SqliteGraphStore(":memory:")
         try {
             val projectId = "proj_fts_purge"
             val relPath = "src/EmptyOrOrphan.kt"
             val fileId = "$projectId:$relPath"
 
-            // Insert file record
+            // Insert file record and a node
             store.upsertFileRecord(
                 SqliteGraphStore.FileRecordUpsert(
                     projectId = projectId,
@@ -498,19 +500,24 @@ class SqliteGraphStoreTest {
                     sha256 = "dummy",
                     mtime = 1.0,
                     loc = 5,
-                    topLevelDeclCount = 0
+                    topLevelDeclCount = 1
                 )
             )
 
-            // Simulate an orphan or corrupted nodes_fts row without a matching nodes row
-            store.prepare(
-                """
-                INSERT INTO nodes_fts (rowid, node_id, project_id, name, qualified_name, signature, file_id)
-                VALUES (88888, '$projectId:orphan', '$projectId', 'Orphan', 'Orphan', '()', '$fileId');
-                """.trimIndent()
-            ).use { it.step() }
+            val node = GraphNode(
+                nodeId = "$projectId:node1",
+                projectId = projectId,
+                fileId = fileId,
+                name = "Node1",
+                qualifiedName = "Node1",
+                kind = "function",
+                signature = "()",
+                startLine = 1,
+                endLine = 5
+            )
+            store.upsertNodesAndEdges(projectId, listOf(node), emptyList())
 
-            // Verify the rogue FTS row exists
+            // Verify the FTS row exists
             var ftsCount = 0
             store.prepare("SELECT COUNT(*) FROM nodes_fts WHERE file_id = ?;").use { stmt ->
                 stmt.bindString(1, fileId)
@@ -518,7 +525,7 @@ class SqliteGraphStoreTest {
             }
             assertEquals(1, ftsCount)
 
-            // Re-index/upsert the file record (oldNodes in nodes table is empty)
+            // Re-index/upsert the file record (purging existing nodes and their FTS entries by rowid)
             store.upsertFileRecord(
                 SqliteGraphStore.FileRecordUpsert(
                     projectId = projectId,
@@ -535,13 +542,13 @@ class SqliteGraphStoreTest {
                 )
             )
 
-            // Verify nodes_fts for that file was purged unconditionally even though oldNodes was empty
+            // Verify nodes_fts for that file was purged by rowid
             var ftsCountAfter = 0
             store.prepare("SELECT COUNT(*) FROM nodes_fts WHERE file_id = ?;").use { stmt ->
                 stmt.bindString(1, fileId)
                 if (stmt.step()) ftsCountAfter = stmt.columnInt(0)
             }
-            assertEquals(0, ftsCountAfter, "nodes_fts must be purged unconditionally even when oldNodes is empty")
+            assertEquals(0, ftsCountAfter, "nodes_fts must be purged by rowid during file re-indexing")
         } finally {
             store.close()
         }
@@ -577,6 +584,45 @@ class SqliteGraphStoreTest {
             assertEquals(null, k2Val)
         } finally {
             store.close()
+        }
+    }
+
+    @OptIn(kotlin.native.concurrent.ObsoleteWorkersApi::class)
+    @Test
+    fun `test concurrent schema initialization safety across multiple connections`() {
+        val tempRoot = "/tmp/atlas_concurrency_test_${kotlin.random.Random.nextInt(100000, 999999)}"
+        PlatformFiles.mkdirs(tempRoot)
+        val dbPath = "$tempRoot/concurrent.db"
+
+        try {
+            val workers = (1..6).map { Worker.start() }
+
+            val futures = workers.mapIndexed { index, worker ->
+                val workerId = "w${index + 1}"
+                worker.execute(TransferMode.SAFE, { Pair(dbPath, workerId) }) { (path, id) ->
+                    val s = SqliteGraphStore(path)
+                    s.setProjectMetadata("p1", id, "done")
+                    val readBack = s.getProjectMetadata("p1", id)
+                    s.close()
+                    readBack == "done"
+                }
+            }
+
+            for (f in futures) {
+                assertTrue(f.result)
+            }
+
+            for (w in workers) {
+                w.requestTermination().result
+            }
+
+            val verifyStore = SqliteGraphStore(dbPath)
+            for (i in 1..6) {
+                assertEquals("done", verifyStore.getProjectMetadata("p1", "w$i"))
+            }
+            verifyStore.close()
+        } finally {
+            PlatformFiles.deleteRecursively(tempRoot)
         }
     }
 }

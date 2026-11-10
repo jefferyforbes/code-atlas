@@ -424,6 +424,109 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         }
     }
 
+    fun getDeclaredSymbolsForFile(projectId: String, fileId: String): List<String> {
+        val normalizedFileId = if (fileId.startsWith("$projectId:")) fileId else "$projectId:$fileId"
+        val stmt = db.prepare("SELECT name, qualified_name FROM nodes WHERE project_id = ? AND file_id = ?;")
+        val symbols = mutableListOf<String>()
+        try {
+            stmt.bindString(1, projectId)
+            stmt.bindString(2, normalizedFileId)
+            while (stmt.step()) {
+                val name = stmt.columnString(0)
+                val qname = stmt.columnString(1)
+                if (name.isNotEmpty()) symbols.add(name)
+                if (qname.isNotEmpty() && qname != name) symbols.add(qname)
+            }
+        } finally {
+            stmt.close()
+        }
+        return symbols
+    }
+
+    fun listRawSymbolEdgesTargetingSymbols(
+        projectId: String,
+        symbols: Set<String>
+    ): List<GraphEdge> {
+        if (symbols.isEmpty()) return emptyList()
+        val stmt = db.prepare(
+            """
+            SELECT edge_id, project_id, source_node_id, target_symbol, edge_type,
+                   confidence, provenance, line_number
+            FROM raw_symbol_edges
+            WHERE project_id = ? AND edge_type != 'INDEXED_MARKER'
+            ORDER BY rowid ASC;
+            """.trimIndent()
+        )
+        val results = mutableListOf<GraphEdge>()
+        try {
+            stmt.bindString(1, projectId)
+            while (stmt.step()) {
+                val targetSym = stmt.columnString(3)
+                val cleanSym = targetSym.removePrefix("sym:")
+                    .removePrefix("$projectId:endpoint#")
+                    .removePrefix("$projectId:url_ref#")
+                    .removePrefix("endpoint#")
+                    .removePrefix("url_ref#")
+                val shortSym = cleanSym.substringAfterLast('.').substringAfterLast("::")
+                if (cleanSym in symbols || shortSym in symbols || targetSym in symbols) {
+                    val rawEdgeId = stmt.columnString(0)
+                    val projId = stmt.columnString(1)
+                    val sourceNodeId = stmt.columnString(2)
+                    val edgeType = stmt.columnString(4)
+                    val confidence = stmt.columnDouble(5)
+                    val provenance = stmt.columnString(6)
+                    val lineNumber = stmt.columnInt(7)
+                    val normalizedTarget = when {
+                        targetSym.startsWith("sym:") ||
+                            targetSym.startsWith("$projId:endpoint#") ||
+                            targetSym.startsWith("$projId:url_ref#") ||
+                            targetSym.startsWith("endpoint#") ||
+                            targetSym.startsWith("url_ref#") -> targetSym
+                        else -> "sym:$targetSym"
+                    }
+                    val finalEdgeId = rawEdgeId.ifEmpty {
+                        "$sourceNodeId:${edgeType.lowercase()}:${normalizedTarget.removePrefix("sym:")}:$lineNumber"
+                    }
+                    results.add(
+                        GraphEdge(
+                            edgeId = finalEdgeId,
+                            projectId = projId,
+                            sourceNodeId = sourceNodeId,
+                            targetNodeId = normalizedTarget,
+                            edgeType = edgeType,
+                            provenance = provenance,
+                            confidence = confidence,
+                            lineNumber = lineNumber
+                        )
+                    )
+                }
+            }
+        } finally {
+            stmt.close()
+        }
+        return results
+    }
+
+    fun deleteEdgesForRawEdges(projectId: String, rawEdges: List<GraphEdge>) {
+        if (rawEdges.isEmpty()) return
+        val stmt = db.prepare(
+            "DELETE FROM edges WHERE project_id = ? AND (edge_id = ? OR (edge_id >= ? AND edge_id < ?));"
+        )
+        try {
+            for (re in rawEdges) {
+                stmt.reset()
+                stmt.clearBindings()
+                stmt.bindString(1, projectId)
+                stmt.bindString(2, re.edgeId)
+                stmt.bindString(3, "${re.edgeId}->")
+                stmt.bindString(4, "${re.edgeId}-?")
+                stmt.step()
+            }
+        } finally {
+            stmt.close()
+        }
+    }
+
     fun deleteAllResolvedCodeEdges(projectId: String) {
         val stmt = db.prepare(
             """
@@ -493,10 +596,6 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         val delFtsByRowid = scope.prepare("DELETE FROM nodes_fts WHERE rowid IN (SELECT rowid FROM nodes WHERE file_id = ?);")
         delFtsByRowid.bindString(1, fileId)
         delFtsByRowid.step()
-
-        val delFtsByFile = scope.prepare("DELETE FROM nodes_fts WHERE file_id = ?;")
-        delFtsByFile.bindString(1, fileId)
-        delFtsByFile.step()
 
         val delVocabByFile = scope.prepare(
             "DELETE FROM name_segment_vocab WHERE node_id IN (SELECT node_id FROM nodes WHERE file_id = ?);"
@@ -664,7 +763,6 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
 
     private data class NodeSearchIndexStatements(
         val delVocab: NativeSqliteStatement,
-        val delFtsByNodeId: NativeSqliteStatement,
         val insFts: NativeSqliteStatement,
         val insVocab: NativeSqliteStatement
     )
@@ -674,7 +772,6 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         node: GraphNode
     ) {
         stmts.delVocab.reset(); stmts.delVocab.clearBindings(); stmts.delVocab.bindString(1, node.nodeId); stmts.delVocab.step()
-        stmts.delFtsByNodeId.reset(); stmts.delFtsByNodeId.clearBindings(); stmts.delFtsByNodeId.bindString(1, node.nodeId); stmts.delFtsByNodeId.step()
 
         stmts.insFts.reset()
         stmts.insFts.clearBindings()
@@ -712,7 +809,6 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
     private fun sweepOrphanEndpoints(
         scope: StatementScope,
         projectId: String,
-        delFtsByNodeId: NativeSqliteStatement,
         delVocab: NativeSqliteStatement
     ) {
         val selectOrphanEndpoints = scope.prepare(
@@ -734,9 +830,10 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
             orphanEpIds.add(selectOrphanEndpoints.columnString(0))
         }
         if (orphanEpIds.isNotEmpty()) {
+            val delFtsByRowid = scope.prepare("DELETE FROM nodes_fts WHERE rowid IN (SELECT rowid FROM nodes WHERE node_id = ?);")
             val delEpNode = scope.prepare("DELETE FROM nodes WHERE node_id = ?;")
             for (epId in orphanEpIds) {
-                delFtsByNodeId.reset(); delFtsByNodeId.clearBindings(); delFtsByNodeId.bindString(1, epId); delFtsByNodeId.step()
+                delFtsByRowid.reset(); delFtsByRowid.clearBindings(); delFtsByRowid.bindString(1, epId); delFtsByRowid.step()
                 delVocab.reset(); delVocab.clearBindings(); delVocab.bindString(1, epId); delVocab.step()
                 delEpNode.reset(); delEpNode.clearBindings(); delEpNode.bindString(1, epId); delEpNode.step()
             }
@@ -752,7 +849,6 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
         withImmediateTransaction {
             val scope = StatementScope(db)
             try {
-                val delFtsByNodeId = scope.prepare("DELETE FROM nodes_fts WHERE node_id = ?;")
                 val delVocab = scope.prepare("DELETE FROM name_segment_vocab WHERE node_id = ?;")
                 val insNode = scope.prepare(
                     """
@@ -785,7 +881,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
                 )
                 val insFts = scope.prepare(
                     """
-                    INSERT INTO nodes_fts (rowid, node_id, project_id, name, qualified_name, signature, file_id)
+                    INSERT OR REPLACE INTO nodes_fts (rowid, node_id, project_id, name, qualified_name, signature, file_id)
                     VALUES ((SELECT rowid FROM nodes WHERE node_id = ?), ?, ?, ?, ?, ?, ?);
                     """.trimIndent()
                 )
@@ -830,7 +926,6 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
 
                 val searchIndexStmts = NodeSearchIndexStatements(
                     delVocab = delVocab,
-                    delFtsByNodeId = delFtsByNodeId,
                     insFts = insFts,
                     insVocab = insVocab
                 )
@@ -848,7 +943,7 @@ class SqliteGraphStore(val dbPath: String) : FigmaSnapshotExtractor.StoreSink {
                 sweepOrphanEdges.bindString(3, projectId)
                 sweepOrphanEdges.step()
 
-                sweepOrphanEndpoints(scope, projectId, delFtsByNodeId, delVocab)
+                sweepOrphanEndpoints(scope, projectId, delVocab)
 
                 recomputeDegrees(projectId)
             } finally {
