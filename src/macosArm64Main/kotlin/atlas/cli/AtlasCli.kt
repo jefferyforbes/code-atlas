@@ -53,17 +53,25 @@ class AtlasCli {
             }
 
             val isMcpServe = args.command == "serve-mcp" || argv.contains("--mcp") || argv.contains("serve")
-            val server = AtlasMcpServer(
-                workspaceRoot = args.workspace,
-                customDbPath = args.customDb,
-                cacheProfile = args.cacheProfile,
-                enableCodegraphTools = isMcpServe || (PlatformFiles.getenv("ATLAS_CODEGRAPH_COMPAT") == "1")
-            )
-
             return try {
-                dispatchCommand(server, args)
-            } finally {
-                server.close()
+                val server = AtlasMcpServer(
+                    workspaceRoot = args.workspace,
+                    customDbPath = args.customDb,
+                    cacheProfile = args.cacheProfile,
+                    enableCodegraphTools = isMcpServe || (PlatformFiles.getenv("ATLAS_CODEGRAPH_COMPAT") == "1")
+                )
+
+                try {
+                    dispatchCommand(server, args)
+                } finally {
+                    server.close()
+                }
+            } catch (t: Throwable) {
+                if (isMcpServe) {
+                    throw t
+                }
+                PlatformFiles.logWarning("AtlasCli", "Error: ${t.message ?: t::class.simpleName}")
+                1
             }
         }
 

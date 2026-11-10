@@ -44,6 +44,7 @@ internal object GraphSchemaMigrator {
     }
 
     private fun setWalModeSafely(db: NativeSqliteDatabase) {
+        if (db.path == ":memory:") return
         for (attempt in 1..50) {
             if (isWalMode(db)) return
             try {

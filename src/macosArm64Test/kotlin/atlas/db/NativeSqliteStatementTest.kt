@@ -402,4 +402,33 @@ class NativeSqliteStatementTest {
             PlatformFiles.delete(dbPath)
         }
     }
+
+    @Test
+    fun testDatabasePostCloseThrowsIllegalStateException() {
+        val db = NativeSqliteDatabase(":memory:")
+        db.close()
+
+        val execEx = assertFailsWith<IllegalStateException> {
+            db.exec("CREATE TABLE t (id INT);")
+        }
+        assertTrue(execEx.message!!.contains("NativeSqliteDatabase connection is closed"))
+
+        val prepEx = assertFailsWith<IllegalStateException> {
+            db.prepare("SELECT 1;")
+        }
+        assertTrue(prepEx.message!!.contains("NativeSqliteDatabase connection is closed"))
+    }
+
+    @Test
+    fun testInMemoryDatabaseInitializesWithoutWalDelay() {
+        val db = NativeSqliteDatabase(":memory:")
+        try {
+            val mark = kotlin.time.TimeSource.Monotonic.markNow()
+            GraphSchemaMigrator.initSchema(db)
+            val elapsedMs = mark.elapsedNow().inWholeMilliseconds
+            assertTrue(elapsedMs < 1000, "In-memory database initialization should be instantaneous (<1000ms), took $elapsedMs ms")
+        } finally {
+            db.close()
+        }
+    }
 }
