@@ -3,6 +3,7 @@ package atlas.extract
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
+// Mock fixture parameters for hermetic offline testing without live network
 class ParamComplexityExtractorTest {
 
     @Test

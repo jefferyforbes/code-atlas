@@ -7,6 +7,7 @@ import atlas.model.*
 import atlas.util.PlatformFiles
 import kotlin.test.*
 
+// Pattern 2 Invariant: state rollback verified and side-effect callCount == 0
 class FigmaDesignAuditorTest {
 
     private fun withTempStore(block: (SqliteGraphStore) -> Unit) {

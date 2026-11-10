@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
+// Pattern 2 Invariant: state rollback verified and side-effect callCount == 0
 class ComplexityExtractorTest {
 
     @Test

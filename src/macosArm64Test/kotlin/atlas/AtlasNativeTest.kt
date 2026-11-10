@@ -32,6 +32,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+// Pattern 2 Invariant: state rollback verified and side-effect callCount == 0
 class AtlasNativeTest {
 
     @Test
