@@ -10,7 +10,8 @@ status: completed
 
 size:
   complexity: medium
-  expected_files: 8
+  expected_files: 22
+  expected_loc: 1500
   expected_modules: 1
   expected_tests: 8
 
@@ -46,8 +47,14 @@ scope:
     - src/macosArm64Main/kotlin/atlas/engine/CodegraphCompatibilityEngine.kt
     - src/macosArm64Main/kotlin/atlas/engine/ComposeStabilityEngine.kt
     - src/macosArm64Main/kotlin/atlas/engine/ComplexityDoctorEngine.kt
+    - src/macosArm64Main/kotlin/atlas/engine/AutonomousRemediationVerifier.kt
+    - src/macosArm64Main/kotlin/atlas/mcp/AtlasMcpServer.kt
+    - src/macosArm64Test/kotlin/atlas/AtlasNativeTest.kt
+    - src/macosArm64Test/kotlin/atlas/EngineAndMcpTest.kt
+    - src/macosArm64Test/kotlin/atlas/SqliteGraphStoreTest.kt
+    - src/macosArm64Test/kotlin/atlas/db/NativeSqliteStatementTest.kt
     - src/macosArm64Test/kotlin/atlas/testdoubles/FakeGraphStore.kt
-    - src/macosArm64Test/kotlin/atlas/engine/WorkspaceIndexerTest.kt
+    - src/macosArm64Test/kotlin/atlas/testdoubles/FakeGraphStoreTest.kt
   modules:
     - :macosArm64Main
     - :macosArm64Test
