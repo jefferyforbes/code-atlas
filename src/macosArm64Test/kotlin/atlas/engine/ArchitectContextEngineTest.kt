@@ -256,8 +256,51 @@ class ArchitectContextEngineTest {
             val md = auditResult["inlineMarkdown"]?.jsonPrimitive?.content ?: ""
             assertTrue(md.contains("3D Concurrency Boundary"), "Architect context must return 3D Concurrency Boundary")
             assertTrue(auditResult["aciScore"]?.jsonPrimitive?.double ?: 0.0 > 0.0, "Must calculate ACI score")
+            assertNotNull(auditResult["semiotic_sizing"], "Must include semiotic_sizing")
         } finally {
             server.store.close()
+            PlatformFiles.deleteRecursively(tmpDir)
+        }
+    }
+
+    @Test
+    fun testComputeSemioticSizingBands() {
+        val pid = getpid()
+        val tmpDir = "/tmp/atlas_semiotic_sizing_test_$pid"
+        PlatformFiles.mkdirs(tmpDir)
+        val dbPath = "$tmpDir/atlas.db"
+
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val synthesizer = ScopeSynthesizer(store)
+            val engine = ArchitectContextEngine(store, synthesizer, tmpDir, "$tmpDir/artifacts")
+
+            // Band 1: <= 3 files, <= 1 module, ACI <= 5.0
+            val band1 = engine.computeSemioticSizing(filesCount = 2, modulesCount = 1, codeAci = 3.5, vscScore = 0.0)
+            assertEquals("Band 1", band1.velocityBand)
+            assertEquals("Fast-Path Direct", band1.recommendedPipeline)
+            assertTrue(band1.rationale.contains("Fast-Path Direct"))
+
+            // Band 2: 4-8 files or 5.0 < ACI <= 15.0
+            val band2ByFiles = engine.computeSemioticSizing(filesCount = 5, modulesCount = 1, codeAci = 4.0, vscScore = 0.0)
+            assertEquals("Band 2", band2ByFiles.velocityBand)
+            assertEquals("Medium Plan", band2ByFiles.recommendedPipeline)
+
+            val band2ByAci = engine.computeSemioticSizing(filesCount = 2, modulesCount = 1, codeAci = 8.5, vscScore = 0.0)
+            assertEquals("Band 2", band2ByAci.velocityBand)
+
+            // Band 3: > 8 files, >= 3 modules, or ACI > 15.0
+            val band3ByFiles = engine.computeSemioticSizing(filesCount = 10, modulesCount = 2, codeAci = 6.0, vscScore = 0.0)
+            assertEquals("Band 3", band3ByFiles.velocityBand)
+            assertEquals("Multi-Agent Swarm", band3ByFiles.recommendedPipeline)
+
+            val band3ByModules = engine.computeSemioticSizing(filesCount = 3, modulesCount = 3, codeAci = 4.0, vscScore = 0.0)
+            assertEquals("Band 3", band3ByModules.velocityBand)
+
+            val band3ByAci = engine.computeSemioticSizing(filesCount = 2, modulesCount = 1, codeAci = 18.0, vscScore = 0.0)
+            assertEquals("Band 3", band3ByAci.velocityBand)
+        } finally {
+            store.close()
             PlatformFiles.deleteRecursively(tmpDir)
         }
     }

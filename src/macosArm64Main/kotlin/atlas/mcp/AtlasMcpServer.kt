@@ -284,6 +284,13 @@ class AtlasMcpServer(
                 val res = rfcGroundEngine.groundSubsystem(project, target)
                 json.encodeToJsonElement(res).jsonObject
             }
+            "interview_context", "interview-context" -> {
+                val res = codegraphEngine.interviewContext(project, target)
+                buildJsonObject {
+                    res.forEach { (k, v) -> put(k, v) }
+                    put("_mcp_raw_text", true)
+                }
+            }
             "explore" -> {
                 val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 12
                 val res = codegraphEngine.explore(project, target, maxFiles = limit)
@@ -637,7 +644,13 @@ class AtlasMcpServer(
             seedTargets = targets,
             depth = depth
         )
-        return json.encodeToJsonElement(result).jsonObject
+        val obj = json.encodeToJsonElement(result).jsonObject
+        return buildJsonObject {
+            obj.forEach { (k, v) -> put(k, v) }
+            result.semioticSizing?.let { sizing ->
+                put("semiotic_sizing", json.encodeToJsonElement(sizing))
+            }
+        }
     }
 
     private fun handleAuditVerifyArchitecture(args: JsonObject, project: String, targets: List<String>): JsonObject {

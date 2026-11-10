@@ -4,6 +4,7 @@ import atlas.db.SqliteGraphStore
 import atlas.model.ArchitectContextResult
 import atlas.model.GraphNode
 import atlas.model.ScopeRecommendation
+import atlas.model.SemioticSizing
 import atlas.util.PlatformFiles
 import kotlin.math.roundToInt
 
@@ -88,6 +89,7 @@ class ArchitectContextEngine(
         val cleanSeeds = seedTargets.map { it.trim().trim('\'', '"') }.filter { it.isNotEmpty() }
         if (cleanSeeds.isEmpty()) {
             val emptyMd = "# Architect Context: (none)\n\nNo seed symbols or files provided. Specify 'targets' or 'seeds' to synthesize 3D Concurrency Scope."
+            val emptySizing = computeSemioticSizing(0, 0, 0.0, 0.0)
             return ArchitectContextResult(
                 projectId = projectId,
                 queryOrSeeds = emptyList(),
@@ -101,7 +103,8 @@ class ArchitectContextEngine(
                 seedSymbols = emptyList(),
                 spilled = false,
                 spilloverPath = null,
-                inlineMarkdown = emptyMd
+                inlineMarkdown = emptyMd,
+                semioticSizing = emptySizing
             )
         }
         val effectiveSeeds = cleanSeeds
@@ -116,12 +119,19 @@ class ArchitectContextEngine(
         val scope = synthesizer.synthesizeScope(projectId, resolvedTargetStrings, depth = depth)
         val aciScore = computeAci(scope.files.size, depth, scope.modules.size)
         val isFastPath = aciScore <= 5.0 && scope.files.size <= 3
+        val vscScore = computeVscScore(projectId, scope.files)
+        val semioticSizing = computeSemioticSizing(
+            filesCount = scope.files.size,
+            modulesCount = scope.modules.size,
+            codeAci = aciScore,
+            vscScore = vscScore
+        )
 
         val keyNodes = if (seedNodes.isNotEmpty()) seedNodes.take(8) else emptyList()
         val skeletons = keyNodes.map { extractStructuralSkeleton(projectId, it) }
         val callHierarchy = buildCallHierarchy(projectId, keyNodes.take(5))
 
-        val aciSummary = AciSummary(aciScore, isFastPath)
+        val aciSummary = AciSummary(aciScore, isFastPath, semioticSizing)
         val fullMarkdown = buildFullMarkdown(
             headerTitle = effectiveSeeds.firstOrNull() ?: projectId,
             scope = scope,
@@ -144,7 +154,8 @@ class ArchitectContextEngine(
                 seedSymbols = keyNodes.map { it.name },
                 spilled = false,
                 spilloverPath = null,
-                inlineMarkdown = fullMarkdown
+                inlineMarkdown = fullMarkdown,
+                semioticSizing = semioticSizing
             )
         }
 
@@ -177,7 +188,8 @@ class ArchitectContextEngine(
             seedSymbols = keyNodes.map { it.name },
             spilled = true,
             spilloverPath = spilloverPath,
-            inlineMarkdown = inlineSummary
+            inlineMarkdown = inlineSummary,
+            semioticSizing = semioticSizing
         )
     }
 
@@ -313,8 +325,57 @@ class ArchitectContextEngine(
 
     private data class AciSummary(
         val aciScore: Double,
-        val isFastPath: Boolean
+        val isFastPath: Boolean,
+        val semioticSizing: SemioticSizing
     )
+
+    internal fun computeSemioticSizing(
+        filesCount: Int,
+        modulesCount: Int,
+        codeAci: Double,
+        vscScore: Double = 0.0
+    ): SemioticSizing {
+        val unifiedAci = (codeAci * 0.7 + vscScore * 0.3 * 10.0).coerceAtLeast(codeAci)
+        val roundedCodeAci = (codeAci * 10.0).roundToInt() / 10.0
+        val roundedVsc = (vscScore * 10.0).roundToInt() / 10.0
+        val roundedUnified = (unifiedAci * 10.0).roundToInt() / 10.0
+
+        val (band, pipeline, rationale) = when {
+            filesCount > 8 || modulesCount >= 3 || roundedUnified > 15.0 -> Triple(
+                "Band 3",
+                "Multi-Agent Swarm",
+                "Target scope touches > 8 files, >= 3 modules, or unified ACI > 15.0. Full compound pipeline (/goal -> /grill -> /architect -> /plan -> /teamwork -> /review)."
+            )
+            filesCount <= 3 && modulesCount <= 1 && roundedUnified <= 5.0 -> Triple(
+                "Band 1",
+                "Fast-Path Direct",
+                "Target scope touches <= 3 files across 1 module with unified ACI <= 5.0 (Fast-Path Direct). Bypass /grill-me, /architect, /plan, and /teamwork. Execute Inspect -> Implement -> Verify directly."
+            )
+            else -> Triple(
+                "Band 2",
+                "Medium Plan",
+                "Target scope touches 4-8 files or unified ACI is between 5.0 and 15.0. Single-agent /plan contract -> /execute -> /review."
+            )
+        }
+
+        return SemioticSizing(
+            codeAci = roundedCodeAci,
+            vscScore = roundedVsc,
+            unifiedAci = roundedUnified,
+            velocityBand = band,
+            recommendedPipeline = pipeline,
+            rationale = rationale
+        )
+    }
+
+    private fun computeVscScore(projectId: String, files: List<String>): Double {
+        if (files.isEmpty()) return 0.0
+        val uiNodesCount = files.sumOf { relPath ->
+            val nodes = store.getNodesForFile(projectId, relPath)
+            nodes.count { it.kind == "composable" || it.name.startsWith("Preview") || it.fileId.contains("figma") || it.archLayer == "presentation" }
+        }
+        return if (uiNodesCount == 0) 0.0 else ((uiNodesCount * 0.5) * 10.0).roundToInt() / 10.0
+    }
 
     private data class MarkdownSections(
         val skeletons: List<String>,
@@ -335,7 +396,7 @@ class ArchitectContextEngine(
     ): String {
         val sb = StringBuilder()
         sb.append("# Architect Context: ").append(headerTitle).append("\n\n")
-        appendConcurrencyBoundarySection(sb, scope, aciSummary.aciScore, aciSummary.isFastPath)
+        appendConcurrencyBoundarySection(sb, scope, aciSummary)
         appendSkeletonsSection(sb, sections.skeletons)
         appendCallHierarchySection(sb, sections.callHierarchy)
         return sb.toString().trimEnd()
@@ -344,9 +405,12 @@ class ArchitectContextEngine(
     private fun appendConcurrencyBoundarySection(
         sb: StringBuilder,
         scope: ScopeRecommendation,
-        aciScore: Double,
-        isFastPath: Boolean
+        aciSummary: AciSummary
     ) {
+        val aciScore = aciSummary.aciScore
+        val isFastPath = aciSummary.isFastPath
+        val sizing = aciSummary.semioticSizing
+
         sb.append("## 1. 3D Concurrency Boundary\n")
         appendBoundaryFiles(sb, scope.files)
         sb.append("- **Modules (").append(scope.modules.size).append(")**: ")
@@ -355,6 +419,10 @@ class ArchitectContextEngine(
         sb.append(if (scope.architecture.isNotEmpty()) scope.architecture.joinToString(", ") else "unclassified").append("\n")
         sb.append("- **ACI Complexity Score**: ").append(aciScore)
         sb.append(" (Fast Path: ").append(if (isFastPath) "YES <= 5.0" else "NO -> Multi-Agent Swarm").append(")\n")
+        sb.append("- **Semiotic Sizing**: ").append(sizing.velocityBand)
+        sb.append(" (Unified ACI: ").append(sizing.unifiedAci)
+        sb.append(", Pipeline: ").append(sizing.recommendedPipeline).append(")\n")
+        sb.append("- **Velocity Rationale**: ").append(sizing.rationale).append("\n")
 
         if (scope.collidingPlans.isNotEmpty()) {
             sb.append("- **Active Plan Collisions**: ").append(scope.collidingPlans.joinToString(", ")).append("\n")
@@ -426,6 +494,9 @@ class ArchitectContextEngine(
 
         sb.append("- **ACI Score**: ").append(aciScore)
         sb.append(" (").append(if (isFastPath) "Solo Fast Path" else "Multi-Agent Swarm").append(")\n")
+        sb.append("- **Semiotic Sizing**: ").append(aciSummary.semioticSizing.velocityBand)
+        sb.append(" (Unified ACI: ").append(aciSummary.semioticSizing.unifiedAci)
+        sb.append(", Pipeline: ").append(aciSummary.semioticSizing.recommendedPipeline).append(")\n")
 
         if (collidingPlans.isNotEmpty()) {
             sb.append("- **Plan Collisions**: ").append(collidingPlans.joinToString(", ")).append("\n")
