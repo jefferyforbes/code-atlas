@@ -6,13 +6,16 @@ import atlas.model.ComposeDoctorReport
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.util.PlatformFiles
+import kotlinx.cinterop.*
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import platform.posix.getpid
+import platform.posix.kill
 import platform.posix.rmdir
+import platform.posix.usleep
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -707,6 +710,165 @@ class AutonomousRemediationVerifierTest {
             assertFalse(res.testsPreserved)
             assertTrue(res.details.any { it.contains("exit code 139") }, "Details should report exit code 139 for SIGSEGV")
             assertEquals(initialContent, PlatformFiles.readText(filePath), "Crashing test process must trigger rollback")
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun `commands completing within timeout return standard exit codes`() {
+        val tmpDir = makeTempDir()
+        try {
+            val exit0 = AutonomousRemediationVerifier.executeShellInWorkspace(tmpDir, "exit 0", timeoutSeconds = 5)
+            assertEquals(0, exit0)
+
+            val exit42 = AutonomousRemediationVerifier.executeShellInWorkspace(tmpDir, "exit 42", timeoutSeconds = 5)
+            assertEquals(42, exit42)
+
+            val exitFile = AutonomousRemediationVerifier.executeShellInWorkspace(tmpDir, "echo 'atlas_ok' > out.txt", timeoutSeconds = 5)
+            assertEquals(0, exitFile)
+            assertTrue(PlatformFiles.exists("$tmpDir/out.txt"))
+            assertEquals("atlas_ok\n", PlatformFiles.readText("$tmpDir/out.txt"))
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun `commands exceeding timeout are killed and return timeout status`() {
+        val tmpDir = makeTempDir()
+        try {
+            val mark = kotlin.time.TimeSource.Monotonic.markNow()
+            val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(tmpDir, "sleep 10", timeoutSeconds = 1)
+            val elapsed = mark.elapsedNow()
+
+            assertEquals(AutonomousRemediationVerifier.TIMEOUT_EXIT_CODE, exitCode)
+            assertTrue(elapsed.inWholeMilliseconds < 4000, "Timed out command should be killed promptly, took ${elapsed.inWholeMilliseconds}ms")
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun `commands spawning background process tree are terminated cleanly on timeout`() {
+        val tmpDir = makeTempDir()
+        try {
+            val pidFile = "$tmpDir/bg.pid"
+            val mark = kotlin.time.TimeSource.Monotonic.markNow()
+            val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(
+                tmpDir,
+                "sh -c '(sleep 10 & echo \$! > \"$pidFile\") && sleep 10'",
+                timeoutSeconds = 1
+            )
+            val elapsed = mark.elapsedNow()
+
+            assertEquals(AutonomousRemediationVerifier.TIMEOUT_EXIT_CODE, exitCode)
+            assertTrue(elapsed.inWholeMilliseconds < 4000, "Process tree should be killed promptly, took ${elapsed.inWholeMilliseconds}ms")
+
+            if (PlatformFiles.exists(pidFile)) {
+                val bgPid = PlatformFiles.readText(pidFile).trim().toIntOrNull()
+                if (bgPid != null) {
+                    var alive = true
+                    for (i in 0 until 50) {
+                        if (kill(bgPid, 0) != 0) {
+                            alive = false
+                            break
+                        }
+                        usleep(10_000u)
+                    }
+                    assertFalse(alive, "Background child process $bgPid must be terminated by supervisor on timeout")
+                }
+            }
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun `commands failing with background process tree terminate child processes cleanly`() {
+        val tmpDir = makeTempDir()
+        try {
+            val pidFile = "$tmpDir/bg_fail.pid"
+            val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(
+                tmpDir,
+                "sh -c '(sleep 10 & echo \$! > \"$pidFile\") && exit 1'",
+                timeoutSeconds = 5
+            )
+
+            assertEquals(1, exitCode)
+            if (PlatformFiles.exists(pidFile)) {
+                val bgPid = PlatformFiles.readText(pidFile).trim().toIntOrNull()
+                if (bgPid != null) {
+                    var alive = true
+                    for (i in 0 until 50) {
+                        if (kill(bgPid, 0) != 0) {
+                            alive = false
+                            break
+                        }
+                        usleep(10_000u)
+                    }
+                    assertFalse(alive, "Background child process $bgPid must be terminated on command failure")
+                }
+            }
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun `interactive commands reading stdin receive EOF and do not hang`() {
+        val tmpDir = makeTempDir()
+        try {
+            val mark = kotlin.time.TimeSource.Monotonic.markNow()
+            val exitCode = AutonomousRemediationVerifier.executeShellInWorkspace(
+                tmpDir,
+                "read line",
+                timeoutSeconds = 5
+            )
+            val elapsed = mark.elapsedNow()
+
+            assertEquals(1, exitCode)
+            assertTrue(elapsed.inWholeMilliseconds < 1500, "Command reading stdin should receive EOF immediately, took ${elapsed.inWholeMilliseconds}ms")
+        } finally {
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun `files staged to disk are guaranteed to rollback cleanly on command timeout`() {
+        val tmpDir = makeTempDir()
+        try {
+            val filePath = "$tmpDir/SupervisedService.kt"
+            val initialContent = """
+                package com.example
+                class SupervisedService {
+                    val status = "initial"
+                }
+            """.trimIndent()
+            PlatformFiles.writeText(filePath, initialContent)
+
+            val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir)
+
+            val res = verifier.verifyAndApply(
+                AutonomousRemediationVerifier.VerificationRequest(
+                    projectSlug = "proj",
+                    relPath = "SupervisedService.kt",
+                    beforeSnippet = """val status = "initial"""",
+                    afterSnippet = """val status = "modified"""",
+                    dryRun = false,
+                    testCommand = "sleep 10",
+                    testTimeoutSeconds = 1
+                )
+            )
+
+            assertFalse(res.valid, "Verification must fail on test command timeout")
+            assertEquals("POST_VERIFICATION", res.phase)
+            assertFalse(res.testsPreserved)
+            assertTrue(
+                res.details.any { it.contains("timed out") && it.contains("124") },
+                "Details should report command timeout with exit code 124. Details: ${res.details}"
+            )
+            assertEquals(initialContent, PlatformFiles.readText(filePath), "Files staged to disk must rollback cleanly on command timeout")
         } finally {
             cleanDir(tmpDir)
         }

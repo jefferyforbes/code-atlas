@@ -816,4 +816,100 @@ class ArchitectureRemediationEngineTest {
             cleanDir(tmpDir)
         }
     }
+
+    @Test
+    fun `spawned multi-file splits are cleaned up and original file rolled back on command timeout`() {
+        val tmpDir = makeTempDir()
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val filePath = "$tmpDir/MultiDeclaration.kt"
+            val initialContent = """
+                package com.example.model
+
+                class MultiDeclaration {
+                    val id: String = "primary"
+                }
+
+                class SecondaryWorker {
+                    val active: Boolean = true
+                }
+            """.trimIndent()
+            PlatformFiles.writeText(filePath, initialContent)
+
+            val indexer = WorkspaceIndexer(tmpDir, store)
+            indexer.indexWorkspace("test_proj")
+
+            val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir, store = store)
+            val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
+
+            val report = engine.planAndRemediate(
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = false,
+                    splitBoost003 = true,
+                    testCommand = "sleep 10",
+                    testTimeoutSeconds = 1
+                )
+            )
+
+            val rx = report.prescriptions.first()
+            assertFalse(rx.verified, "Timing out test command must fail verification")
+            assertFalse(rx.applied, "Timing out test command must not be applied")
+
+            // Verify disk was rolled back: original file restored, spawned file deleted
+            assertEquals(initialContent, PlatformFiles.readText(filePath))
+            assertFalse(PlatformFiles.exists("$tmpDir/SecondaryWorker.kt"), "Spawned multi-file split must be cleaned up on timeout")
+        } finally {
+            store.close()
+            cleanDir(tmpDir)
+        }
+    }
+
+    @Test
+    fun `private helper conversions are rolled back and original file restored on command timeout`() {
+        val tmpDir = makeTempDir()
+        val dbPath = "$tmpDir/test.db"
+        val store = SqliteGraphStore(dbPath)
+        try {
+            val filePath = "$tmpDir/ServiceHelpers.kt"
+            val initialContent = """
+                package com.example.service
+
+                class ServiceHelpers {
+                    fun execute(): String = helper()
+                }
+
+                fun helper(): String = "internal"
+            """.trimIndent()
+            PlatformFiles.writeText(filePath, initialContent)
+
+            val indexer = WorkspaceIndexer(tmpDir, store)
+            indexer.indexWorkspace("test_proj")
+
+            val verifier = AutonomousRemediationVerifier(workspaceRoot = tmpDir, store = store)
+            val engine = ArchitectureRemediationEngine(workspaceRoot = tmpDir, store = store, verifier = verifier)
+
+            val report = engine.planAndRemediate(
+                ArchitectureRemediationEngine.RemediationPlanRequest(
+                    projectId = "test_proj",
+                    dryRun = false,
+                    splitBoost003 = false,
+                    makePrivateBoost003 = true,
+                    testCommand = "sleep 10",
+                    testTimeoutSeconds = 1
+                )
+            )
+
+            val rx = report.prescriptions.first()
+            assertFalse(rx.verified, "Timing out test command must fail verification")
+            assertFalse(rx.applied, "Timing out test command must not be applied")
+
+            // Verify disk was rolled back: original file restored
+            assertEquals(initialContent, PlatformFiles.readText(filePath))
+        } finally {
+            store.close()
+            cleanDir(tmpDir)
+        }
+    }
 }

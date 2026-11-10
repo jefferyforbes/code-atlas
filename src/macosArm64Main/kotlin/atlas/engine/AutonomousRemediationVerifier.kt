@@ -9,8 +9,11 @@ import atlas.model.ComposeDoctorReport
 import atlas.model.GraphNode
 import atlas.model.RemediationVerificationResult
 import atlas.util.PlatformFiles
+import kotlinx.cinterop.*
+import platform.posix.*
 import kotlin.math.roundToInt
-import platform.posix.system
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 /**
  * Autonomous remediation verification engine enforcing pre-flight validation,
@@ -28,30 +31,8 @@ class AutonomousRemediationVerifier(
         prescription: ComposeDoctorReport.Prescription,
         dryRun: Boolean = true,
         testCommand: String? = null,
-        testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null
-    ): RemediationVerificationResult {
-        return verifyAndApply(
-            VerificationRequest(
-                projectSlug = projectSlug,
-                relPath = prescription.filePath,
-                beforeSnippet = prescription.beforeSnippet,
-                afterSnippet = prescription.afterSnippet,
-                ruleId = prescription.ruleId,
-                targetNodeId = prescription.targetNodeId,
-                writeSiteSafe = prescription.writeSiteSafe,
-                dryRun = dryRun,
-                testCommand = testCommand,
-                testVerifier = testVerifier
-            )
-        )
-    }
-
-    fun verifyPrescription(
-        projectSlug: String,
-        prescription: ComplexityDoctorReport.Prescription,
-        dryRun: Boolean = true,
-        testCommand: String? = null,
-        testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null
+        testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null,
+        testTimeoutSeconds: Int = DEFAULT_TIMEOUT_SECONDS
     ): RemediationVerificationResult {
         return verifyAndApply(
             VerificationRequest(
@@ -65,7 +46,33 @@ class AutonomousRemediationVerifier(
                 dryRun = dryRun,
                 testCommand = testCommand,
                 testVerifier = testVerifier,
-                expectedReductionPercent = prescription.reductionPercent
+                testTimeoutSeconds = testTimeoutSeconds
+            )
+        )
+    }
+
+    fun verifyPrescription(
+        projectSlug: String,
+        prescription: ComplexityDoctorReport.Prescription,
+        dryRun: Boolean = true,
+        testCommand: String? = null,
+        testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null,
+        testTimeoutSeconds: Int = DEFAULT_TIMEOUT_SECONDS
+    ): RemediationVerificationResult {
+        return verifyAndApply(
+            VerificationRequest(
+                projectSlug = projectSlug,
+                relPath = prescription.filePath,
+                beforeSnippet = prescription.beforeSnippet,
+                afterSnippet = prescription.afterSnippet,
+                ruleId = prescription.ruleId,
+                targetNodeId = prescription.targetNodeId,
+                writeSiteSafe = prescription.writeSiteSafe,
+                dryRun = dryRun,
+                testCommand = testCommand,
+                testVerifier = testVerifier,
+                expectedReductionPercent = prescription.reductionPercent,
+                testTimeoutSeconds = testTimeoutSeconds
             )
         )
     }
@@ -353,8 +360,10 @@ class AutonomousRemediationVerifier(
 
         var passed = false
         try {
-            val exitCode = executeShellInWorkspace(workspaceRoot, testCommand)
-            if (exitCode != 0) {
+            val exitCode = executeShellInWorkspace(workspaceRoot, testCommand, req.testTimeoutSeconds)
+            if (exitCode == TIMEOUT_EXIT_CODE) {
+                details.add("Test command '$testCommand' timed out after ${req.testTimeoutSeconds}s (exit code $exitCode).")
+            } else if (exitCode != 0) {
                 details.add("Test command '$testCommand' failed (exit code $exitCode).")
             } else {
                 details.add("Test command '$testCommand' passed (exit code 0).")
@@ -420,14 +429,19 @@ class AutonomousRemediationVerifier(
     ): String? {
         if (!req.dryRun) {
             if (req.testCommand.isNullOrBlank()) {
-                try {
+                val ok = try {
                     PlatformFiles.writeText(fullPath, modifiedContent)
-                    details.add("Remediation safely written to disk at ${req.relPath}.")
                 } catch (e: Exception) {
                     val msg = "Application failed: Write error writing to $fullPath: ${e.message}"
                     details.add(msg)
                     return msg
                 }
+                if (!ok) {
+                    val msg = "Application failed: Could not write modified content to $fullPath"
+                    details.add(msg)
+                    return msg
+                }
+                details.add("Remediation safely written to disk at ${req.relPath}.")
             } else {
                 details.add("Remediation safely verified and committed to disk at ${req.relPath}.")
             }
@@ -464,7 +478,8 @@ class AutonomousRemediationVerifier(
         val dryRun: Boolean = true,
         val testCommand: String? = null,
         val testVerifier: ((filePath: String, modifiedContent: String) -> Boolean)? = null,
-        val expectedReductionPercent: Double? = null
+        val expectedReductionPercent: Double? = null,
+        val testTimeoutSeconds: Int = DEFAULT_TIMEOUT_SECONDS
     )
 
     fun verifyAndApply(req: VerificationRequest): RemediationVerificationResult {
@@ -497,6 +512,7 @@ class AutonomousRemediationVerifier(
 
         val writeErr = commitRemediation(fullPath, modifiedContent, req, details)
         if (writeErr != null) {
+            runCatching { PlatformFiles.writeText(fullPath, originalContent) }
             return failResult("APPLICATION", req, writeErr, details, PassedStage.TestsPreserved)
         }
 
@@ -518,6 +534,9 @@ class AutonomousRemediationVerifier(
     }
 
     companion object {
+        const val DEFAULT_TIMEOUT_SECONDS = 180
+        const val TIMEOUT_EXIT_CODE = 124
+
         fun hasBalancedDelimiters(maskedText: String): Boolean {
             val stack = mutableListOf<Char>()
             for (c in maskedText) {
@@ -555,17 +574,85 @@ class AutonomousRemediationVerifier(
             return first >= 0 && source.indexOf(target, first + target.length) < 0
         }
 
-        internal fun executeShellInWorkspace(workspaceRoot: String, cmdStr: String): Int {
+        @OptIn(ExperimentalForeignApi::class)
+        internal fun executeShellInWorkspace(
+            workspaceRoot: String,
+            cmdStr: String,
+            timeoutSeconds: Int = DEFAULT_TIMEOUT_SECONDS
+        ): Int {
             val escapedRoot = "'" + workspaceRoot.replace("'", "'\\''") + "'"
             val cmd = "cd $escapedRoot && $cmdStr"
-            val rawStatus = system(cmd)
-            if (rawStatus == -1) return -1
-            val signal = rawStatus and 0x7f
-            return if (signal != 0) {
-                128 + signal
-            } else {
-                (rawStatus shr 8) and 0xff
+            val pid = fork()
+            if (pid < 0) return -1
+            if (pid == 0) {
+                setpgid(0, 0)
+                val devNull = open("/dev/null", O_RDONLY)
+                if (devNull >= 0) {
+                    dup2(devNull, STDIN_FILENO)
+                    close(devNull)
+                }
+                memScoped {
+                    val args = allocArray<CPointerVar<ByteVar>>(4)
+                    args[0] = "/bin/sh".cstr.ptr
+                    args[1] = "-c".cstr.ptr
+                    args[2] = cmd.cstr.ptr
+                    args[3] = null
+                    execv("/bin/sh", args)
+                }
+                _exit(127)
             }
+
+            setpgid(pid, pid)
+
+            val effectiveTimeout = timeoutSeconds.coerceAtLeast(1).seconds
+            val startTime = TimeSource.Monotonic.markNow()
+            var childTerminated = false
+
+            memScoped {
+                val statusPtr = alloc<IntVar>()
+                try {
+                    while (true) {
+                        val waitRes = waitpid(pid, statusPtr.ptr, WNOHANG)
+                        if (waitRes == pid) {
+                            childTerminated = true
+                            val rawStatus = statusPtr.value
+                            val signal = rawStatus and 0x7f
+                            return if (signal != 0) {
+                                128 + signal
+                            } else {
+                                (rawStatus shr 8) and 0xff
+                            }
+                        } else if (waitRes < 0) {
+                            if (errno == EINTR) {
+                                continue
+                            }
+                            childTerminated = true
+                            return -1
+                        }
+
+                        if (startTime.elapsedNow() >= effectiveTimeout) {
+                            kill(-pid, SIGKILL)
+                            kill(pid, SIGKILL)
+                            for (i in 0 until 50) {
+                                val wr = waitpid(pid, statusPtr.ptr, WNOHANG)
+                                if (wr == pid || wr < 0) break
+                                usleep(10_000u)
+                            }
+                            childTerminated = true
+                            return TIMEOUT_EXIT_CODE
+                        }
+
+                        usleep(20_000u)
+                    }
+                } finally {
+                    kill(-pid, SIGKILL)
+                    if (!childTerminated) {
+                        kill(pid, SIGKILL)
+                        waitpid(pid, statusPtr.ptr, WNOHANG)
+                    }
+                }
+            }
+            return -1
         }
 
         private val VAR_PROP_SNIPPET_RE = Regex("""\bvar\s+([A-Za-z0-9_]+)\s*:""")
