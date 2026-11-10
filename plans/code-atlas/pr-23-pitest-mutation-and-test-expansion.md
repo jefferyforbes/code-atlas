@@ -33,9 +33,11 @@ parallelizable: false
 scope:
   files:
     - plans/code-atlas/pr-23-pitest-mutation-and-test-expansion.md
+    - src/macosArm64Main/kotlin/atlas/db/NativeSqliteDatabase.kt
     - src/macosArm64Test/kotlin/atlas/testdoubles/FakeGraphStore.kt
     - src/macosArm64Test/kotlin/atlas/integration/AtlasMutationVerificationTest.kt
   modules:
+    - :macosArm64Main
     - :macosArm64Test
   architecture:
     - Mutation Testing Expansion (MUT-002): Extend AtlasMutationVerificationTest with 5 new mutant killer patterns targeting INVERT_NEGS, CONDITIONALS_BOUNDARY, VOID_METHOD_CALLS, and RETURNS mutants.
