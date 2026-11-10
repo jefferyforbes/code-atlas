@@ -30,6 +30,14 @@ kotlin {
                 baseName = "atlas"
                 linkerOpts("-lsqlite3")
             }
+            framework {
+                baseName = "AtlasKit"
+                linkerOpts("-lsqlite3")
+            }
+            sharedLib {
+                baseName = "atlas"
+                linkerOpts("-lsqlite3")
+            }
         }
     }
 
