@@ -156,4 +156,33 @@ class GraphQueryEngineTest {
         assertEquals(1, upstream.edges.size)
         assertEquals("A->B", upstream.edges.first().edgeId)
     }
+
+    @Test
+    fun testDynamicEffectiveDegreeCalculationWhenNodesHaveZeroDegree() {
+        val store = FakeGraphStore()
+        val project = "dynamic-degrees-test"
+
+        // Nodes constructed with default inDegree = 0, outDegree = 0
+        val nRoot = GraphNode(nodeId = "DynamicRoot", projectId = project, fileId = "R.kt", name = "DynamicRoot", qualifiedName = "DynamicRoot", kind = "class")
+        val nLeaf = GraphNode(nodeId = "DynamicLeaf", projectId = project, fileId = "L.kt", name = "DynamicLeaf", qualifiedName = "DynamicLeaf", kind = "class")
+        val nIsolated = GraphNode(nodeId = "DynamicIsolated", projectId = project, fileId = "I.kt", name = "DynamicIsolated", qualifiedName = "DynamicIsolated", kind = "class")
+
+        val edge = GraphEdge(edgeId = "R->L", projectId = project, sourceNodeId = "DynamicRoot", targetNodeId = "DynamicLeaf", edgeType = "calls")
+
+        store.upsertNodesAndEdges(project, listOf(nRoot, nLeaf, nIsolated), listOf(edge))
+
+        val engine = GraphQueryEngine(store, project)
+
+        val roots = engine.findRoots()
+        assertEquals(1, roots.size)
+        assertEquals("DynamicRoot", roots.first().nodeId)
+
+        val leaves = engine.findLeaves()
+        assertEquals(1, leaves.size)
+        assertEquals("DynamicLeaf", leaves.first().nodeId)
+
+        val islands = engine.findIslands()
+        assertEquals(1, islands.size)
+        assertEquals("DynamicIsolated", islands.first().nodeId)
+    }
 }
