@@ -35,11 +35,11 @@ class CodegraphCompatibilityTest {
         val server = AtlasMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath, enableCodegraphTools = true)
         try {
             val tools = server.toolDefinitions()
-            assertEquals(12, tools.size, "Must expose strictly 12 tools when enableCodegraphTools=true")
+            assertEquals(13, tools.size, "Must expose strictly 13 tools when enableCodegraphTools=true")
 
             val toolNames = tools.map { it["name"]!!.jsonPrimitive.content }.toSet()
             val expectedNames = setOf(
-                "atlas_query", "atlas_audit", "figma_audit", "figma_scope",
+                "atlas_query", "atlas_audit", "figma_audit", "figma_scope", "atlas_outline",
                 "codegraph_explore", "codegraph_node", "codegraph_search",
                 "codegraph_callers", "codegraph_callees", "codegraph_impact",
                 "codegraph_status", "codegraph_files"

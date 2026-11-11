@@ -155,7 +155,7 @@ class AtlasCli {
 
         private val CODEGRAPH_INSPECTION_COMMANDS = setOf(
             "explore", "callers", "callees", "impact", "status", "files", "search", "node", "context", "index", "synthesize-scope",
-            "rfc-ground", "rfc_ground", "spike"
+            "rfc-ground", "rfc_ground", "spike", "outline"
         )
         private val CODEGRAPH_REMEDIATION_COMMANDS = setOf(
             "audit", "fix", "doctor", "dead-code", "record-memory", "verify-remediation", "query"
@@ -172,7 +172,7 @@ class AtlasCli {
         }
 
         private fun dispatchInspectionCommand(server: AtlasMcpServer, args: CliArgs): Int = when (args.command) {
-            "explore", "callers", "callees", "impact", "status", "files", "search", "node" -> runCodegraphCommand(server, args)
+            "explore", "callers", "callees", "impact", "status", "files", "search", "node", "outline" -> runCodegraphCommand(server, args)
             "context" -> runContextCommand(server, args)
             "index" -> runIndexCommand(server, args)
             "synthesize-scope" -> runSynthesizeScopeCommand(server, args)
@@ -227,6 +227,12 @@ class AtlasCli {
                     file = args.fileKey,
                     includeCode = args.includeSource
                 )
+            )
+            "outline" -> effectiveServer.codegraphEngine.outline(
+                projectId = args.project,
+                targetFile = args.target.ifEmpty { args.paths.firstOrNull() ?: args.fileKey.orEmpty() },
+                workspaceRoot = args.workspace,
+                isJson = args.isJson
             )
             else -> JsonObject(emptyMap())
         }
@@ -989,6 +995,7 @@ class AtlasCli {
                   verify-remediation Verify and optionally apply autonomous remediation with pre-flight & post-verification checks
                   rfc-ground         Extract dense subsystem discovery table (contracts, entry points, tiers)
                   spike              Run topological hypothesis test (decoupling BFS, clean-arch, blast-ceiling)
+                  outline            Extract compact structural AST outline (<= 400B) with line spans
                   serve-mcp          Run JSON-RPC 2.0 MCP server over stdio
                   version            Print version information
 

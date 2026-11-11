@@ -7,7 +7,7 @@ import platform.posix.*
 
 /**
  * Pure POSIX file system utilities for Kotlin/Native on macOS,
- * backed by com.orion:orion-native-io:0.1.0.
+ * backed by com.orion:orion-native-io:0.2.0.
  */
 @OptIn(ExperimentalForeignApi::class)
 object PlatformFiles {

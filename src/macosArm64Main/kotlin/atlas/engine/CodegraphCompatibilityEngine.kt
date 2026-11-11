@@ -1,12 +1,15 @@
 package atlas.engine
 
 import atlas.bridge.VaultPlanBridge
+import atlas.extract.OutlineExtractor
 import atlas.model.GraphReader
 import atlas.model.GraphNode
 import atlas.model.LiveSourceSlice
 import atlas.util.PlatformFiles
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
@@ -259,6 +262,38 @@ class CodegraphCompatibilityEngine(
             put("text", sb.toString().trimEnd())
         }
     }
+
+    fun outline(
+        projectId: String,
+        targetFile: String,
+        workspaceRoot: String? = null,
+        isJson: Boolean = false
+    ): JsonObject {
+        val effectiveWorkspace = workspaceRoot ?: this.workspaceRoot
+        val result = OutlineExtractor.extract(
+            store = store,
+            projectId = projectId,
+            targetFile = targetFile,
+            workspaceRoot = effectiveWorkspace
+        )
+
+        return buildJsonObject {
+            result.error?.let { put("error", it) }
+            put("text", result.text)
+            put("file", result.file)
+            put("symbols_count", result.symbolsCount)
+            put("source", result.source)
+            put("byte_size", result.byteSize)
+        }
+    }
+
+    fun outlineText(
+        projectId: String,
+        targetFile: String,
+        workspaceRoot: String? = null,
+        isJson: Boolean = false
+    ): String = outline(projectId, targetFile, workspaceRoot, isJson)["text"]?.jsonPrimitive?.contentOrNull ?: ""
+
 
     private fun readNodeFileLines(
         resolvedRelPath: String,

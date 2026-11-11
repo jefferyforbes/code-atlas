@@ -74,9 +74,9 @@ class ComposeCliMcpIntegrationTest {
 
             val server = AtlasMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
             try {
-                // 1. Verify strictly 4 MCP tools and <= 25-word parameter descriptions
+                // 1. Verify strictly 5 MCP tools and <= 25-word parameter descriptions
                 val tools = server.toolDefinitions()
-                assertEquals(4, tools.size, "AtlasMcpServer must expose strictly 4 MCP tools")
+                assertEquals(5, tools.size, "AtlasMcpServer must expose strictly 5 MCP tools")
                 for (tool in tools) {
                     val toolName = tool["name"]!!.jsonPrimitive.content
                     val props = tool["inputSchema"]!!.jsonObject["properties"]!!.jsonObject

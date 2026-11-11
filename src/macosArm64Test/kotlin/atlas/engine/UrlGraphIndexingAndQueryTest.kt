@@ -99,7 +99,7 @@ class UrlGraphIndexingAndQueryTest {
 
             val mcpServer = AtlasMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath)
             try {
-                assertEquals(4, mcpServer.toolDefinitions().size)
+                assertEquals(5, mcpServer.toolDefinitions().size)
                 val urlSearchRes = mcpServer.callTool(
                     "atlas_query",
                     buildJsonObject {

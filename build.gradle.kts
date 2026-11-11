@@ -45,7 +45,7 @@ kotlin {
         val macosArm64Main by getting {
             dependencies {
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
-                implementation("com.orion:orion-native-io:0.1.0")
+                implementation("com.orion:orion-native-io:0.2.0")
                 implementation("com.orion:orion-mcp-cli-core:0.1.0")
                 implementation("com.orion:orion-markdown-vault:0.1.0")
             }
@@ -53,7 +53,7 @@ kotlin {
         val macosArm64Test by getting {
             dependencies {
                 implementation(kotlin("test"))
-                implementation("com.orion:orion-native-io-test-fixtures:0.1.0")
+                implementation("com.orion:orion-native-io-test-fixtures:0.2.0")
                 implementation("com.orion:orion-mcp-cli-test-fixtures:0.1.0")
                 implementation("com.orion:orion-markdown-vault-test-fixtures:0.1.0")
             }

@@ -204,6 +204,7 @@ class AtlasMcpServer(
     fun callTool(name: String, arguments: JsonObject): JsonObject {
         val explicitPath = arguments["projectPath"]?.jsonPrimitive?.contentOrNull
             ?: arguments["project-path"]?.jsonPrimitive?.contentOrNull
+            ?: arguments["workspace"]?.jsonPrimitive?.contentOrNull
         val explicitProject = arguments["project"]?.jsonPrimitive?.contentOrNull
         val project = when {
             !explicitProject.isNullOrBlank() -> explicitProject
@@ -237,13 +238,14 @@ class AtlasMcpServer(
         "atlas_audit" -> handleAudit(arguments)
         "figma_audit" -> handleFigmaAudit(arguments)
         "figma_scope" -> handleFigmaScope(arguments)
+        "atlas_outline" -> handleOutline(arguments)
         else -> dispatchCodegraphTool(name, arguments)
     }
 
     private fun callToolDirect(name: String, arguments: JsonObject): JsonObject {
         val project = resolveProjectFromArgs(arguments)
         val rawPayload = dispatchToolByName(name, arguments)
-        val payload = if (name.startsWith("codegraph_") && rawPayload.containsKey("text")) {
+        val payload = if ((name.startsWith("codegraph_") || name == "atlas_outline") && rawPayload.containsKey("text")) {
             buildJsonObject {
                 rawPayload.forEach { (k, v) -> put(k, v) }
                 put("_mcp_raw_text", true)
@@ -1135,6 +1137,28 @@ class AtlasMcpServer(
         val seeds = normalizeFigmaSeeds(rawSeeds, parsedFileUrl?.nodeId)
         val scope = figmaAuditor.synthesizeFigmaScope(project, fileKey, seeds)
         return json.encodeToJsonElement(scope).jsonObject
+    }
+
+    private fun handleOutline(args: JsonObject): JsonObject {
+        val file = args["file"]?.jsonPrimitive?.contentOrNull
+            ?: args["path"]?.jsonPrimitive?.contentOrNull
+            ?: args["target"]?.jsonPrimitive?.contentOrNull
+            ?: ""
+        if (file.isBlank()) {
+            return buildJsonObject {
+                put("error", "Missing required 'file' parameter for atlas_outline")
+                put("text", "Error: 'file' parameter is required.")
+                put("file", "")
+                put("symbols_count", 0)
+            }
+        }
+        val project = resolveProjectFromArgs(args)
+        val workspace = args["workspace"]?.jsonPrimitive?.contentOrNull
+        return codegraphEngine.outline(
+            projectId = project,
+            targetFile = file,
+            workspaceRoot = workspace
+        )
     }
 
     private fun resolveProjectFromArgs(args: JsonObject): String {

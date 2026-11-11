@@ -33,6 +33,11 @@ internal object McpToolSchemas {
                 put("name", "figma_scope")
                 put("description", "Synthesize Figma 3D Concurrency Scope (spatial canvas bounds, shared components, token layers).")
                 put("inputSchema", figmaScopeSchema())
+            },
+            buildJsonObject {
+                put("name", "atlas_outline")
+                put("description", "Extract compact structural outline (classes, functions, headings) with line numbers bounded strictly to 400 bytes.")
+                put("inputSchema", outlineSchema())
             }
         )
 
@@ -377,6 +382,27 @@ internal object McpToolSchemas {
         }
         putJsonArray("required") {
             add("file_key")
+        }
+    }
+
+    private fun outlineSchema(): JsonObject = buildJsonObject {
+        put("type", "object")
+        putJsonObject("properties") {
+            putJsonObject("file") {
+                put("type", "string")
+                put("description", "Relative or absolute file path to inspect and outline.")
+            }
+            putJsonObject("project") {
+                put("type", "string")
+                put("description", "Optional project slug or workspace identifier (default: organisation).")
+            }
+            putJsonObject("workspace") {
+                put("type", "string")
+                put("description", "Optional absolute workspace root path to resolve target file.")
+            }
+        }
+        putJsonArray("required") {
+            add("file")
         }
     }
 

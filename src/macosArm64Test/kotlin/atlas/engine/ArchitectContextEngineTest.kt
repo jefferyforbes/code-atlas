@@ -220,9 +220,9 @@ class ArchitectContextEngineTest {
 
         val server = AtlasMcpServer(workspaceRoot = tmpDir, customDbPath = dbPath, enableCodegraphTools = false)
         try {
-            // Default 4-tool boundary check
+            // Default 5-tool boundary check
             val tools = server.toolDefinitions()
-            assertEquals(4, tools.size, "Default MCP mode must expose exactly 4 tools")
+            assertEquals(5, tools.size, "Default MCP mode must expose exactly 5 tools")
 
             val nodeSym = GraphNode(
                 nodeId = "shop:src/Checkout.kt#CheckoutService",

@@ -70,7 +70,7 @@ data class CliArgs(
             "dead-code", "dead_code", "record-memory", "record_memory", "serve-mcp", "serve",
             "explore", "context", "callers", "callees", "impact", "status", "files", "search",
             "node", "version", "verify-remediation", "verify_remediation", "init", "migrate-tools", "migrate_tools",
-            "rfc-ground", "rfc_ground", "spike"
+            "rfc-ground", "rfc_ground", "spike", "outline"
         )
 
         private val FIGMA_COMMANDS = setOf("index", "query", "audit", "synthesize-scope", "shortest-path", "shortest_path", "version")
