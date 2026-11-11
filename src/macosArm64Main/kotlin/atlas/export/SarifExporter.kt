@@ -201,6 +201,7 @@ object SarifExporter {
     private fun parseStartLine(lineSpan: String): Int {
         if (lineSpan.isBlank()) return 1
         val parts = lineSpan.split('-').filter { it.isNotBlank() }
-        return parts.firstOrNull()?.trim()?.toIntOrNull() ?: 1
+        val rawNum = parts.firstOrNull()?.trim()?.removePrefix("L")?.removePrefix("l") ?: return 1
+        return rawNum.toIntOrNull() ?: 1
     }
 }

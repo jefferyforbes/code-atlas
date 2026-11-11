@@ -4,6 +4,7 @@ import atlas.AtlasClient
 import atlas.model.GraphNode
 import atlas.model.GraphStats
 import atlas.util.PlatformFiles
+import atlas.util.Sha256
 
 /**
  * Reactive file watching and incremental delta notification session for Code Atlas.
@@ -88,6 +89,11 @@ class AtlasWatchSession(
                 val currentMtime = PlatformFiles.mtime(diskFile)
                 if (currentMtime > cachedMeta.second) {
                     changedFiles.add(relPath)
+                } else if (currentMtime == cachedMeta.second) {
+                    val text = PlatformFiles.readText(diskFile)
+                    if (Sha256.digest(text) != cachedMeta.first) {
+                        changedFiles.add(relPath)
+                    }
                 }
             }
         }

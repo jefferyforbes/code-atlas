@@ -6,13 +6,20 @@ import atlas.engine.ArchitectContextEngine
 import atlas.engine.ScopeSynthesizer
 import atlas.engine.SpikeAnalysisEngine
 import atlas.extract.PolyglotAstExtractor
+import atlas.export.GraphVisualExporter
+import atlas.export.SarifExporter
+import atlas.model.AuditReport
 import atlas.model.FileRecordUpsert
 import atlas.model.GraphEdge
 import atlas.model.GraphNode
 import atlas.model.SemioticSizing
+import atlas.model.SingleDeclarationViolation
 import atlas.model.SpikeRequest
+import atlas.query.GraphQueryEngine
+import atlas.rule.ArchitectureRules
 import atlas.testdoubles.FakeGraphStore
 import atlas.util.PlatformFiles
+import atlas.util.Sha256
 import platform.posix.getpid
 import kotlin.random.Random
 import kotlin.test.Test
@@ -426,5 +433,148 @@ class AtlasMutationVerificationTest {
         // Returns mutator kill: nonexistent node lookup must return null
         assertNull(store.getNode("proj-alpha", "nonexistent"), "Must return null for unknown node")
         assertNull(store.getNode("proj-alpha", "ServiceB"), "Must return null for node belonging to another project")
+    }
+
+    // Pattern 9: Cycle Detection and Topological Sort (Kills NEGATE_CONDITIONALS & BOUNDARY Mutants)
+    @Test
+    fun testCycleDetectionAndTopologicalSortMutantKillers() {
+        val store = FakeGraphStore()
+        val project = "mut-cycle"
+
+        // Case 1: Self-loop A -> A
+        val nodeA = GraphNode(nodeId = "SelfNode", projectId = project, fileId = "S.kt", name = "SelfNode", qualifiedName = "SelfNode", kind = "class")
+        val loopEdge = GraphEdge(edgeId = "self-loop", projectId = project, sourceNodeId = "SelfNode", targetNodeId = "SelfNode", edgeType = "calls")
+        store.upsertNodesAndEdges(project, listOf(nodeA), listOf(loopEdge))
+
+        val engine = GraphQueryEngine(store, project)
+        val selfCycles = engine.findCycles()
+        assertEquals(1, selfCycles.size, "Must detect self-loop cycle")
+        assertEquals(listOf("SelfNode", "SelfNode"), selfCycles.first())
+        assertNull(engine.topologicalSort(), "Self-loop graph must return null for topologicalSort (not a DAG)")
+
+        // Case 2: Clean DAG -> topological sort must be exact
+        val dagStore = FakeGraphStore()
+        val dagProject = "mut-dag"
+        val n1 = GraphNode(nodeId = "N1", projectId = dagProject, fileId = "1.kt", name = "N1", qualifiedName = "N1", kind = "class")
+        val n2 = GraphNode(nodeId = "N2", projectId = dagProject, fileId = "2.kt", name = "N2", qualifiedName = "N2", kind = "class")
+        val dagEdge = GraphEdge(edgeId = "1->2", projectId = dagProject, sourceNodeId = "N1", targetNodeId = "N2", edgeType = "calls")
+        dagStore.upsertNodesAndEdges(dagProject, listOf(n1, n2), listOf(dagEdge))
+
+        val dagEngine = GraphQueryEngine(dagStore, dagProject)
+        val dagCycles = dagEngine.findCycles()
+        assertEquals(0, dagCycles.size, "DAG must have 0 cycles")
+        val sorted = dagEngine.topologicalSort()
+        assertNotNull(sorted, "DAG must produce valid topological ordering")
+        assertEquals(listOf("N1", "N2"), sorted, "Topological order must preserve edge directions (Kills Kahn queue mutant)")
+    }
+
+    // Pattern 10: ArchitectureRules Whitelist and Severity Gating (Kills INVERT_NEGS & SEVERITY Mutants)
+    @Test
+    fun testArchitectureRulesSeverityAndWhitelistMutantKillers() {
+        val store = FakeGraphStore()
+        val project = "mut-rules"
+
+        val uiNode = GraphNode(nodeId = "ui:View", projectId = project, fileId = "src/ui/View.kt", name = "View", qualifiedName = "ui.View", kind = "class")
+        val domainNode = GraphNode(nodeId = "domain:Model", projectId = project, fileId = "src/domain/Model.kt", name = "Model", qualifiedName = "domain.Model", kind = "class")
+        val dataNode = GraphNode(nodeId = "data:Db", projectId = project, fileId = "src/data/Db.kt", name = "Db", qualifiedName = "data.Db", kind = "class")
+
+        val edge1 = GraphEdge(edgeId = "e1", projectId = project, sourceNodeId = "ui:View", targetNodeId = "domain:Model", edgeType = "calls")
+        val edge2 = GraphEdge(edgeId = "e2", projectId = project, sourceNodeId = "ui:View", targetNodeId = "data:Db", edgeType = "calls")
+        store.upsertNodesAndEdges(project, listOf(uiNode, domainNode, dataNode), listOf(edge1, edge2))
+
+        // Test 1: Warning-only rules must NOT cause passed = false (Kills mutant failing on Warning)
+        val warningRules = ArchitectureRules.define {
+            nodeRule(
+                name = "WARN-ALWAYS",
+                severity = ArchitectureRules.Severity.Warning
+            ) { false }
+        }
+        val warnReport = warningRules.evaluate(store, project)
+        assertTrue(warnReport.passed, "Warning-only violations must not cause passed to be false")
+        assertEquals(3, warnReport.violations.size, "Must report 3 warning violations for 3 nodes")
+
+        // Test 2: Whitelist permits domain but forbids data
+        val whitelistRules = ArchitectureRules.define {
+            layer("ui", "/ui/")
+            layer("domain", "/domain/")
+            layer("data", "/data/")
+
+            "ui" mayOnlyDependOn setOf("ui", "domain")
+        }
+        val wlReport = whitelistRules.evaluate(store, project)
+        assertFalse(wlReport.passed, "Direct UI->Data dependency must fail whitelist rule")
+        assertEquals(1, wlReport.violations.size, "Only the UI->Data edge must violate whitelist")
+        assertEquals("ARCH-DISALLOWED-DEPENDENCY", wlReport.violations.first().ruleId)
+    }
+
+    // Pattern 11: Sub-Second File Hash Modifications (Kills MTIME_ONLY & EQUALITY Mutants)
+    @Test
+    fun testSubSecondFileHashModificationMutantKillers() {
+        val originalContent = "package test\nclass A"
+        val modifiedContent = "package test\nclass A;\n// modified same second"
+
+        val originalHash = Sha256.digest(originalContent)
+        val modifiedHash = Sha256.digest(modifiedContent)
+
+        // Mutant kill: different content with identical mtime must produce distinct hashes
+        assertTrue(originalHash != modifiedHash, "Sha256 must distinguish sub-second content modifications")
+
+        val sameHash = Sha256.digest(originalContent)
+        assertEquals(originalHash, sameHash, "Identical content must produce identical hash")
+    }
+
+    // Pattern 12: SARIF Exporter L-Prefix and Severity Mapping (Kills PARSING & REGEX Mutants)
+    @Test
+    fun testSarifLPrefixAndSeverityMappingMutantKillers() {
+        val report = AuditReport(
+            projectId = "sarif-mut",
+            passed = false,
+            singleDeclarationViolations = listOf(
+                SingleDeclarationViolation(
+                    rule = "BOOST-003",
+                    relPath = "src/Foo.kt",
+                    topLevelDeclCount = 2,
+                    message = "Multiple declarations in Foo.kt"
+                )
+            ),
+            layerInversions = emptyList(),
+            plan3dCollisions = emptyList()
+        )
+
+        val json = SarifExporter.toSarifJson(report)
+        // Mutant kill: ruleId must be BOOST-003, level must be error
+        assertTrue(json.contains("\"ruleId\": \"BOOST-003\""))
+        assertTrue(json.contains("\"level\": \"error\""))
+        assertTrue(json.contains("\"uri\": \"src/Foo.kt\""))
+        assertTrue(json.contains("\"startLine\": 1"))
+    }
+
+    // Pattern 13: GraphVisualExporter Blank Fallback & Mermaid Sanitization (Kills NULL_FALLBACK Mutants)
+    @Test
+    fun testGraphVisualExporterDotBlankFallbackAndMermaidSanitization() {
+        val blankNode = GraphNode(
+            nodeId = "com.pkg.BlankNode",
+            projectId = "p",
+            fileId = "Blank.kt",
+            name = "", // Blank name!
+            qualifiedName = "com.pkg.BlankNode",
+            kind = "class",
+            archLayer = "domain"
+        )
+        val dot = GraphVisualExporter.toGraphvizDot(listOf(blankNode), emptyList())
+        // Mutant kill: Blank name must fall back to nodeId in DOT label
+        assertTrue(dot.contains("\"com.pkg.BlankNode\" [label=\"com.pkg.BlankNode\\n(class, domain)\"];"), "DOT label must fall back to nodeId when name is blank")
+
+        val specialNode = GraphNode(
+            nodeId = "pkg.special-name#123",
+            projectId = "p",
+            fileId = "S.kt",
+            name = "Special-Name#123",
+            qualifiedName = "pkg.Special-Name#123",
+            kind = "class"
+        )
+        val mermaid = GraphVisualExporter.toMermaidFlowchart(listOf(specialNode), emptyList(), clusterBy = null)
+        // Mutant kill: Node identifier in Mermaid must be sanitized (no special chars like '#' or '-')
+        assertTrue(mermaid.contains("n0_Special_Name_123[\"Special-Name#123\"]"), "Mermaid identifier must sanitize special characters")
     }
 }

@@ -138,25 +138,51 @@ class GraphQueryEngine(
         return if (result.size == nodeIds.size) result else null
     }
 
+    private fun resolveEffectiveDegrees(): Pair<Map<String, Int>, Map<String, Int>> {
+        val edges = store.listEdges(projectSlug)
+        val inDeg = mutableMapOf<String, Int>()
+        val outDeg = mutableMapOf<String, Int>()
+        for (edge in edges) {
+            inDeg[edge.targetNodeId] = (inDeg[edge.targetNodeId] ?: 0) + 1
+            outDeg[edge.sourceNodeId] = (outDeg[edge.sourceNodeId] ?: 0) + 1
+        }
+        return Pair(inDeg, outDeg)
+    }
+
     /**
      * Find isolated nodes with zero in-degree and zero out-degree.
      */
     fun findIslands(): List<GraphNode> {
-        return store.listNodes(projectSlug).filter { it.inDegree == 0 && it.outDegree == 0 }
+        val (inDeg, outDeg) = resolveEffectiveDegrees()
+        return store.listNodes(projectSlug).filter { node ->
+            val inD = if (node.inDegree > 0) node.inDegree else (inDeg[node.nodeId] ?: 0)
+            val outD = if (node.outDegree > 0) node.outDegree else (outDeg[node.nodeId] ?: 0)
+            inD == 0 && outD == 0
+        }
     }
 
     /**
      * Find root entrypoint nodes with zero in-degree and positive out-degree.
      */
     fun findRoots(): List<GraphNode> {
-        return store.listNodes(projectSlug).filter { it.inDegree == 0 && it.outDegree > 0 }
+        val (inDeg, outDeg) = resolveEffectiveDegrees()
+        return store.listNodes(projectSlug).filter { node ->
+            val inD = if (node.inDegree > 0) node.inDegree else (inDeg[node.nodeId] ?: 0)
+            val outD = if (node.outDegree > 0) node.outDegree else (outDeg[node.nodeId] ?: 0)
+            inD == 0 && outD > 0
+        }
     }
 
     /**
      * Find terminal leaf nodes with positive in-degree and zero out-degree.
      */
     fun findLeaves(): List<GraphNode> {
-        return store.listNodes(projectSlug).filter { it.inDegree > 0 && it.outDegree == 0 }
+        val (inDeg, outDeg) = resolveEffectiveDegrees()
+        return store.listNodes(projectSlug).filter { node ->
+            val inD = if (node.inDegree > 0) node.inDegree else (inDeg[node.nodeId] ?: 0)
+            val outD = if (node.outDegree > 0) node.outDegree else (outDeg[node.nodeId] ?: 0)
+            inD > 0 && outD == 0
+        }
     }
 
     /**

@@ -91,7 +91,8 @@ object GraphVisualExporter {
         sb.append("    edge [fontname=\"Helvetica\", fontsize=10];\n")
 
         for (node in nodes) {
-            val label = "${escapeQuotes(node.name)}\\n(${escapeQuotes(node.kind)}, ${escapeQuotes(node.archLayer)})"
+            val displayName = node.name.ifBlank { node.nodeId }
+            val label = "${escapeQuotes(displayName)}\\n(${escapeQuotes(node.kind)}, ${escapeQuotes(node.archLayer)})"
             sb.append("    \"").append(escapeQuotes(node.nodeId)).append("\" [label=\"").append(label).append("\"];\n")
         }
 
