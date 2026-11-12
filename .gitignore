@@ -16,3 +16,4 @@ artifacts/
 dist/
 .kotlin/
 local.properties
+.artifacts/
