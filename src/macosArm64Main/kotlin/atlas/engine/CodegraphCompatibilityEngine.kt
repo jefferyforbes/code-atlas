@@ -356,13 +356,14 @@ class CodegraphCompatibilityEngine(
     }
 
     private fun buildSymbolNotFoundResponse(projectId: String, targetSymbol: String): JsonObject {
-        val candidates = store.searchNodes(projectId, targetSymbol, limit = 5)
+        val candidates = store.searchNodes(projectId, targetSymbol, limit = 3)
         val sb = StringBuilder()
         sb.append("Symbol \"$targetSymbol\" not found in project '$projectId'.")
         if (candidates.isNotEmpty()) {
             sb.append(" Did you mean:\n")
-            candidates.forEach { c ->
-                sb.append("- **${c.name}** (${c.kind}) at `${c.fileId.substringAfter(":")}:${c.startLine}`\n")
+            candidates.take(3).forEach { c ->
+                val f = if (c.fileId.contains(':')) c.fileId.substringAfter(':') else c.fileId
+                sb.append("- **${c.name}** (${c.kind}) at `$f:${c.startLine}`\n")
             }
         }
         return buildJsonObject {
@@ -383,7 +384,7 @@ class CodegraphCompatibilityEngine(
     }
 
     private fun appendSymbolCallersCallees(projectId: String, sb: StringBuilder, node: GraphNode) {
-        val callers = store.getCallers(projectId, node.nodeId, depth = 1).take(10)
+        val callers = store.getCallers(projectId, node.nodeId, depth = 1).filter { it.name.isNotBlank() }.take(10)
         if (callers.isNotEmpty()) {
             sb.append("#### Direct Callers (${callers.size}):\n")
             callers.forEach { c ->
@@ -393,7 +394,7 @@ class CodegraphCompatibilityEngine(
             sb.append("\n")
         }
 
-        val callees = store.getCallees(projectId, node.nodeId, depth = 1).take(10)
+        val callees = store.getCallees(projectId, node.nodeId, depth = 1).filter { it.name.isNotBlank() }.take(10)
         if (callees.isNotEmpty()) {
             sb.append("#### Direct Callees (${callees.size}):\n")
             callees.forEach { c ->
@@ -434,11 +435,9 @@ class CodegraphCompatibilityEngine(
 
     fun callers(projectId: String, symbol: String, file: String? = null, limit: Int = 20): JsonObject {
         val node = findNode(projectId, symbol, file)
-            ?: return buildJsonObject {
-                put("text", "Symbol \"$symbol\" not found in project '$projectId'.")
-            }
+            ?: return buildSymbolNotFoundResponse(projectId, symbol)
 
-        val callers = store.getCallers(projectId, node.nodeId, depth = 1).take(limit)
+        val callers = store.getCallers(projectId, node.nodeId, depth = 1).filter { it.name.isNotBlank() }.take(limit)
         val sb = StringBuilder()
         sb.append("### Callers of `${node.name}` (${callers.size}):\n\n")
         if (callers.isEmpty()) {
@@ -457,11 +456,9 @@ class CodegraphCompatibilityEngine(
 
     fun callees(projectId: String, symbol: String, file: String? = null, limit: Int = 20): JsonObject {
         val node = findNode(projectId, symbol, file)
-            ?: return buildJsonObject {
-                put("text", "Symbol \"$symbol\" not found in project '$projectId'.")
-            }
+            ?: return buildSymbolNotFoundResponse(projectId, symbol)
 
-        val callees = store.getCallees(projectId, node.nodeId, depth = 1).take(limit)
+        val callees = store.getCallees(projectId, node.nodeId, depth = 1).filter { it.name.isNotBlank() }.take(limit)
         val sb = StringBuilder()
         sb.append("### Callees of `${node.name}` (${callees.size}):\n\n")
         if (callees.isEmpty()) {
@@ -480,9 +477,7 @@ class CodegraphCompatibilityEngine(
 
     fun impact(projectId: String, symbol: String, file: String? = null, depth: Int = 2): JsonObject {
         val node = findNode(projectId, symbol, file)
-            ?: return buildJsonObject {
-                put("text", "Symbol \"$symbol\" not found in project '$projectId'.")
-            }
+            ?: return buildSymbolNotFoundResponse(projectId, symbol)
 
         val impact = store.getImpactRadius(projectId, node.nodeId, depth = depth)
         val sb = StringBuilder()
@@ -579,8 +574,16 @@ class CodegraphCompatibilityEngine(
             if (matched != null) return matched
         }
 
-        return store.getNode(projectId, cleanSymbol)
-            ?: store.searchNodes(projectId, cleanSymbol, limit = 1).firstOrNull()
+        val exact = store.getNode(projectId, cleanSymbol)
+        if (exact != null) return exact
+
+        // Search candidates but strictly enforce symbol name or qualified suffix match
+        val candidates = store.searchNodes(projectId, cleanSymbol, limit = 10)
+        return candidates.firstOrNull { candidate ->
+            candidate.name.equals(cleanSymbol, ignoreCase = true) ||
+                candidate.qualifiedName?.equals(cleanSymbol, ignoreCase = true) == true ||
+                candidate.qualifiedName?.endsWith(".$cleanSymbol", ignoreCase = true) == true
+        }
     }
 
     private fun findNodeInFile(nodesInFile: List<GraphNode>, symbol: String, line: Int?): GraphNode? {

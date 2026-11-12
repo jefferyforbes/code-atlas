@@ -15,7 +15,7 @@ class AtlasNativeInteropTest {
 
     @Test
     fun testVersionMatchesExpected() {
-        assertEquals("0.8.0", AtlasNativeInterop.version())
+        assertEquals("0.9.0", AtlasNativeInterop.version())
     }
 
     @Test

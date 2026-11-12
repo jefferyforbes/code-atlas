@@ -155,7 +155,7 @@ class AtlasCli {
 
         private val CODEGRAPH_INSPECTION_COMMANDS = setOf(
             "explore", "callers", "callees", "impact", "status", "files", "search", "node", "context", "index", "synthesize-scope",
-            "rfc-ground", "rfc_ground", "spike", "outline"
+            "rfc-ground", "rfc_ground", "spike", "outline", "interview-context", "interview_context"
         )
         private val CODEGRAPH_REMEDIATION_COMMANDS = setOf(
             "audit", "fix", "doctor", "dead-code", "record-memory", "verify-remediation", "query"
@@ -177,6 +177,7 @@ class AtlasCli {
             "index" -> runIndexCommand(server, args)
             "synthesize-scope" -> runSynthesizeScopeCommand(server, args)
             "rfc-ground", "rfc_ground" -> runRfcGroundCommand(server, args)
+            "interview-context", "interview_context" -> runInterviewContextCommand(server, args)
             "spike" -> runSpikeCommand(server, args)
             else -> 1
         }
@@ -194,6 +195,7 @@ class AtlasCli {
 
         private fun dispatchLifecycleCommand(server: AtlasMcpServer, args: CliArgs): Int = when (args.command) {
             "migrate-tools" -> runMigrateToolsCommand(server, args.paths, args.target, args.applyRemediation, args.isJson)
+            "dump-mcp-schemas" -> runDumpMcpSchemasCommand(args)
             "serve-mcp" -> { server.serveStdio(); 0 }
             "init" -> runInitCommand(args)
             "version" -> printVersion(if (args.isJson) arrayOf("--json") else emptyArray())
@@ -207,9 +209,27 @@ class AtlasCli {
         private fun runCodegraphCommand(server: AtlasMcpServer, args: CliArgs): Int {
             val effectiveServer = server.resolveServerForProject(args.project, args.workspace)
             val res = queryCodegraphEngine(effectiveServer, args)
-            val text = if (args.isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
-            println(text)
+            if (args.isJson) {
+                println(jsonPretty.encodeToString(res))
+            } else {
+                val rawText = res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                val text = if (args.command == "files" && rawText.length > AtlasCli.SUMMARY_CEILING_BYTES) {
+                    formatFilesSummary(args.project, rawText)
+                } else {
+                    rawText
+                }
+                println(truncateSummary(text, args.isJson))
+            }
             return 0
+        }
+
+        private fun formatFilesSummary(projectId: String, rawText: String): String {
+            val lines = rawText.lines().filter { it.isNotBlank() }
+            val totalFiles = lines.size
+            val sample = lines.take(3).joinToString(", ") {
+                it.trim().removePrefix("- ").substringBefore(" ")
+            }
+            return "[Files] project=$projectId count=$totalFiles (preview: $sample; use --json for complete list)"
         }
 
         private fun queryCodegraphEngine(effectiveServer: AtlasMcpServer, args: CliArgs): JsonObject = when (args.command) {
@@ -249,7 +269,7 @@ class AtlasCli {
                 depth = args.depth
             )
             val text = if (args.isJson) jsonPretty.encodeToString(res) else res.inlineMarkdown
-            println(text)
+            println(truncateSummary(text, args.isJson))
             return 0
         }
 
@@ -259,6 +279,40 @@ class AtlasCli {
             val result = effectiveServer.rfcGroundEngine.groundSubsystem(args.project, queryText)
             val text = if (args.isJson) jsonPretty.encodeToString(result) else result.markdownTable
             println(text)
+            return 0
+        }
+
+        private fun runInterviewContextCommand(server: AtlasMcpServer, args: CliArgs): Int {
+            val effectiveServer = server.resolveServerForProject(args.project, args.workspace)
+            val target = getQueryText(args).ifEmpty { args.target }
+            val res = effectiveServer.codegraphEngine.interviewContext(args.project, target)
+            val text = if (args.isJson) jsonPretty.encodeToString(res) else res["text"]?.jsonPrimitive?.contentOrNull ?: ""
+            println(text)
+            return 0
+        }
+
+        private fun runDumpMcpSchemasCommand(args: CliArgs): Int {
+            val targetDir = args.outPath
+                ?: args.target.ifEmpty { null }
+                ?: "${PlatformFiles.userHome()}/.gemini/antigravity/mcp/atlas_atlas"
+            PlatformFiles.mkdirs(targetDir)
+            val tools = atlas.mcp.McpToolSchemas.toolDefinitions(enableCodegraphTools = true)
+            var count = 0
+            for (tool in tools) {
+                val name = tool["name"]?.jsonPrimitive?.content ?: continue
+                val desc = tool["description"]?.jsonPrimitive?.content ?: ""
+                val inputSchema = tool["inputSchema"] ?: buildJsonObject {}
+                val antigravitySchema = buildJsonObject {
+                    put("name", name)
+                    put("description", desc)
+                    put("parameters", inputSchema)
+                }
+                val filePath = "$targetDir/$name.json"
+                if (PlatformFiles.writeText(filePath, jsonPretty.encodeToString(antigravitySchema))) {
+                    count++
+                }
+            }
+            println("[OK] Dumped $count MCP tool schemas to $targetDir")
             return 0
         }
 

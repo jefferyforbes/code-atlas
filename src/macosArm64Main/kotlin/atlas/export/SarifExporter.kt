@@ -44,7 +44,7 @@ object SarifExporter {
                     putJsonObject("tool") {
                         putJsonObject("driver") {
                             put("name", "Code Atlas")
-                            put("version", "0.8.0")
+                            put("version", "0.9.0")
                             put("informationUri", "https://github.com/jefferyforbes/code-atlas")
                             putJsonArray("rules") {
                                 buildStandardRules()

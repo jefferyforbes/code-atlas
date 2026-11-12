@@ -62,7 +62,8 @@ data class CliArgs(
     var legacyToolsFlag: Boolean = false,
     var hypothesisArg: String? = null,
     var forbiddenLayerArg: String? = null,
-    var maxFilesArg: Int? = null
+    var maxFilesArg: Int? = null,
+    var outPath: String? = null
 ) {
     companion object {
         private val GENERAL_COMMANDS = setOf(
@@ -70,7 +71,8 @@ data class CliArgs(
             "dead-code", "dead_code", "record-memory", "record_memory", "serve-mcp", "serve",
             "explore", "context", "callers", "callees", "impact", "status", "files", "search",
             "node", "version", "verify-remediation", "verify_remediation", "init", "migrate-tools", "migrate_tools",
-            "rfc-ground", "rfc_ground", "spike", "outline"
+            "rfc-ground", "rfc_ground", "spike", "outline", "interview-context", "interview_context",
+            "dump-mcp-schemas", "dump_mcp_schemas"
         )
 
         private val FIGMA_COMMANDS = setOf("index", "query", "audit", "synthesize-scope", "shortest-path", "shortest_path", "version")
@@ -182,6 +184,8 @@ data class CliArgs(
             "migrate_tools" -> "migrate-tools"
             "serve" -> "serve-mcp"
             "rfc_ground" -> "rfc-ground"
+            "interview_context" -> "interview-context"
+            "dump_mcp_schemas" -> "dump-mcp-schemas"
             else -> arg
         }
 
@@ -389,6 +393,7 @@ data class CliArgs(
         private fun parseStorageOption(argv: Array<String>, idx: Int, args: CliArgs): Int {
             extractOption(argv, idx, "--db")?.let { (v, next) -> args.customDb = v; return next }
             extractOption(argv, idx, "--cache-profile")?.let { (v, next) -> args.cacheProfile = v; return next }
+            extractOption(argv, idx, "--out")?.let { (v, next) -> args.outPath = v; return next }
             extractOption(argv, idx, "--depth")?.let { (v, next) ->
                 args.depth = v.toIntOrNull() ?: 2
                 args.hasExplicitDepth = true

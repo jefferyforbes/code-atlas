@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0] - 2026-11-12
+
+### Added
+- **AST Outline Extraction (`atlas outline` & `atlas_outline`)**: High-performance structural outline extractor and formatter enforcing a strict $\le 400\text{B}$ output ceiling for polyglot code and Markdown files with workspace boundary validation (#217).
+- **Declarative Architecture Rules DSL (`ArchitectureRules`)**: Polyglot architectural rules testing engine with layer whitelist and forbidden dependency evaluations.
+- **Topological Graph Query Engine (`GraphQueryEngine`)**: Directed cycle detection, Kahn's algorithm topological sorting, and BFS graph slicing with depth and directional filters.
+- **Visual Exporters & OASIS SARIF 2.1.0 (`GraphVisualExporter`, `SarifExporter`)**: Export graph representations to Mermaid flowcharts, Graphviz DOT graphs, and Cytoscape JSON. Full OASIS SARIF 2.1.0 export with accurate relative source URIs and `startColumn: 1` annotations for GitHub Code Scanning and SonarQube.
+- **Reactive Watch Session (`AtlasWatchSession`)**: Reactive file watcher stream supporting incremental graph indexing deltas and sub-second polling.
+- **Native Framework & C-Interop Packaging (`AtlasKit`)**: Native framework and shared library outputs with foreign interop gateway in `AtlasNativeInterop`.
+- **Atlas Client Facade (`AtlasClient`, `Atlas`)**: High-level programmatic entrypoints and `GraphReader`/`GraphStore` dependency inversion abstractions.
+
+### Fixed
+- **Architectural Layer Inversions**: Resolved Clean Architecture layer inversions across core facades, rules DSL, query engine, and watchers.
+- **Visual Exporter Syntax Escaping**: Enhanced string sanitization in Mermaid flowcharts and Graphviz DOT exports, escaping backslashes and edge delimiters.
+- **Zero-High Complexity Ratchet**: Decomposed complex evaluation and traversal loops across `ArchitectureRules`, `GraphQueryEngine`, `SarifExporter`, `GraphVisualExporter`, and `AtlasWatchSession`, enforcing `high_ratchet = 0`.
+
 ## [0.8.0] - 2026-11-02
 
 ### Added

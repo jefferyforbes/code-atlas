@@ -13,7 +13,7 @@ import kotlinx.serialization.json.putJsonArray
  */
 object AtlasNativeInterop {
 
-    const val VERSION = "0.8.0"
+    const val VERSION = "0.9.0"
 
     private val json = Json { prettyPrint = false }
 
