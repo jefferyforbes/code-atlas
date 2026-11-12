@@ -218,4 +218,61 @@ class CodegraphCompatibilityTest {
         val textContent = firstItem["text"]!!.jsonPrimitive.content
         assertTrue(textContent.startsWith("### CodeGraph Explore Context"), "JSON-RPC response text must be clean Markdown")
     }
+
+    @Test
+    fun testSymbolNotFoundSuggestsNearestCandidates() = withShopWorkspace { server ->
+        val nodeRes = server.callTool("codegraph_node", buildJsonObject {
+            put("symbol", "BasketCalculatorUnknown")
+            put("project", "shop")
+        })
+        val nodeText = nodeRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(nodeText.contains("Symbol \"BasketCalculatorUnknown\" not found in project 'shop'."), "Must report not found")
+        assertTrue(nodeText.contains("Did you mean:"), "Must suggest nearest candidates")
+        assertTrue(nodeText.contains("BasketPriceCalculator"), "Must include candidate BasketPriceCalculator")
+
+        val callersRes = server.callTool("codegraph_callers", buildJsonObject {
+            put("symbol", "NonExistentFunction")
+            put("project", "shop")
+        })
+        val callersText = callersRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(callersText.contains("Symbol \"NonExistentFunction\" not found in project 'shop'."), "Callers must report 404 on unindexed symbol")
+
+        val impactRes = server.callTool("codegraph_impact", buildJsonObject {
+            put("symbol", "NonExistentFunction")
+            put("project", "shop")
+        })
+        val impactText = impactRes["text"]?.jsonPrimitive?.content ?: ""
+        assertTrue(impactText.contains("Symbol \"NonExistentFunction\" not found in project 'shop'."), "Impact must report 404 on unindexed symbol")
+    }
+
+    @Test
+    fun testDumpMcpSchemasIntegration() {
+        val pid = getpid()
+        val tmpDir = "/tmp/atlas_dump_schemas_test_$pid"
+        PlatformFiles.mkdirs(tmpDir)
+        try {
+            val args = atlas.cli.CliArgs.parse(arrayOf("dump-mcp-schemas", "--out", tmpDir))
+            assertNotNull(args)
+            assertEquals("dump-mcp-schemas", args.command)
+            assertEquals(tmpDir, args.outPath)
+
+            val server = AtlasMcpServer(workspaceRoot = tmpDir, enableCodegraphTools = true)
+            try {
+                // Call dump-mcp-schemas logic
+                val exitCode = atlas.cli.AtlasCli.run(arrayOf("dump-mcp-schemas", "--out", tmpDir))
+                assertEquals(0, exitCode)
+
+                for (name in listOf("atlas_query", "atlas_audit", "atlas_outline", "figma_audit", "figma_scope", "codegraph_files")) {
+                    assertTrue(PlatformFiles.exists("$tmpDir/$name.json"), "Tool schema $name.json must exist in dumped directory")
+                    val content = PlatformFiles.readText("$tmpDir/$name.json")
+                    assertTrue(content.contains("\"name\": \"$name\""), "$name.json must define tool name")
+                    assertTrue(content.contains("\"parameters\""), "$name.json must define parameters")
+                }
+            } finally {
+                server.close()
+            }
+        } finally {
+            PlatformFiles.deleteRecursively(tmpDir)
+        }
+    }
 }
