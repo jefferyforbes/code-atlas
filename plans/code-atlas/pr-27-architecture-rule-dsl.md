@@ -6,7 +6,7 @@ contract:
   task: pr-27-architecture-rule-dsl
   objective: Implement declarative ArchitectureRules DSL for polyglot architectural testing and custom layer constraint evaluation.
 
-status: ready_for_review
+status: merged
 
 size:
   complexity: low

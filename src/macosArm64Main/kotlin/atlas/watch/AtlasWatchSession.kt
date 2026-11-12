@@ -79,7 +79,22 @@ class AtlasWatchSession(
         val diskFiles = discoverSourceFiles(root)
         val changedFiles = mutableListOf<String>()
 
-        // 1. Check for modified or new files
+        collectModifiedOrNewFiles(diskFiles, root, cachedFiles, changedFiles)
+        collectDeletedFiles(cachedFiles, root, changedFiles)
+
+        if (changedFiles.isEmpty()) {
+            return null
+        }
+
+        return computeGraphDelta(changedFiles)
+    }
+
+    private fun collectModifiedOrNewFiles(
+        diskFiles: List<String>,
+        root: String,
+        cachedFiles: Map<String, Pair<String, Double>>,
+        changedFiles: MutableList<String>
+    ) {
         for (diskFile in diskFiles) {
             val relPath = diskFile.removePrefix(root).removePrefix("/").replace('\\', '/')
             val cachedMeta = cachedFiles[relPath]
@@ -97,8 +112,13 @@ class AtlasWatchSession(
                 }
             }
         }
+    }
 
-        // 2. Check for deleted files
+    private fun collectDeletedFiles(
+        cachedFiles: Map<String, Pair<String, Double>>,
+        root: String,
+        changedFiles: MutableList<String>
+    ) {
         for (relPath in cachedFiles.keys) {
             if (relPath == "__endpoints__" || relPath.startsWith("__")) continue
             val fullPath = "$root/$relPath"
@@ -106,12 +126,9 @@ class AtlasWatchSession(
                 changedFiles.add(relPath)
             }
         }
+    }
 
-        if (changedFiles.isEmpty()) {
-            return null
-        }
-
-        // 3. Compute delta between pre-index and post-index graph state
+    private fun computeGraphDelta(changedFiles: List<String>): GraphDelta {
         val beforeNodes = client.store.listNodes(client.projectSlug).associateBy { it.nodeId }
 
         client.index(incremental = true)

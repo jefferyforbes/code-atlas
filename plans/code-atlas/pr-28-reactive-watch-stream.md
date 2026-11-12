@@ -6,7 +6,7 @@ contract:
   task: pr-28-reactive-watch-stream
   objective: Implement AtlasWatchSession providing filesystem polling, incremental graph reindexing, and GraphDelta change events for reactive daemon and tooling integration.
 
-status: ready_for_review
+status: merged
 
 size:
   complexity: low

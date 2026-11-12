@@ -73,7 +73,9 @@ class NativeSqliteDatabase(val path: String) {
                 throw RuntimeException("SQLite prepare error ($rc): $err in SQL:\n$sql")
             }
             val stmtPtr = ppStmt.value
-                ?: throw IllegalArgumentException("SQLite prepare error: empty or comment-only SQL statement: [$sql]")
+            if (stmtPtr == null) {
+                throw IllegalArgumentException("SQLite prepare error: empty or comment-only SQL statement: [$sql]")
+            }
             return NativeSqliteStatement(ptr, stmtPtr)
         }
     }

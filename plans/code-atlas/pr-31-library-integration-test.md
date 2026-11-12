@@ -6,7 +6,7 @@ contract:
   task: pr-31-library-integration-test
   objective: Add end-to-end integration test suite uniting Atlas facade, WorkspaceIndexer, GraphQueryEngine, ArchitectureRules, SarifExporter, GraphVisualExporter, and AtlasWatchSession against real disk workspaces.
 
-status: ready_for_review
+status: merged
 
 size:
   complexity: low

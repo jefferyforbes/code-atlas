@@ -43,13 +43,7 @@ class GraphQueryEngine(
         val edges = store.listEdges(projectSlug, edgeTypes)
         val allNodes = store.listNodes(projectSlug)
         val nodeIds = allNodes.map { it.nodeId }.toSet()
-
-        val adj = mutableMapOf<String, MutableList<String>>()
-        for (edge in edges) {
-            if (edge.sourceNodeId in nodeIds && edge.targetNodeId in nodeIds) {
-                adj.getOrPut(edge.sourceNodeId) { mutableListOf() }.add(edge.targetNodeId)
-            }
-        }
+        val adj = buildAdjacencyList(edges, nodeIds)
 
         val visited = mutableSetOf<String>()
         val path = mutableListOf<String>()
@@ -69,15 +63,7 @@ class GraphQueryEngine(
                 if (next !in visited) {
                     dfs(next)
                 } else if (next in inPath) {
-                    val cycleStartIndex = path.indexOf(next)
-                    if (cycleStartIndex >= 0) {
-                        val cycle = path.subList(cycleStartIndex, path.size).toList() + next
-                        val normalizedKey = normalizeCycleKey(cycle)
-                        if (normalizedKey !in normalizedCycles) {
-                            normalizedCycles.add(normalizedKey)
-                            detectedCycles.add(cycle)
-                        }
-                    }
+                    recordCycle(path, next, normalizedCycles, detectedCycles)
                 }
             }
 
@@ -94,6 +80,33 @@ class GraphQueryEngine(
         return detectedCycles
     }
 
+    private fun buildAdjacencyList(edges: List<GraphEdge>, nodeIds: Set<String>): Map<String, List<String>> {
+        val adj = mutableMapOf<String, MutableList<String>>()
+        for (edge in edges) {
+            if (edge.sourceNodeId in nodeIds && edge.targetNodeId in nodeIds) {
+                adj.getOrPut(edge.sourceNodeId) { mutableListOf() }.add(edge.targetNodeId)
+            }
+        }
+        return adj
+    }
+
+    private fun recordCycle(
+        path: List<String>,
+        next: String,
+        normalizedCycles: MutableSet<String>,
+        detectedCycles: MutableList<List<String>>
+    ) {
+        val cycleStartIndex = path.indexOf(next)
+        if (cycleStartIndex >= 0) {
+            val cycle = path.subList(cycleStartIndex, path.size).toList() + next
+            val normalizedKey = normalizeCycleKey(cycle)
+            if (normalizedKey !in normalizedCycles) {
+                normalizedCycles.add(normalizedKey)
+                detectedCycles.add(cycle)
+            }
+        }
+    }
+
     /**
      * Compute a topological ordering of all nodes using Kahn's algorithm.
      * Returns null if the graph contains cycles (not a DAG).
@@ -105,13 +118,7 @@ class GraphQueryEngine(
 
         val inDegree = nodeIds.associateWith { 0 }.toMutableMap()
         val adj = mutableMapOf<String, MutableList<String>>()
-
-        for (edge in edges) {
-            if (edge.sourceNodeId in nodeIds && edge.targetNodeId in nodeIds) {
-                adj.getOrPut(edge.sourceNodeId) { mutableListOf() }.add(edge.targetNodeId)
-                inDegree[edge.targetNodeId] = (inDegree[edge.targetNodeId] ?: 0) + 1
-            }
-        }
+        buildTopologicalAdjacency(edges, nodeIds, adj, inDegree)
 
         val queue = ArrayDeque<String>()
         for ((nodeId, deg) in inDegree) {
@@ -124,18 +131,40 @@ class GraphQueryEngine(
         while (queue.isNotEmpty()) {
             val u = queue.removeFirst()
             result.add(u)
-
-            val neighbors = adj[u] ?: emptyList()
-            for (v in neighbors) {
-                val currentDeg = (inDegree[v] ?: 1) - 1
-                inDegree[v] = currentDeg
-                if (currentDeg == 0) {
-                    queue.add(v)
-                }
-            }
+            processTopologicalNode(u, adj, inDegree, queue)
         }
 
         return if (result.size == nodeIds.size) result else null
+    }
+
+    private fun buildTopologicalAdjacency(
+        edges: List<GraphEdge>,
+        nodeIds: Set<String>,
+        adj: MutableMap<String, MutableList<String>>,
+        inDegree: MutableMap<String, Int>
+    ) {
+        for (edge in edges) {
+            if (edge.sourceNodeId in nodeIds && edge.targetNodeId in nodeIds) {
+                adj.getOrPut(edge.sourceNodeId) { mutableListOf() }.add(edge.targetNodeId)
+                inDegree[edge.targetNodeId] = (inDegree[edge.targetNodeId] ?: 0) + 1
+            }
+        }
+    }
+
+    private fun processTopologicalNode(
+        u: String,
+        adj: Map<String, List<String>>,
+        inDegree: MutableMap<String, Int>,
+        queue: ArrayDeque<String>
+    ) {
+        val neighbors = adj[u] ?: emptyList()
+        for (v in neighbors) {
+            val currentDeg = (inDegree[v] ?: 1) - 1
+            inDegree[v] = currentDeg
+            if (currentDeg == 0) {
+                queue.add(v)
+            }
+        }
     }
 
     private fun resolveEffectiveDegrees(): Pair<Map<String, Int>, Map<String, Int>> {
@@ -244,13 +273,7 @@ class GraphQueryEngine(
     ): GraphSlice {
         val resolvedSeed = store.getNode(projectSlug, seedTarget)?.nodeId ?: seedTarget
         val allEdges = store.listEdges(projectSlug)
-        val forwardAdj = mutableMapOf<String, MutableList<GraphEdge>>()
-        val backwardAdj = mutableMapOf<String, MutableList<GraphEdge>>()
-
-        for (edge in allEdges) {
-            forwardAdj.getOrPut(edge.sourceNodeId) { mutableListOf() }.add(edge)
-            backwardAdj.getOrPut(edge.targetNodeId) { mutableListOf() }.add(edge)
-        }
+        val (forwardAdj, backwardAdj) = buildSubgraphAdjacency(allEdges)
 
         val visitedNodes = mutableSetOf(resolvedSeed)
         val collectedEdges = mutableSetOf<GraphEdge>()
@@ -258,31 +281,7 @@ class GraphQueryEngine(
 
         for (step in 1..depth) {
             if (currentFrontier.isEmpty()) break
-            val nextFrontier = mutableSetOf<String>()
-
-            for (curr in currentFrontier) {
-                if (direction == TraversalDirection.Downstream || direction == TraversalDirection.Both) {
-                    val outEdges = forwardAdj[curr] ?: emptyList()
-                    for (e in outEdges) {
-                        collectedEdges.add(e)
-                        if (visitedNodes.add(e.targetNodeId)) {
-                            nextFrontier.add(e.targetNodeId)
-                        }
-                    }
-                }
-
-                if (direction == TraversalDirection.Upstream || direction == TraversalDirection.Both) {
-                    val inEdges = backwardAdj[curr] ?: emptyList()
-                    for (e in inEdges) {
-                        collectedEdges.add(e)
-                        if (visitedNodes.add(e.sourceNodeId)) {
-                            nextFrontier.add(e.sourceNodeId)
-                        }
-                    }
-                }
-            }
-
-            currentFrontier = nextFrontier
+            currentFrontier = stepFrontier(currentFrontier, direction, forwardAdj, backwardAdj, visitedNodes, collectedEdges)
         }
 
         val allNodesMap = store.listNodes(projectSlug).associateBy { it.nodeId }
@@ -294,6 +293,71 @@ class GraphQueryEngine(
             nodes = finalNodes,
             edges = collectedEdges.toList()
         )
+    }
+
+    private fun buildSubgraphAdjacency(allEdges: List<GraphEdge>): Pair<Map<String, List<GraphEdge>>, Map<String, List<GraphEdge>>> {
+        val forwardAdj = mutableMapOf<String, MutableList<GraphEdge>>()
+        val backwardAdj = mutableMapOf<String, MutableList<GraphEdge>>()
+        for (edge in allEdges) {
+            forwardAdj.getOrPut(edge.sourceNodeId) { mutableListOf() }.add(edge)
+            backwardAdj.getOrPut(edge.targetNodeId) { mutableListOf() }.add(edge)
+        }
+        return Pair(forwardAdj, backwardAdj)
+    }
+
+    private fun stepFrontier(
+        currentFrontier: Set<String>,
+        direction: TraversalDirection,
+        forwardAdj: Map<String, List<GraphEdge>>,
+        backwardAdj: Map<String, List<GraphEdge>>,
+        visitedNodes: MutableSet<String>,
+        collectedEdges: MutableSet<GraphEdge>
+    ): Set<String> {
+        val nextFrontier = mutableSetOf<String>()
+        val checkDownstream = direction == TraversalDirection.Downstream || direction == TraversalDirection.Both
+        val checkUpstream = direction == TraversalDirection.Upstream || direction == TraversalDirection.Both
+
+        for (curr in currentFrontier) {
+            if (checkDownstream) {
+                stepDownstream(curr, forwardAdj, visitedNodes, collectedEdges, nextFrontier)
+            }
+            if (checkUpstream) {
+                stepUpstream(curr, backwardAdj, visitedNodes, collectedEdges, nextFrontier)
+            }
+        }
+        return nextFrontier
+    }
+
+    private fun stepDownstream(
+        curr: String,
+        forwardAdj: Map<String, List<GraphEdge>>,
+        visitedNodes: MutableSet<String>,
+        collectedEdges: MutableSet<GraphEdge>,
+        nextFrontier: MutableSet<String>
+    ) {
+        val outEdges = forwardAdj[curr] ?: emptyList()
+        for (e in outEdges) {
+            collectedEdges.add(e)
+            if (visitedNodes.add(e.targetNodeId)) {
+                nextFrontier.add(e.targetNodeId)
+            }
+        }
+    }
+
+    private fun stepUpstream(
+        curr: String,
+        backwardAdj: Map<String, List<GraphEdge>>,
+        visitedNodes: MutableSet<String>,
+        collectedEdges: MutableSet<GraphEdge>,
+        nextFrontier: MutableSet<String>
+    ) {
+        val inEdges = backwardAdj[curr] ?: emptyList()
+        for (e in inEdges) {
+            collectedEdges.add(e)
+            if (visitedNodes.add(e.sourceNodeId)) {
+                nextFrontier.add(e.sourceNodeId)
+            }
+        }
     }
 
     private fun normalizeCycleKey(cycle: List<String>): String {

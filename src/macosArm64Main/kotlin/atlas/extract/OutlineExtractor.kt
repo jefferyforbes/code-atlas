@@ -1,6 +1,5 @@
 package atlas.extract
 
-import atlas.cli.AtlasCli
 import atlas.model.GraphNode
 import atlas.model.GraphReader
 import atlas.util.PlatformFiles
@@ -13,6 +12,7 @@ import atlas.util.PlatformFiles
 object OutlineExtractor {
 
     const val TRUNCATION_INDICATOR = "... [truncated to <=400B]"
+    const val SUMMARY_CEILING_BYTES = 400
 
     data class OutlineResult(
         val text: String,
@@ -31,14 +31,14 @@ object OutlineExtractor {
     ): OutlineResult {
         val clean = targetFile.trim().trim('\'', '"')
         if (clean.isEmpty()) {
-            val errText = clampUtf8("Error: File parameter is required.", AtlasCli.SUMMARY_CEILING_BYTES)
+            val errText = clampUtf8("Error: File parameter is required.", SUMMARY_CEILING_BYTES)
             return OutlineResult(
                 text = errText,
                 file = "",
                 symbolsCount = 0,
                 source = "none",
                 byteSize = errText.encodeToByteArray().size,
-                error = clampUtf8("Missing required file parameter for outline", AtlasCli.SUMMARY_CEILING_BYTES)
+                error = clampUtf8("Missing required file parameter for outline", SUMMARY_CEILING_BYTES)
             )
         }
 
@@ -49,9 +49,9 @@ object OutlineExtractor {
         // 1. Markdown outline: ALWAYS route .md and .markdown to fence-aware disk extractor
         if (ext == "md" || ext == "markdown") {
             val fullDiskPath = resolveDiskPath(clean, relPath, effectiveWorkspace)
-            if (!PlatformFiles.exists(fullDiskPath)) {
-                val errText = clampUtf8("Error: File '$clean' not found.", AtlasCli.SUMMARY_CEILING_BYTES)
-                val errDetail = clampUtf8("File not found: $clean", AtlasCli.SUMMARY_CEILING_BYTES)
+            if (fullDiskPath == null || !PlatformFiles.exists(fullDiskPath)) {
+                val errText = clampUtf8("Error: File '$clean' not found.", SUMMARY_CEILING_BYTES)
+                val errDetail = clampUtf8("File not found: $clean", SUMMARY_CEILING_BYTES)
                 return OutlineResult(
                     text = errText,
                     file = relPath,
@@ -93,9 +93,9 @@ object OutlineExtractor {
         // 3. Physical disk check for unindexed or dirty polyglot code files
         val fullDiskPath = resolveDiskPath(clean, relPath, effectiveWorkspace)
 
-        if (!PlatformFiles.exists(fullDiskPath)) {
-            val errText = clampUtf8("Error: File '$clean' not found.", AtlasCli.SUMMARY_CEILING_BYTES)
-            val errDetail = clampUtf8("File not found: $clean", AtlasCli.SUMMARY_CEILING_BYTES)
+        if (fullDiskPath == null || !PlatformFiles.exists(fullDiskPath)) {
+            val errText = clampUtf8("Error: File '$clean' not found.", SUMMARY_CEILING_BYTES)
+            val errDetail = clampUtf8("File not found: $clean", SUMMARY_CEILING_BYTES)
             return OutlineResult(
                 text = errText,
                 file = relPath,
@@ -127,7 +127,7 @@ object OutlineExtractor {
     fun formatFromNodes(relPath: String, nodes: List<GraphNode>): String {
         val header = "### Outline: $relPath\n"
         if (nodes.isEmpty()) {
-            return clampUtf8("${header}(no symbols found)", AtlasCli.SUMMARY_CEILING_BYTES)
+            return clampUtf8("${header}(no symbols found)", SUMMARY_CEILING_BYTES)
         }
 
         val lines = nodes.map { node ->
@@ -147,7 +147,7 @@ object OutlineExtractor {
     private fun formatMarkdownHeadings(relPath: String, headings: List<MarkdownHeading>): String {
         val header = "### Outline: $relPath\n"
         if (headings.isEmpty()) {
-            return clampUtf8("${header}(no headings found)", AtlasCli.SUMMARY_CEILING_BYTES)
+            return clampUtf8("${header}(no headings found)", SUMMARY_CEILING_BYTES)
         }
 
         val lines = headings.map { h ->
@@ -161,7 +161,7 @@ object OutlineExtractor {
     private fun enforceBudget(
         header: String,
         lines: List<String>,
-        ceilingBytes: Int = AtlasCli.SUMMARY_CEILING_BYTES
+        ceilingBytes: Int = SUMMARY_CEILING_BYTES
     ): String {
         val indicator = TRUNCATION_INDICATOR
         val indicatorWithNewline = "\n$indicator"
@@ -191,9 +191,9 @@ object OutlineExtractor {
         return clampUtf8(result, ceilingBytes)
     }
 
-    internal fun clampUtf8(text: String, maxBytes: Int = AtlasCli.SUMMARY_CEILING_BYTES): String {
+    internal fun clampUtf8(text: String, maxBytes: Int = SUMMARY_CEILING_BYTES): String {
         val bytes = text.encodeToByteArray()
-        val targetMax = if (maxBytes == AtlasCli.SUMMARY_CEILING_BYTES) maxBytes - 1 else maxBytes
+        val targetMax = if (maxBytes == SUMMARY_CEILING_BYTES) maxBytes - 1 else maxBytes
         if (bytes.size <= targetMax) return text
         val indicator = TRUNCATION_INDICATOR
         val indBytes = indicator.encodeToByteArray()
@@ -203,13 +203,22 @@ object OutlineExtractor {
         return bytes.copyOfRange(0, end).decodeToString() + indicator
     }
 
-    private fun resolveDiskPath(clean: String, relPath: String, effectiveWorkspace: String): String =
-        when {
+    private fun resolveDiskPath(clean: String, relPath: String, effectiveWorkspace: String): String? {
+        val candidate = when {
             clean.startsWith("/") && PlatformFiles.exists(clean) -> clean
             effectiveWorkspace.isEmpty() -> relPath
             effectiveWorkspace.endsWith("/") -> "$effectiveWorkspace$relPath"
             else -> "$effectiveWorkspace/$relPath"
         }
+        if (effectiveWorkspace.isNotEmpty()) {
+            val rootCanon = PlatformFiles.canonicalPath(effectiveWorkspace)
+            val candidateCanon = PlatformFiles.canonicalPath(candidate)
+            if (!PlatformFiles.isPathInsideRoot(rootCanon, candidateCanon)) {
+                return null
+            }
+        }
+        return candidate
+    }
 
     private fun resolveRelativePath(
         store: GraphReader,

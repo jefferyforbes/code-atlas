@@ -6,7 +6,7 @@ contract:
   task: pr-26-graph-query-dsl
   objective: Provide GraphQueryEngine with fluent topological traversal, circular dependency cycle detection, Kahn topological sort, island/root/leaf node identification, and all-paths search.
 
-status: ready_for_review
+status: merged
 
 size:
   complexity: low

@@ -6,7 +6,7 @@ contract:
   task: pr-25-sarif-and-visual-exporters
   objective: Export Code Atlas audit findings to standard SARIF 2.1.0 JSON format for GitHub Code Scanning and CI pipelines, and export graph topologies to standard visual representations (Mermaid flowchart, Graphviz DOT, Cytoscape JSON).
 
-status: ready_for_review
+status: merged
 
 size:
   complexity: low

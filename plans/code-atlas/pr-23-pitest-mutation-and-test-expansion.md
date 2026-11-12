@@ -6,7 +6,7 @@ contract:
   task: pr-23-pitest-mutation-and-test-expansion
   objective: Expand the Pitest-equivalent mutation testing verification suite across polyglot boundaries, transaction rollback, database lifecycle guards, and spike hypothesis analysis.
 
-status: ready_for_review
+status: merged
 
 size:
   complexity: low

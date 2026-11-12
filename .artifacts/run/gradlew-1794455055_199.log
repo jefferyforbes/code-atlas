@@ -1,0 +1,34 @@
+> Task :kmpPartiallyResolvedDependenciesChecker
+> Task :checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :cinteropSqlite3MacosArm64 UP-TO-DATE
+> Task :downloadKotlinNativeDistribution UP-TO-DATE
+> Task :compileKotlinMacosArm64 UP-TO-DATE
+> Task :macosArm64ProcessResources NO-SOURCE
+> Task :macosArm64MainKlibrary UP-TO-DATE
+> Task :compileTestKotlinMacosArm64 UP-TO-DATE
+> Task :validateLocalSwiftPMDependencies
+> Task :computeLocalPackageDependencyInputFiles UP-TO-DATE
+> Task :fingerprintSyntheticPackage UP-TO-DATE
+> Task :generateSyntheticLinkageSwiftPMImportProjectForCinteropsAndLdDump SKIPPED
+> Task :serializeSwiftPMDependenciesMetadataForLockFiles UP-TO-DATE
+> Task :generateUmbrellaPackageIdentifierBasedResolutionForDefault SKIPPED
+> Task :fetchUmbrellaPackageIdentifierForDefault SKIPPED
+> Task :syncPersistedPackageResolvedToSynthetic SKIPPED
+> Task :fetchSyntheticImportProjectPackages SKIPPED
+> Task :fingerprintXcodebuildMacosx UP-TO-DATE
+> Task :dumpXcodebuildArgsMacosx SKIPPED
+> Task :convertSyntheticImportProjectIntoDefFileMacosx UP-TO-DATE
+> Task :linkDebugTestMacosArm64 UP-TO-DATE
+> Task :macosArm64Test UP-TO-DATE
+
+[Incubating] Problems report is available at: file:///Users/jefferyforbes/Development/code-atlas/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.8.2/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 2s
+13 actionable tasks: 2 executed, 11 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.8.2/userguide/configuration_cache_enabling.html

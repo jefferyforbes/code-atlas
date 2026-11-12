@@ -6,7 +6,7 @@ contract:
   task: pr-29-native-library-packaging
   objective: Configure native library packaging in build.gradle.kts (Apple Framework AtlasKit and C dynamic library libatlas) and provide AtlasNativeInterop bridge for Swift, Objective-C, and native C consumers.
 
-status: ready_for_review
+status: merged
 
 size:
   complexity: low

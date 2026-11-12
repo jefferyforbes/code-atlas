@@ -6,7 +6,7 @@ contract:
   task: pr-30-bugfixes-and-mutation-tests
   objective: Fix subtle graph topology degree derivation bugs, DOT blank node labels, SARIF L-prefix line spans, sub-second watch mtime hashing, and expand Pitest-equivalent mutation test patterns 9 through 13.
 
-status: ready_for_review
+status: merged
 
 size:
   complexity: low

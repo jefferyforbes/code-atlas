@@ -1,0 +1,53 @@
+> Task :kmpPartiallyResolvedDependenciesChecker
+> Task :checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :cinteropSqlite3MacosArm64 UP-TO-DATE
+> Task :downloadKotlinNativeDistribution UP-TO-DATE
+> Task :compileKotlinMacosArm64 UP-TO-DATE
+> Task :macosArm64ProcessResources NO-SOURCE
+> Task :macosArm64MainKlibrary UP-TO-DATE
+> Task :compileTestKotlinMacosArm64 UP-TO-DATE
+> Task :validateLocalSwiftPMDependencies
+> Task :computeLocalPackageDependencyInputFiles UP-TO-DATE
+> Task :fingerprintSyntheticPackage UP-TO-DATE
+> Task :generateSyntheticLinkageSwiftPMImportProjectForCinteropsAndLdDump SKIPPED
+> Task :serializeSwiftPMDependenciesMetadataForLockFiles UP-TO-DATE
+> Task :generateUmbrellaPackageIdentifierBasedResolutionForDefault SKIPPED
+> Task :fetchUmbrellaPackageIdentifierForDefault SKIPPED
+> Task :syncPersistedPackageResolvedToSynthetic SKIPPED
+> Task :fetchSyntheticImportProjectPackages SKIPPED
+> Task :fingerprintXcodebuildMacosx UP-TO-DATE
+> Task :dumpXcodebuildArgsMacosx SKIPPED
+> Task :convertSyntheticImportProjectIntoDefFileMacosx UP-TO-DATE
+> Task :linkDebugTestMacosArm64 UP-TO-DATE
+> Task :macosArm64Test UP-TO-DATE
+> Task :allTests
+> Task :linkReleaseExecutableMacosArm64
+
+> Task :atlasIndex
+[Atlas] project=code-atlas files=200 (indexed=0, skipped=200) nodes=2843 edges=15447
+
+> Task :atlasAudit FAILED
+[Audit] project=code-atlas passed=false boost003_violations=0 layer_inversions=44 plan_3d_collisions=36 skill_violations=0 complexity_violations=23 parameter_advisories=134 description_suggestions=0
+
+[Incubating] Problems report is available at: file:///Users/jefferyforbes/Development/code-atlas/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':atlasAudit' (registered in build file 'build.gradle.kts').
+> Process 'command '/Users/jefferyforbes/Development/code-atlas/build/bin/macosArm64/releaseExecutable/atlas.kexe'' finished with non-zero exit value 1
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.8.2/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD FAILED in 35s
+17 actionable tasks: 6 executed, 11 up-to-date

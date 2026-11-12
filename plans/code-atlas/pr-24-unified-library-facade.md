@@ -6,7 +6,7 @@ contract:
   task: pr-24-unified-library-facade
   objective: Implement high-level Atlas and AtlasClient library facades providing clean programmatic access to in-memory, persistent, and ephemeral graph stores, workspace indexing, architectural audits, and graph queries.
 
-status: ready_for_review
+status: merged
 
 size:
   complexity: low

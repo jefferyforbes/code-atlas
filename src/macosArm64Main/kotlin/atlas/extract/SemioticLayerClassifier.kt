@@ -72,7 +72,9 @@ class SemioticLayerClassifier {
                 return Triple("pragmatic", "presentation", false)
             }
 
-            if ("/engine/" in checkPath) {
+            if ("/engine/" in checkPath ||
+                listOf("/interop/", "/watch/", "/rule/", "/query/", "atlas.kt", "atlasclient.kt").any { it in normPath }
+            ) {
                 return Triple("semantic", "application", false)
             }
 

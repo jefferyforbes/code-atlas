@@ -39,41 +39,65 @@ object GraphVisualExporter {
         }
 
         if (clusterBy != null && nodes.isNotEmpty()) {
-            val groups = when (clusterBy) {
-                "layer" -> nodes.groupBy { it.archLayer.ifBlank { "unassigned" } }
-                else -> nodes.groupBy { it.moduleId.ifBlank { "root" } }
-            }
-
-            for ((groupName, groupNodes) in groups) {
-                val safeGroupName = sanitizeIdentifier(groupName)
-                sb.append("    subgraph ").append(safeGroupName).append(" [\"").append(escapeQuotes(groupName)).append("\"]\n")
-                for (node in groupNodes) {
-                    val safeId = nodeIdMap[node.nodeId] ?: continue
-                    val label = escapeQuotes(node.name.ifBlank { node.nodeId })
-                    sb.append("        ").append(safeId).append("[\"").append(label).append("\"]\n")
-                }
-                sb.append("    end\n")
-            }
+            appendClusteredNodes(sb, nodes, clusterBy, nodeIdMap)
         } else {
-            for (node in nodes) {
-                val safeId = nodeIdMap[node.nodeId] ?: continue
-                val label = escapeQuotes(node.name.ifBlank { node.nodeId })
-                sb.append("    ").append(safeId).append("[\"").append(label).append("\"]\n")
-            }
+            appendUnclusteredNodes(sb, nodes, nodeIdMap)
         }
 
+        appendMermaidEdges(sb, edges, nodeIdMap)
+        return sb.toString()
+    }
+
+    private fun appendClusteredNodes(
+        sb: StringBuilder,
+        nodes: List<GraphNode>,
+        clusterBy: String,
+        nodeIdMap: Map<String, String>
+    ) {
+        val groups = when (clusterBy) {
+            "layer" -> nodes.groupBy { it.archLayer.ifBlank { "unassigned" } }
+            else -> nodes.groupBy { it.moduleId.ifBlank { "root" } }
+        }
+
+        for ((groupName, groupNodes) in groups) {
+            val safeGroupName = sanitizeIdentifier(groupName)
+            sb.append("    subgraph ").append(safeGroupName).append(" [\"").append(escapeQuotes(groupName)).append("\"]\n")
+            for (node in groupNodes) {
+                val safeId = nodeIdMap[node.nodeId] ?: continue
+                val label = escapeQuotes(node.name.ifBlank { node.nodeId })
+                sb.append("        ").append(safeId).append("[\"").append(label).append("\"]\n")
+            }
+            sb.append("    end\n")
+        }
+    }
+
+    private fun appendUnclusteredNodes(
+        sb: StringBuilder,
+        nodes: List<GraphNode>,
+        nodeIdMap: Map<String, String>
+    ) {
+        for (node in nodes) {
+            val safeId = nodeIdMap[node.nodeId] ?: continue
+            val label = escapeQuotes(node.name.ifBlank { node.nodeId })
+            sb.append("    ").append(safeId).append("[\"").append(label).append("\"]\n")
+        }
+    }
+
+    private fun appendMermaidEdges(
+        sb: StringBuilder,
+        edges: List<GraphEdge>,
+        nodeIdMap: Map<String, String>
+    ) {
         for (edge in edges) {
             val src = nodeIdMap[edge.sourceNodeId] ?: continue
             val tgt = nodeIdMap[edge.targetNodeId] ?: continue
-            val edgeLabel = escapeQuotes(edge.edgeType)
+            val edgeLabel = sanitizeMermaidEdgeLabel(edge.edgeType)
             if (edgeLabel.isNotBlank()) {
                 sb.append("    ").append(src).append(" -->|").append(edgeLabel).append("| ").append(tgt).append("\n")
             } else {
                 sb.append("    ").append(src).append(" --> ").append(tgt).append("\n")
             }
         }
-
-        return sb.toString()
     }
 
     /**
@@ -157,6 +181,13 @@ object GraphVisualExporter {
     }
 
     private fun escapeQuotes(raw: String): String {
-        return raw.replace("\"", "\\\"").replace("\n", " ")
+        return raw.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ")
+    }
+
+    private fun sanitizeMermaidEdgeLabel(raw: String): String {
+        return escapeQuotes(raw)
+            .replace("|", "/")
+            .replace("[", "(")
+            .replace("]", ")")
     }
 }
