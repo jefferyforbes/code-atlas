@@ -43,7 +43,8 @@ class CliOutputFormatter {
             return bytes.copyOfRange(0, end).decodeToString() + "..."
         }
 
-        fun loadSpilledData(payload: JsonObject): JsonObject {
+        fun loadSpilledData(payload: JsonObject, forceExpand: Boolean = true): JsonObject {
+            if (!forceExpand) return payload
             val isSpillover = payload["spillover"]?.jsonPrimitive?.booleanOrNull ?: false
             val uri = payload["artifact_uri"]?.jsonPrimitive?.contentOrNull
             if (isSpillover && uri != null && PlatformFiles.exists(uri)) {

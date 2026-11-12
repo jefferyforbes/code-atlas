@@ -358,8 +358,9 @@ class AtlasCli {
                 putJsonArray("targets") { seedList.forEach { add(it) } }
             }
             val res = server.callTool("atlas_audit", toolArgs)
-            val data = loadSpilledData(res)
-            val text = CliOutputFormatter.formatSynthesizeScopeOutput(data, args.project, seedList, args.isJson)
+            val data = loadSpilledData(res, forceExpand = true)
+            val outputData = if (args.isJson && !args.expandSpillover && (res["spillover"]?.jsonPrimitive?.booleanOrNull == true)) res else data
+            val text = CliOutputFormatter.formatSynthesizeScopeOutput(outputData, args.project, seedList, args.isJson)
             println(truncateSummary(text, args.isJson))
             return 0
         }
@@ -505,9 +506,11 @@ class AtlasCli {
                 dSuggestions = dSuggestions,
                 pAdvisories = pAdvisories
             )
+            val isSpillover = res["spillover"]?.jsonPrimitive?.booleanOrNull == true
+            val outputData = if (args.isJson && !args.expandSpillover && isSpillover) res else data
             val text = CliOutputFormatter.formatAuditArchitectureSummary(
                 project = args.project,
-                data = data,
+                data = outputData,
                 counts = counts,
                 passed = passed,
                 isJson = args.isJson
@@ -684,7 +687,8 @@ class AtlasCli {
         private fun runStandardQuery(server: AtlasMcpServer, args: CliArgs): Int {
             val toolArgs = buildStandardQueryArgs(args)
             val res = server.callTool("atlas_query", toolArgs)
-            val data = if (args.isJson) loadSpilledData(res) else res
+            val isSpillover = res["spillover"]?.jsonPrimitive?.booleanOrNull == true
+            val data = if (args.isJson && (!isSpillover || args.expandSpillover)) loadSpilledData(res, forceExpand = true) else res
             printStandardQueryResult(data, args.isJson)
             return 0
         }
@@ -718,8 +722,8 @@ class AtlasCli {
             return sb.toString()
         }
 
-        internal fun loadSpilledData(payload: JsonObject): JsonObject =
-            CliOutputFormatter.loadSpilledData(payload)
+        internal fun loadSpilledData(payload: JsonObject, forceExpand: Boolean = true): JsonObject =
+            CliOutputFormatter.loadSpilledData(payload, forceExpand)
 
         fun truncateSummary(text: String, isJson: Boolean): String =
             CliOutputFormatter.truncateSummary(text, isJson, SUMMARY_CEILING_BYTES)

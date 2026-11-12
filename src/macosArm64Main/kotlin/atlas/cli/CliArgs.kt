@@ -63,7 +63,8 @@ data class CliArgs(
     var hypothesisArg: String? = null,
     var forbiddenLayerArg: String? = null,
     var maxFilesArg: Int? = null,
-    var outPath: String? = null
+    var outPath: String? = null,
+    var expandSpillover: Boolean = false
 ) {
     companion object {
         private val GENERAL_COMMANDS = setOf(
@@ -201,6 +202,7 @@ data class CliArgs(
             "--stdin" -> { args.isStdin = true; true }
             "--json" -> { args.isJson = true; true }
             "--summary" -> { args.isJson = false; true }
+            "--expand-spillover" -> { args.expandSpillover = true; true }
             "--include-source" -> { args.includeSource = true; true }
             "--force" -> { args.forceIndex = true; args.forceFlag = true; true }
             else -> false

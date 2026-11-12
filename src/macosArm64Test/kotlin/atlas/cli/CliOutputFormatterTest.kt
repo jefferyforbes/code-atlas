@@ -100,4 +100,19 @@ class CliOutputFormatterTest {
         val text = CliOutputFormatter.formatAuditArchitectureSummary("demo", buildJsonObject {}, counts, passed = false, isJson = false)
         assertEquals("[Audit] project=demo passed=false boost003_violations=0 layer_inversions=0 plan_3d_collisions=0 skill_violations=0 complexity_violations=1 parameter_advisories=5 description_suggestions=0", text)
     }
+
+    @Test
+    fun `load spilled data respects forceExpand flag`() {
+        val spilledPayload = buildJsonObject {
+            put("spillover", true)
+            put("artifact_uri", "/tmp/non_existent_file.json")
+            put("summary", "Spillover pointer")
+        }
+        val unexpanded = CliOutputFormatter.loadSpilledData(spilledPayload, forceExpand = false)
+        assertEquals(spilledPayload, unexpanded)
+
+        val args = CliArgs.parse(arrayOf("audit", "--expand-spillover"))
+        kotlin.test.assertNotNull(args)
+        assertTrue(args.expandSpillover)
+    }
 }
