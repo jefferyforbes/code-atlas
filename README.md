@@ -64,16 +64,41 @@ Measured on Apple Silicon M-Series (macOS 15 Sequoia):
 mkdir -p ~/.local/bin
 curl -sSL https://github.com/jefferyforbes/code-atlas/releases/latest/download/atlas-macos-arm64.tar.gz | tar -xz -C ~/.local/bin/
 chmod +x ~/.local/bin/atlas
+codesign -s - -f ~/.local/bin/atlas
 
-# 2. Verify installation
+# 2. Add ~/.local/bin to PATH (if not already present)
+export PATH="$HOME/.local/bin:$PATH"
+
+# 3. Verify installation
 atlas --version
 ```
 
-*Or build from source:*
+### AI Agent Installation & Environment Setup
+
+For autonomous coding agents (Google Antigravity, Claude Code, Cursor, Aider, custom agent loops, and background subagents), install Atlas non-interactively using this zero-dependency one-liner:
+
+```bash
+mkdir -p ~/.local/bin && \
+curl -sSL https://github.com/jefferyforbes/code-atlas/releases/latest/download/atlas-macos-arm64.tar.gz | tar -xz -C ~/.local/bin/ && \
+chmod +x ~/.local/bin/atlas && \
+codesign -s - -f ~/.local/bin/atlas && \
+export PATH="$HOME/.local/bin:$PATH" && \
+atlas --version
+```
+
+> [!TIP]
+> **Subagent & Sandboxed CLI Invocations**:
+> When launching subagents or background workers in isolated workspaces, invoke the binary directly via `~/.local/bin/atlas` with `--project <slug>` and `--workspace <path>`:
+> ```bash
+> ~/.local/bin/atlas outline <file>
+> ~/.local/bin/atlas query --action callers --target "MySymbol" --project <slug> --workspace <path>
+> ```
+
+*Or build and install from source:*
 ```bash
 git clone https://github.com/jefferyforbes/code-atlas.git && cd code-atlas
-./gradlew macosArm64Test
-./gradlew installToLocalBin
+./gradlew macosArm64Test --no-daemon
+./gradlew installToLocalBin --no-daemon
 ```
 
 ### 30-Second Workflow
@@ -96,6 +121,39 @@ atlas audit --project my-app
 # 5. Autonomously remediate violations
 atlas fix --project my-app --apply
 ```
+
+---
+
+## AI Agent Operating Invariants & Best Practices
+
+When operating as or configuring autonomous engineering agents, adhere to these invariants to maintain maximum reasoning token economy and avoid workspace drift:
+
+1. **Two-Tier AST Inspection (AST-First Grounding)**:
+   - **Tier 1 (AST Outlines)**: Always run `atlas outline <file>` or `atlas_outline` first to inspect the structural declaration skeleton, line spans, and symbol hierarchy. Unbounded file reads $> 100$ lines waste context and are strictly discouraged.
+   - **Tier 2 (Targeted Line Slices)**: Read only bounded line ranges discovered via Atlas (`StartLine`/`EndLine` $\le 100$ lines). Fall back to regex `grep`/`rg` only for non-code assets or unindexed text files.
+
+2. **Strict Token Economy ($\le 400\text{B}$ Output Ceiling)**:
+   - Atlas CLI defaults to ultra-compact summaries ($\le 400$ bytes) specifically engineered for LLM prompt context windows.
+   - Use `--json` only when programmatic, machine-parsed evaluation is required.
+   - Large graph responses automatically spill over to `.atlas/artifacts/` or `~/Library/Caches/atlas/` when exceeding 32 KB, returning compact references.
+
+3. **Pre-Execution 3D Concurrency Scopes**:
+   - Before dispatching parallel subagents or background workers, synthesize strict isolation boundaries:
+     ```bash
+     atlas synthesize-scope --target "TargetSymbol"
+     ```
+   - Enforce the 3 dimensions of isolation:
+     - **Dimension 1 (Files)**: Explicit file path globs assigned to each worker.
+     - **Dimension 2 (Modules)**: Module boundaries respected with no cross-module contamination.
+     - **Dimension 3 (Layers)**: Strict Clean Architecture dependency flow (Domain $\leftarrow$ Data $\leftarrow$ Presentation).
+
+4. **Continuous Quality Gate Verification**:
+   - Verify code cleanliness and the Single Declaration Principle (`BOOST-003`) prior to committing:
+     ```bash
+     atlas audit --project <slug>
+     atlas audit --complexity --threshold 10
+     ```
+   - Automatically remediate file-splitting and layer violations with `atlas fix --apply`.
 
 ---
 
